@@ -58,25 +58,26 @@ pub struct Catalog {
     pub source: String,
 }
 
-/// Root `repository.json` in a mod repo: metadata + the list of mod folders.
+/// Root `repository.json` in a mod repo: metadata + the mods it indexes.
 #[derive(Debug, Deserialize)]
 struct RepoIndex {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
-    mods: Vec<String>,
+    mods: Vec<RepoMod>,
 }
 
-/// Per-mod `mods/<slug>/modkit.json`.
+/// One mod entry inside `repository.json`'s `mods` array (objects, not strings).
 #[derive(Debug, Deserialize)]
-struct ModConfig {
-    #[serde(default)]
-    slug: Option<String>,
+struct RepoMod {
+    slug: String,
     name: String,
     #[serde(default)]
     description: String,
-    #[serde(default)]
+    /// Mod kind, e.g. `"asi"` or `"wad"`.
+    #[serde(default, rename = "type")]
     kind: Option<String>,
+    /// Release asset filenames this mod deploys.
     #[serde(default)]
     assets: Vec<String>,
     #[serde(default)]
@@ -172,33 +173,28 @@ async fn scan_repo(client: &reqwest::Client, src: &RepoSource) -> Vec<CatalogMod
             break;
         }
     }
+    // branch is resolved above (kept for any future per-mod fetches).
+    let _ = branch;
     let index: RepoIndex = match index_txt.and_then(|t| serde_json::from_str(&t).ok()) {
         Some(i) => i,
         None => return vec![whole_repo_fallback(src)],
     };
     let repo_name = index.name.unwrap_or_else(|| src.name.clone());
 
-    let mut mods = Vec::new();
-    for dir in &index.mods {
-        let path = format!("mods/{dir}/modkit.json");
-        let cfg: ModConfig = match fetch_raw(client, &owner_repo, branch, &path)
-            .await
-            .and_then(|t| serde_json::from_str(&t).ok())
-        {
-            Some(c) => c,
-            None => continue, // skip a mod we can't read; don't fail the whole repo
-        };
-        mods.push(CatalogMod {
+    let mods: Vec<CatalogMod> = index
+        .mods
+        .into_iter()
+        .map(|m| CatalogMod {
             repository: src.repository.clone(),
             repo_name: repo_name.clone(),
-            slug: cfg.slug.unwrap_or_else(|| dir.clone()),
-            name: cfg.name,
-            description: cfg.description,
-            kind: cfg.kind.unwrap_or_else(|| "asi".to_string()),
-            assets: cfg.assets,
-            version: cfg.version,
-        });
-    }
+            slug: m.slug,
+            name: m.name,
+            description: m.description,
+            kind: m.kind.unwrap_or_else(|| "asi".to_string()),
+            assets: m.assets,
+            version: m.version,
+        })
+        .collect();
 
     if mods.is_empty() {
         vec![whole_repo_fallback(src)]

@@ -29,6 +29,13 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/** The `.asi` asset basenames a catalog mod deploys. */
+function catalogAsiNames(item: CatalogMod): string[] {
+  return item.assets
+    .filter((a) => a.toLowerCase().endsWith(".asi"))
+    .map((a) => a.split(/[\\/]/).pop() ?? a);
+}
+
 interface ProjectState {
   // Base game
   gamePath: string | null;
@@ -111,6 +118,37 @@ export const useProjectStore = defineStore("project", {
           m.asiFiles.some((f) => (f.split(/[\\/]/).pop() ?? f) === name)
         );
     },
+    /** The Library mod backing a catalog mod, matched by `.asi` filename. */
+    catalogLibMod(state) {
+      return (item: CatalogMod): AsiMod | undefined => {
+        const asis = catalogAsiNames(item);
+        return state.asiMods.find((m) =>
+          m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
+        );
+      };
+    },
+    /**
+     * Lifecycle state of a catalog mod, reconciled against the game folder:
+     *   "deployed"   — its .asi(s) are present in the game install
+     *   "enabled"    — downloaded to the Library and enabled (not yet deployed)
+     *   "downloaded" — in the Library but disabled
+     *   "none"       — not downloaded
+     */
+    catalogModState(state) {
+      return (item: CatalogMod): "none" | "downloaded" | "enabled" | "deployed" => {
+        const asis = catalogAsiNames(item);
+        if (asis.length === 0) return "none";
+        const deployed = new Set(
+          (state.gameInfo?.deployed_asi ?? []).map((a) => a.name)
+        );
+        if (asis.every((a) => deployed.has(a))) return "deployed";
+        const lib = state.asiMods.find((m) =>
+          m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
+        );
+        if (lib) return state.enabled[lib.id] !== false ? "enabled" : "downloaded";
+        return "none";
+      };
+    },
   },
 
   actions: {
@@ -170,8 +208,11 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /** Enable a catalog mod: stage its release asset(s), then register it by kind. */
-    async installFromCatalog(item: CatalogMod): Promise<InstallResult> {
+    /**
+     * Download a catalog mod into the local Library — stages its release
+     * asset(s) but leaves it DISABLED. Enabling and deploying are separate steps.
+     */
+    async downloadFromCatalog(item: CatalogMod): Promise<InstallResult> {
       this.busy = true;
       this.error = null;
       try {
@@ -191,7 +232,8 @@ export const useProjectStore = defineStore("project", {
               modRoot: res.mod_root,
               asiFiles: res.asi_files,
             });
-            this.enabled[id] = true;
+            // Downloaded != enabled. The user enables it explicitly.
+            this.enabled[id] = false;
           }
         }
         return res;
@@ -327,6 +369,11 @@ export const useProjectStore = defineStore("project", {
     toggleMod(id: string) {
       this.enabled[id] = this.enabled[id] === false;
       void this.refreshConflicts();
+    },
+
+    /** Set a mod's enabled state explicitly (intent; does not deploy). */
+    setModEnabled(id: string, value: boolean) {
+      this.enabled[id] = value;
     },
 
     /** Move a mod up (higher priority) or down in the load order. */
