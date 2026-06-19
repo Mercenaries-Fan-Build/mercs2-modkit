@@ -1,0 +1,163 @@
+<script setup lang="ts">
+import { storeToRefs } from "pinia";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useProjectStore } from "../stores/project";
+
+const store = useProjectStore();
+const { gameInfo, gamePath, busy } = storeToRefs(store);
+
+async function chooseFolder() {
+  const dir = await open({
+    directory: true,
+    title: "Select your Mercenaries 2 install folder",
+  });
+  if (typeof dir === "string") {
+    await store.setGameFolder(dir).catch(() => {});
+  }
+}
+
+function tail(p: string, n = 48): string {
+  return p.length > n ? "…" + p.slice(p.length - n) : p;
+}
+
+function versionTone(v: string): string {
+  if (v === "v1.1") return "bg-emerald-500/15 text-emerald-300";
+  if (v === "v1.0") return "bg-sky-500/15 text-sky-300";
+  return "bg-zinc-700/40 text-zinc-400";
+}
+</script>
+
+<template>
+  <header
+    class="flex items-center gap-4 border-b border-zinc-800 bg-zinc-900/80 px-6 py-3 backdrop-blur"
+  >
+    <!-- No game set -->
+    <template v-if="!gameInfo">
+      <div class="flex-1">
+        <p class="text-sm font-medium text-zinc-200">No game folder set</p>
+        <p class="text-xs text-zinc-500">
+          Point the modkit at your Mercenaries 2 install to enable building &amp;
+          deploying.
+        </p>
+      </div>
+      <button
+        class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+        :disabled="busy"
+        @click="chooseFolder"
+      >
+        Set game folder
+      </button>
+    </template>
+
+    <!-- Game detected -->
+    <template v-else>
+      <div class="flex items-center gap-3">
+        <div
+          class="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-800 text-xs font-bold text-zinc-400"
+        >
+          M2
+        </div>
+        <div>
+          <p class="text-sm font-medium text-zinc-100">Mercenaries 2</p>
+          <p class="font-mono text-[11px] text-zinc-500" :title="gamePath ?? ''">
+            {{ tail(gameInfo.root) }}
+          </p>
+        </div>
+      </div>
+
+      <div class="flex flex-1 flex-wrap items-center gap-1.5">
+        <span
+          class="rounded-full px-2 py-0.5 text-xs font-medium"
+          :class="versionTone(gameInfo.version)"
+        >
+          {{ gameInfo.version }}
+        </span>
+        <span
+          v-if="gameInfo.variant !== 'unknown'"
+          class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400"
+        >
+          {{ gameInfo.variant }}
+        </span>
+        <span
+          class="chip"
+          :class="gameInfo.has_pmc_bb ? 'chip-ok' : 'chip-off'"
+          title="pmc_bb.dll — our ASI loader + SecuROM spoof"
+        >
+          {{
+            gameInfo.has_pmc_bb
+              ? "pmc_bb.dll ✓ (ASI loader)"
+              : "pmc_bb.dll ✗ (ASI loader)"
+          }}
+        </span>
+        <span
+          v-if="
+            gameInfo.asi_loader_proxy &&
+            gameInfo.asi_loader_proxy !== 'pmc_bb.dll'
+          "
+          class="chip chip-off"
+          :title="`Alternate ASI loader proxy: ${gameInfo.asi_loader_proxy}`"
+        >
+          alt loader: {{ gameInfo.asi_loader_proxy }}
+        </span>
+        <span
+          v-if="gameInfo.deployed_asi.length"
+          class="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-300"
+          :title="gameInfo.deployed_asi.join('\n')"
+        >
+          {{ gameInfo.deployed_asi.length }} ASI plugin{{
+            gameInfo.deployed_asi.length === 1 ? "" : "s"
+          }}
+        </span>
+        <span
+          v-if="gameInfo.deployed_patches.length"
+          class="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs text-indigo-300"
+          :title="gameInfo.deployed_patches.join('\n')"
+        >
+          {{ gameInfo.deployed_patches.length }} patch WAD{{
+            gameInfo.deployed_patches.length === 1 ? "" : "s"
+          }} deployed
+        </span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button
+          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          :disabled="busy"
+          title="Launch Mercenaries 2"
+          @click="store.launchGame()"
+        >
+          ▶ Play
+        </button>
+        <button
+          class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+          :disabled="busy"
+          @click="store.refreshGame()"
+        >
+          Refresh
+        </button>
+        <button
+          class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+          @click="chooseFolder"
+        >
+          Change
+        </button>
+      </div>
+    </template>
+  </header>
+</template>
+
+<style scoped>
+.chip {
+  border-radius: 9999px;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+}
+.chip-ok {
+  background-color: rgb(16 185 129 / 0.15);
+  color: rgb(110 231 183);
+}
+.chip-off {
+  background-color: rgb(113 113 122 / 0.25);
+  color: rgb(161 161 170);
+}
+</style>
