@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { RouterLink } from "vue-router";
 import { open, ask } from "@tauri-apps/plugin-dialog";
@@ -80,6 +80,15 @@ async function trashDeployed(info: DeployedAsi) {
 async function adopt(info: DeployedAsi) {
   await store.adoptDeployedAsi(info).catch(() => {});
 }
+
+async function updateMod(m: AsiMod) {
+  await store.updateAsiMod(m).catch(() => {});
+}
+
+// Need the catalog loaded to detect available mod updates.
+onMounted(() => {
+  if (store.catalog.length === 0) store.fetchCatalog();
+});
 
 const ASI_TARGETS = [
   { value: "scripts", label: "scripts/" },
@@ -278,6 +287,17 @@ async function deployEnabled() {
               ({{ m.asiFiles.join(", ") }})
             </p>
           </div>
+
+          <!-- A newer version is available in the catalog. -->
+          <button
+            v-if="store.asiUpdate(m)"
+            class="rounded-md bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+            :disabled="busy"
+            :title="`Update to v${store.asiUpdate(m)?.version} and redeploy if deployed`"
+            @click="updateMod(m)"
+          >
+            Update → v{{ store.asiUpdate(m)?.version }}
+          </button>
 
           <!-- Deployed: offer redeploy + undeploy. Otherwise: deploy. -->
           <template v-if="store.isAsiDeployed(m)">

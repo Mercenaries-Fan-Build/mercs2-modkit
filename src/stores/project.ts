@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import type {
   AsiMod,
   BuildResult,
@@ -14,6 +15,8 @@ import type {
   InstallResult,
   LoadedMod,
   LogReport,
+  ModkitUpdate,
+  ReleaseInfo,
   Resolution,
   TrashResult,
   ValidationResult,
@@ -37,6 +40,40 @@ function catalogAsiNames(item: CatalogMod): string[] {
     .map((a) => a.split(/[\\/]/).pop() ?? a);
 }
 
+/** Parse a loose semver-ish string ("v0.2.0", "1.10") into numeric parts. */
+function parseVer(v: string): number[] {
+  return v
+    .replace(/^v/i, "")
+    .split(".")
+    .map((x) => parseInt(x, 10) || 0);
+}
+
+/** True if version `a` is strictly newer than `b`. */
+function semverGt(a: string, b: string): boolean {
+  const A = parseVer(a);
+  const B = parseVer(b);
+  const n = Math.max(A.length, B.length);
+  for (let i = 0; i < n; i++) {
+    const x = A[i] ?? 0;
+    const y = B[i] ?? 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+
+/** The catalog mod backing a Library ASI mod, matched by `.asi` filename. */
+function findCatalogForLib(
+  catalog: CatalogMod[],
+  mod: AsiMod
+): CatalogMod | undefined {
+  const asis = mod.asiFiles.map((f) => f.split(/[\\/]/).pop() ?? f);
+  return catalog.find((c) => catalogAsiNames(c).some((a) => asis.includes(a)));
+}
+
+/** Repository whose releases drive modkit's own self-update check. */
+const MODKIT_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-modkit";
+
 interface ProjectState {
   // Base game
   gamePath: string | null;
@@ -52,6 +89,8 @@ interface ProjectState {
   // Mod catalog (per-mod rows expanded from repository sources)
   catalog: CatalogMod[];
   catalogSource: string | null;
+  // modkit self-update (vs its GitHub releases)
+  modkitUpdate: ModkitUpdate | null;
   // Settings
   asiTarget: string; // ".", "scripts", "plugins", "update"
   // Conflicts & build
@@ -73,6 +112,7 @@ export const useProjectStore = defineStore("project", {
     enabled: {},
     catalog: [],
     catalogSource: null,
+    modkitUpdate: null,
     asiTarget: "scripts",
     conflictGraph: null,
     resolutions: {},
@@ -111,6 +151,16 @@ export const useProjectStore = defineStore("project", {
     /** Filenames of ASI plugins currently present in the game install. */
     deployedAsiNames(state): Set<string> {
       return new Set((state.gameInfo?.deployed_asi ?? []).map((a) => a.name));
+    },
+    /** The catalog mod offering a newer version than the installed `mod`, if any. */
+    asiUpdate(state) {
+      return (mod: AsiMod): CatalogMod | undefined => {
+        const cat = findCatalogForLib(state.catalog, mod);
+        if (cat && cat.version && mod.version && semverGt(cat.version, mod.version)) {
+          return cat;
+        }
+        return undefined;
+      };
     },
     /** WAD-asset mods that declare a dependency on the mod named `name`. */
     dependentsOf(state) {
@@ -238,7 +288,9 @@ export const useProjectStore = defineStore("project", {
               id,
               name: item.name,
               description: item.description,
-              version: res.version,
+              // Author-declared version (repository.json) so update checks compare
+              // like-for-like; fall back to the release tag.
+              version: item.version ?? res.version,
               modRoot: res.mod_root,
               asiFiles: res.asi_files,
             });
@@ -372,6 +424,67 @@ export const useProjectStore = defineStore("project", {
     async forceRemoveAsiMod(mod: AsiMod, permanent = false) {
       await this.undeployAsiMod(mod, permanent).catch(() => {});
       this.removeAsiMod(mod.id);
+    },
+
+    /** Re-download a library mod from its catalog source, preserving enabled
+     *  state and re-deploying if it was deployed. */
+    async updateAsiMod(mod: AsiMod): Promise<void> {
+      const cat = findCatalogForLib(this.catalog, mod);
+      if (!cat) {
+        this.error = `No catalog source found for ${mod.name}`;
+        return;
+      }
+      this.busy = true;
+      this.error = null;
+      const wasDeployed = this.isAsiDeployed(mod);
+      try {
+        const res = await invoke<InstallResult>("install_catalog_mod", {
+          item: cat,
+        });
+        const lib = this.asiMods.find((m) => m.id === mod.id);
+        if (lib) {
+          lib.version = cat.version ?? res.version;
+          lib.modRoot = res.mod_root;
+          lib.asiFiles = res.asi_files;
+          if (cat.description) lib.description = cat.description;
+          if (wasDeployed) await this.deployAsiMod(lib);
+        }
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Check modkit's own GitHub releases for a newer version. */
+    async checkModkitUpdate() {
+      let current = "";
+      try {
+        current = await getVersion();
+        // Show the real version immediately, even if the release lookup fails.
+        this.modkitUpdate = {
+          current,
+          latest: current,
+          url: `${MODKIT_REPO}/releases`,
+          available: false,
+        };
+      } catch {
+        /* version unavailable (non-Tauri context) */
+      }
+      try {
+        const rel = await invoke<ReleaseInfo>("latest_release", {
+          repo: MODKIT_REPO,
+        });
+        this.modkitUpdate = {
+          current,
+          latest: rel.tag,
+          url: rel.url,
+          available: !!current && semverGt(rel.tag, current),
+        };
+      } catch {
+        /* offline or no releases yet — keep the current-version-only state */
+      }
     },
 
     async setGameFolder(path: string) {

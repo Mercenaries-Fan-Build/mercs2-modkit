@@ -16,6 +16,7 @@ use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::registry::fetch_catalog;
 use commands::setup::{crack_game, install_pmc_bb};
+use commands::updates::latest_release;
 use commands::validator::{fetch_wad_simulator, validate_wad};
 use commands::wad_builder::assemble_patch_wad;
 
@@ -46,6 +47,7 @@ pub fn run() {
             stop_game,
             analyze_log,
             locate_log,
+            latest_release,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,13 +2,17 @@
 import { onMounted } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import { storeToRefs } from "pinia";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "./stores/project";
 import GameBar from "./components/GameBar.vue";
 
 const store = useProjectStore();
-const { mods, asiMods, conflictCount } = storeToRefs(store);
+const { mods, asiMods, conflictCount, modkitUpdate } = storeToRefs(store);
 
-onMounted(() => store.init());
+onMounted(() => {
+  store.init();
+  store.checkModkitUpdate();
+});
 </script>
 
 <template>
@@ -73,8 +77,19 @@ onMounted(() => store.init());
         </RouterLink>
       </nav>
 
-      <div class="px-5 py-3 text-xs text-zinc-600 border-t border-zinc-800">
-        v0.1.0
+      <div class="px-5 py-3 text-xs border-t border-zinc-800">
+        <button
+          v-if="modkitUpdate?.available"
+          class="flex items-center gap-1.5 font-medium text-emerald-400 hover:underline"
+          :title="`You have v${modkitUpdate.current}. Open the ${modkitUpdate.latest} release page.`"
+          @click="openUrl(modkitUpdate.url)"
+        >
+          <span class="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          Update available → {{ modkitUpdate.latest }}
+        </button>
+        <span v-else class="text-zinc-600">
+          v{{ modkitUpdate?.current ?? "0.1.0" }}
+        </span>
       </div>
     </aside>
 

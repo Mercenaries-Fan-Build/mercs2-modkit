@@ -145,6 +145,20 @@ export interface TrashResult {
   trash_dir: string | null;
 }
 
+export interface ReleaseInfo {
+  tag: string;
+  name: string;
+  url: string;
+  body: string;
+}
+
+export interface ModkitUpdate {
+  current: string;
+  latest: string;
+  url: string;
+  available: boolean;
+}
+
 export interface InstallDllResult {
   path: string;
   version: string;

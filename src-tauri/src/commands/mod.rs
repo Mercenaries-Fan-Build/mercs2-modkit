@@ -11,5 +11,6 @@ pub mod mod_loader;
 pub mod paths;
 pub mod registry;
 pub mod setup;
+pub mod updates;
 pub mod validator;
 pub mod wad_builder;
