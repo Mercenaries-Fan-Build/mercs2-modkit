@@ -40,3 +40,8 @@ pub fn staging_dir() -> Result<PathBuf, String> {
 pub fn deployed_dir() -> Result<PathBuf, String> {
     stage("deployed")
 }
+
+/// Removed files are moved here (recoverable) instead of being hard-deleted.
+pub fn trash_dir() -> Result<PathBuf, String> {
+    stage("trash")
+}

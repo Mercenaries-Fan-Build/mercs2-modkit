@@ -8,7 +8,7 @@ mod models;
 
 use commands::asset_catalog::detect_asset_type;
 use commands::conflict_resolver::build_conflict_graph;
-use commands::deploy::deploy_asi;
+use commands::deploy::{deploy_asi, trash_paths};
 use commands::game::detect_game;
 use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::launch::{is_game_running, launch_game, stop_game, GameProcess};
@@ -38,6 +38,7 @@ pub fn run() {
             install_catalog_mod,
             import_local_asi,
             deploy_asi,
+            trash_paths,
             install_pmc_bb,
             crack_game,
             launch_game,

@@ -139,6 +139,12 @@ export interface DeployResult {
   backed_up: string[];
 }
 
+export interface TrashResult {
+  trashed: string[];
+  missing: string[];
+  trash_dir: string | null;
+}
+
 export interface InstallDllResult {
   path: string;
   version: string;

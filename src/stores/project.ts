@@ -15,6 +15,7 @@ import type {
   LoadedMod,
   LogReport,
   Resolution,
+  TrashResult,
   ValidationResult,
 } from "../types";
 
@@ -316,6 +317,52 @@ export const useProjectStore = defineStore("project", {
       } finally {
         this.busy = false;
       }
+    },
+
+    /** Absolute paths of a mod's plugins currently present in the game folder. */
+    deployedPathsForMod(mod: AsiMod): string[] {
+      const wanted = new Set(mod.asiFiles.map((f) => f.split(/[\\/]/).pop() ?? f));
+      return (this.gameInfo?.deployed_asi ?? [])
+        .filter((d) => wanted.has(d.name))
+        .map((d) => d.abs_path);
+    },
+
+    /** Move files out of the game folder (default: to the recoverable trash). */
+    async trashPaths(paths: string[], permanent = false): Promise<TrashResult> {
+      const res = await invoke<TrashResult>("trash_paths", { paths, permanent });
+      await this.refreshGame().catch(() => {});
+      return res;
+    },
+
+    /** Force-remove a single detected deployed plugin from the game folder. */
+    async trashDeployedAsi(info: DeployedAsi, permanent = false) {
+      this.error = null;
+      try {
+        await this.trashPaths([info.abs_path], permanent);
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      }
+    },
+
+    /** Undeploy a library mod: remove its plugin(s) from the game folder (trash),
+     *  leaving the Library entry intact. */
+    async undeployAsiMod(mod: AsiMod, permanent = false) {
+      const paths = this.deployedPathsForMod(mod);
+      if (paths.length === 0) return;
+      this.error = null;
+      try {
+        await this.trashPaths(paths, permanent);
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      }
+    },
+
+    /** Undeploy (trash) and then forget a library mod entirely. */
+    async forceRemoveAsiMod(mod: AsiMod, permanent = false) {
+      await this.undeployAsiMod(mod, permanent).catch(() => {});
+      this.removeAsiMod(mod.id);
     },
 
     async setGameFolder(path: string) {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
 import { RouterLink } from "vue-router";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, ask } from "@tauri-apps/plugin-dialog";
 import { Switch } from "@headlessui/vue";
 import { useProjectStore } from "../stores/project";
 import type { AsiMod, DeployedAsi } from "../types";
@@ -11,6 +11,46 @@ import ProgressBar from "../components/ProgressBar.vue";
 const store = useProjectStore();
 const { mods, asiMods, busy, error, activeAssetCount, conflictCount, gameInfo } =
   storeToRefs(store);
+
+/** Deploy lifecycle status of a library ASI mod, for the status pill. */
+type AsiStatus = { label: string; cls: string };
+function asiStatus(m: AsiMod): AsiStatus {
+  if (store.isAsiDeployed(m))
+    return { label: "deployed", cls: "bg-emerald-500/15 text-emerald-300" };
+  if (!store.isEnabled(m.id))
+    return { label: "disabled", cls: "bg-zinc-700/40 text-zinc-400" };
+  if (!gameInfo.value)
+    return { label: "enabled · no game set", cls: "bg-amber-500/15 text-amber-300" };
+  return { label: "ready to deploy", cls: "bg-sky-500/15 text-sky-300" };
+}
+
+async function undeploy(m: AsiMod) {
+  const ok = await ask(
+    `Remove ${m.name}'s plugin(s) from the game folder?\nThey'll be moved to modkit's trash (recoverable).`,
+    { title: "Undeploy", kind: "warning" }
+  );
+  if (ok) await store.undeployAsiMod(m).catch(() => {});
+}
+
+async function removeFromLibrary(m: AsiMod) {
+  if (store.isAsiDeployed(m)) {
+    const ok = await ask(
+      `${m.name} is still deployed in the game folder.\nRemove it from the game (to trash) and forget it from the Library?`,
+      { title: "Remove mod", kind: "warning" }
+    );
+    if (ok) await store.forceRemoveAsiMod(m).catch(() => {});
+  } else {
+    store.removeAsiMod(m.id);
+  }
+}
+
+async function trashDeployed(info: DeployedAsi) {
+  const ok = await ask(
+    `Remove ${info.name} from the game folder?\nIt'll be moved to modkit's trash (recoverable).`,
+    { title: "Remove plugin", kind: "warning" }
+  );
+  if (ok) await store.trashDeployedAsi(info).catch(() => {});
+}
 
 async function adopt(info: DeployedAsi) {
   await store.adoptDeployedAsi(info).catch(() => {});
@@ -135,6 +175,14 @@ async function deployEnabled() {
           >
             Adopt
           </button>
+          <button
+            class="shrink-0 rounded-md px-2.5 py-1 text-xs text-zinc-500 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40"
+            :disabled="busy"
+            title="Remove this plugin from the game folder (moved to trash)"
+            @click="trashDeployed(d)"
+          >
+            Remove
+          </button>
         </li>
       </ul>
 
@@ -194,16 +242,10 @@ async function deployEnabled() {
             <div class="flex items-center gap-2">
               <span class="font-medium text-zinc-100">{{ m.name }}</span>
               <span
-                v-if="store.isAsiDeployed(m)"
-                class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300"
+                class="rounded-full px-2 py-0.5 text-[11px]"
+                :class="asiStatus(m).cls"
               >
-                deployed
-              </span>
-              <span
-                v-else
-                class="rounded-full bg-zinc-700/40 px-2 py-0.5 text-[11px] text-zinc-400"
-              >
-                staged
+                {{ asiStatus(m).label }}
               </span>
             </div>
             <p class="truncate text-xs text-zinc-500">
@@ -213,17 +255,39 @@ async function deployEnabled() {
             </p>
           </div>
 
+          <!-- Deployed: offer redeploy + undeploy. Otherwise: deploy. -->
+          <template v-if="store.isAsiDeployed(m)">
+            <button
+              class="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+              :disabled="busy || !gameInfo || !store.isEnabled(m.id)"
+              title="Copy the staged plugin over the deployed one again"
+              @click="deploy(m)"
+            >
+              Redeploy
+            </button>
+            <button
+              class="rounded-md border border-amber-600/40 px-2.5 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-40"
+              :disabled="busy"
+              title="Remove this plugin from the game folder (moved to trash)"
+              @click="undeploy(m)"
+            >
+              Undeploy
+            </button>
+          </template>
           <button
+            v-else
             class="rounded-md bg-emerald-600/90 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
             :disabled="busy || !gameInfo || !store.isEnabled(m.id)"
-            :title="!gameInfo ? 'Set the game folder first' : ''"
+            :title="!gameInfo ? 'Set the game folder first' : !store.isEnabled(m.id) ? 'Enable it first' : ''"
             @click="deploy(m)"
           >
             Deploy
           </button>
           <button
-            class="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-red-500/10 hover:text-red-400"
-            @click="store.removeAsiMod(m.id)"
+            class="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40"
+            :disabled="busy"
+            :title="store.isAsiDeployed(m) ? 'Undeploy (to trash) and forget from the Library' : 'Forget from the Library'"
+            @click="removeFromLibrary(m)"
           >
             Remove
           </button>
