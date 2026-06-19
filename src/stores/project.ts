@@ -112,6 +112,15 @@ export const useProjectStore = defineStore("project", {
     deployedAsiNames(state): Set<string> {
       return new Set((state.gameInfo?.deployed_asi ?? []).map((a) => a.name));
     },
+    /** WAD-asset mods that declare a dependency on the mod named `name`. */
+    dependentsOf(state) {
+      return (name: string): LoadedMod[] =>
+        state.mods.filter((m) =>
+          m.manifest.dependencies.some(
+            (d) => d.split("@")[0].trim() === name
+          )
+        );
+    },
     /** Whether a deployed plugin filename is already managed in the Library. */
     isAsiManaged(state) {
       return (name: string): boolean =>

@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { RouterLink } from "vue-router";
 import { open, ask } from "@tauri-apps/plugin-dialog";
 import { Switch } from "@headlessui/vue";
 import { useProjectStore } from "../stores/project";
-import type { AsiMod, DeployedAsi } from "../types";
+import type { AsiMod, DeployedAsi, LoadedMod } from "../types";
 import ConflictBadge from "../components/ConflictBadge.vue";
+import ConfirmDialog from "../components/ConfirmDialog.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 
 const store = useProjectStore();
@@ -32,16 +34,39 @@ async function undeploy(m: AsiMod) {
   if (ok) await store.undeployAsiMod(m).catch(() => {});
 }
 
-async function removeFromLibrary(m: AsiMod) {
-  if (store.isAsiDeployed(m)) {
-    const ok = await ask(
-      `${m.name} is still deployed in the game folder.\nRemove it from the game (to trash) and forget it from the Library?`,
-      { title: "Remove mod", kind: "warning" }
-    );
-    if (ok) await store.forceRemoveAsiMod(m).catch(() => {});
+// --- Removal: always available, gated behind a confirmation modal that disables
+// the mod (and anything depending on it) first ---
+type PendingRemoval =
+  | { kind: "asi"; id: string; name: string; mod: AsiMod }
+  | { kind: "wad"; id: string; name: string };
+
+const pendingRemoval = ref<PendingRemoval | null>(null);
+
+/** Mods that depend on the one pending removal — they'll be disabled too. */
+const removalDependents = computed<LoadedMod[]>(() =>
+  pendingRemoval.value ? store.dependentsOf(pendingRemoval.value.name) : []
+);
+
+function requestRemoveAsi(m: AsiMod) {
+  pendingRemoval.value = { kind: "asi", id: m.id, name: m.name, mod: m };
+}
+function requestRemoveWad(m: LoadedMod) {
+  pendingRemoval.value = { kind: "wad", id: m.id, name: m.manifest.name };
+}
+
+async function confirmRemoval() {
+  const p = pendingRemoval.value;
+  if (!p) return;
+  // Disable the mod and every mod that depends on it before removing.
+  store.setModEnabled(p.id, false);
+  for (const dep of removalDependents.value) store.setModEnabled(dep.id, false);
+
+  if (p.kind === "asi") {
+    await store.forceRemoveAsiMod(p.mod).catch(() => {});
   } else {
-    store.removeAsiMod(m.id);
+    store.removeMod(p.id);
   }
+  pendingRemoval.value = null;
 }
 
 async function trashDeployed(info: DeployedAsi) {
@@ -223,7 +248,6 @@ async function deployEnabled() {
           v-for="m in asiMods"
           :key="m.id"
           class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
-          :class="{ 'opacity-50': !store.isEnabled(m.id) }"
         >
           <Switch
             :model-value="store.isEnabled(m.id)"
@@ -238,7 +262,7 @@ async function deployEnabled() {
             />
           </Switch>
 
-          <div class="min-w-0 flex-1">
+          <div class="min-w-0 flex-1" :class="{ 'opacity-50': !store.isEnabled(m.id) }">
             <div class="flex items-center gap-2">
               <span class="font-medium text-zinc-100">{{ m.name }}</span>
               <span
@@ -284,10 +308,9 @@ async function deployEnabled() {
             Deploy
           </button>
           <button
-            class="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40"
-            :disabled="busy"
+            class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-red-500/10 hover:text-red-400"
             :title="store.isAsiDeployed(m) ? 'Undeploy (to trash) and forget from the Library' : 'Forget from the Library'"
-            @click="removeFromLibrary(m)"
+            @click="requestRemoveAsi(m)"
           >
             Remove
           </button>
@@ -308,7 +331,6 @@ async function deployEnabled() {
           v-for="(m, i) in mods"
           :key="m.id"
           class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
-          :class="{ 'opacity-50': !store.isEnabled(m.id) }"
         >
           <div class="flex flex-col">
             <button
@@ -344,7 +366,7 @@ async function deployEnabled() {
             />
           </Switch>
 
-          <div class="min-w-0 flex-1">
+          <div class="min-w-0 flex-1" :class="{ 'opacity-50': !store.isEnabled(m.id) }">
             <RouterLink
               :to="`/mod/${m.id}`"
               class="font-medium text-zinc-100 hover:text-emerald-400"
@@ -359,8 +381,8 @@ async function deployEnabled() {
           </div>
 
           <button
-            class="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-red-500/10 hover:text-red-400"
-            @click="store.removeMod(m.id)"
+            class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-red-500/10 hover:text-red-400"
+            @click="requestRemoveWad(m)"
           >
             Remove
           </button>
@@ -383,5 +405,36 @@ async function deployEnabled() {
         <code class="text-zinc-400">.asi</code> plugin.
       </p>
     </div>
+
+    <!-- Removal confirmation: disables the mod (and its dependents) first -->
+    <ConfirmDialog
+      :open="!!pendingRemoval"
+      :title="`Remove ${pendingRemoval?.name ?? ''}?`"
+      confirm-label="Disable & remove"
+      danger
+      @confirm="confirmRemoval"
+      @cancel="pendingRemoval = null"
+    >
+      <p>
+        This will disable <strong class="text-zinc-200">{{ pendingRemoval?.name }}</strong>
+        <template v-if="pendingRemoval?.kind === 'asi'">
+          and remove its plugin file(s) from the game folder (moved to modkit's
+          recoverable trash).
+        </template>
+        <template v-else> and remove it from the Library.</template>
+      </p>
+      <div
+        v-if="removalDependents.length"
+        class="mt-3 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-amber-200"
+      >
+        <p class="font-medium">
+          {{ removalDependents.length }} mod{{ removalDependents.length === 1 ? "" : "s" }}
+          depend on it and will be disabled too:
+        </p>
+        <ul class="mt-1 list-inside list-disc">
+          <li v-for="d in removalDependents" :key="d.id">{{ d.manifest.name }}</li>
+        </ul>
+      </div>
+    </ConfirmDialog>
   </div>
 </template>
