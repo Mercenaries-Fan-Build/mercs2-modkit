@@ -82,10 +82,20 @@ export interface GameInfo {
   version: string; // "v1.0" | "v1.1" | "unknown"
   variant: string; // "unsigned" | "ea-signed" | "patched" | "cracked" | "unknown"
   has_pmc_bb: boolean;
-  asi_loader_proxy: string | null; // e.g. "dinput8.dll", or null if none
+  asi_loader_proxy: string | null; // e.g. "pmc_bb.dll", or null if none
   data_dir: string | null;
   deployed_patches: string[];
-  deployed_asi: string[];
+  deployed_asi: DeployedAsi[];
+  log_path: string | null;
+}
+
+/** A .asi plugin found already deployed in the game install. */
+export interface DeployedAsi {
+  name: string;
+  rel_path: string;
+  abs_path: string;
+  size: number;
+  known: string | null;
 }
 
 export interface CatalogEntry {
@@ -133,6 +143,54 @@ export interface CrackResult {
   output_path: string;
   stdout: string;
   stderr: string;
+}
+
+// --- loadprobe report (pmc_blackbox.log analysis) ---
+
+export type Verdict =
+  | { kind: "ReachedWorld"; furthest: number; name: string; post_load_crash: number | null }
+  | { kind: "Crash"; furthest: number; name: string; eip: number; label: string | null }
+  | { kind: "Hang"; furthest: number; name: string; stuck_ms: number; steady_free: number | null }
+  | { kind: "Truncated"; furthest: number; name: string };
+
+export interface LogBuildArtifact {
+  kind: string;
+  name: string;
+  hash_type: string;
+  sha256: string;
+  size: number | null;
+}
+
+export interface LogCrashInfo {
+  raw_ts: string;
+  code: string;
+  eip: number;
+  eip_label: string | null;
+  av: string | null;
+  block: string[];
+  terminal: boolean;
+  since_world_load_ms: number | null;
+}
+
+export interface LogReport {
+  file: string;
+  log_sha256: string;
+  build: LogBuildArtifact[];
+  records: number;
+  first_ts: string;
+  last_ts: string;
+  wall_ms: number;
+  furthest_idx: number;
+  furthest_name: string;
+  pct: number;
+  verdict: Verdict;
+  crash: LogCrashInfo | null;
+  tail: string[];
+  last_progress_ts: string;
+  last_progress_msg: string;
+  unknown_sources: [string, number][];
+  unparsed_lines: number;
+  signals: { text: string; count: number; first_ts: string; last_ts: string }[];
 }
 
 export interface BuildOptions {

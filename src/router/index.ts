@@ -16,6 +16,11 @@ export const router = createRouter({
       component: () => import("../views/SetupView.vue"),
     },
     {
+      path: "/diagnostics",
+      name: "diagnostics",
+      component: () => import("../views/DiagnosticsView.vue"),
+    },
+    {
       path: "/mod/:id",
       name: "mod-detail",
       component: () => import("../views/ModDetailView.vue"),

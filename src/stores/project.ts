@@ -7,17 +7,20 @@ import type {
   Catalog,
   ConflictGraph,
   CrackResult,
+  DeployedAsi,
   DeployResult,
   GameInfo,
   InstallDllResult,
   InstallResult,
   LoadedMod,
+  LogReport,
   Resolution,
   ValidationResult,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
 const ASI_TARGET_KEY = "mercs2-modkit:asiTarget";
+const LIBRARY_KEY = "mercs2-modkit:library";
 
 function slugify(name: string): string {
   return name
@@ -87,24 +90,62 @@ export const useProjectStore = defineStore("project", {
       const g = state.gameInfo;
       return !!g && g.version !== "unknown";
     },
+    /** Fully prepared for modding: v1.1, cracked, with the ASI loader installed. */
+    gameFullySetUp(state): boolean {
+      const g = state.gameInfo;
+      return (
+        !!g && g.version === "v1.1" && g.variant === "cracked" && g.has_pmc_bb
+      );
+    },
     /** Filenames of ASI plugins currently present in the game install. */
     deployedAsiNames(state): Set<string> {
-      const names = (state.gameInfo?.deployed_asi ?? []).map(
-        (p) => p.split("/").pop() ?? p
-      );
-      return new Set(names);
+      return new Set((state.gameInfo?.deployed_asi ?? []).map((a) => a.name));
+    },
+    /** Whether a deployed plugin filename is already managed in the Library. */
+    isAsiManaged(state) {
+      return (name: string): boolean =>
+        state.asiMods.some((m) =>
+          m.asiFiles.some((f) => (f.split(/[\\/]/).pop() ?? f) === name)
+        );
     },
   },
 
   actions: {
-    /** Restore remembered settings on app start. */
+    /** Restore remembered settings + the saved library on app start. */
     async init() {
       this.asiTarget = localStorage.getItem(ASI_TARGET_KEY) ?? "scripts";
+
+      // Restore the library (WAD mods, ASI plugins, enable flags).
+      try {
+        const raw = localStorage.getItem(LIBRARY_KEY);
+        if (raw) {
+          const lib = JSON.parse(raw);
+          this.mods = lib.mods ?? [];
+          this.asiMods = lib.asiMods ?? [];
+          this.enabled = lib.enabled ?? {};
+        }
+      } catch {
+        /* ignore corrupt cache */
+      }
+
+      // Persist the library slice whenever it changes.
+      this.$subscribe((_mutation, state) => {
+        localStorage.setItem(
+          LIBRARY_KEY,
+          JSON.stringify({
+            mods: state.mods,
+            asiMods: state.asiMods,
+            enabled: state.enabled,
+          })
+        );
+      });
+
       const saved = localStorage.getItem(GAME_PATH_KEY);
       if (saved) {
         this.gamePath = saved;
         await this.refreshGame().catch(() => {});
       }
+      if (this.mods.length) await this.refreshConflicts().catch(() => {});
     },
 
     setAsiTarget(target: string) {
@@ -194,6 +235,11 @@ export const useProjectStore = defineStore("project", {
     removeAsiMod(id: string) {
       this.asiMods = this.asiMods.filter((m) => m.id !== id);
       delete this.enabled[id];
+    },
+
+    /** Adopt an already-deployed .asi into the managed Library. */
+    async adoptDeployedAsi(info: DeployedAsi) {
+      await this.importLocalAsi([info.abs_path]);
     },
 
     isAsiDeployed(mod: AsiMod): boolean {
@@ -390,6 +436,27 @@ export const useProjectStore = defineStore("project", {
     },
 
     /** Launch the game exe with the install folder as working directory. */
+    /** Find pmc_blackbox.log near the install, then analyze it with loadprobe. */
+    async locateLog(): Promise<string | null> {
+      if (!this.gameInfo) return null;
+      return await invoke<string | null>("locate_log", {
+        gameRoot: this.gameInfo.root,
+      });
+    },
+
+    async analyzeLog(path: string): Promise<LogReport> {
+      this.busy = true;
+      this.error = null;
+      try {
+        return await invoke<LogReport>("analyze_log", { path });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
     async launchGame() {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.error = null;

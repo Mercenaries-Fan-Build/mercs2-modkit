@@ -4,13 +4,17 @@ import { RouterLink } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Switch } from "@headlessui/vue";
 import { useProjectStore } from "../stores/project";
-import type { AsiMod } from "../types";
+import type { AsiMod, DeployedAsi } from "../types";
 import ConflictBadge from "../components/ConflictBadge.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 
 const store = useProjectStore();
 const { mods, asiMods, busy, error, activeAssetCount, conflictCount, gameInfo } =
   storeToRefs(store);
+
+async function adopt(info: DeployedAsi) {
+  await store.adoptDeployedAsi(info).catch(() => {});
+}
 
 const ASI_TARGETS = [
   { value: "scripts", label: "scripts/" },
@@ -90,6 +94,55 @@ async function deployEnabled() {
     >
       {{ error }}
     </div>
+
+    <!-- Deployed in game (detected) -->
+    <section v-if="gameInfo && gameInfo.deployed_asi.length" class="mt-6">
+      <h3 class="mb-2 text-sm font-medium text-zinc-300">
+        Deployed in game
+        <span class="text-zinc-600">· {{ gameInfo.deployed_asi.length }} plugin{{ gameInfo.deployed_asi.length === 1 ? "" : "s" }}</span>
+      </h3>
+      <ul class="space-y-2">
+        <li
+          v-for="d in gameInfo.deployed_asi"
+          :key="d.abs_path"
+          class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-2.5"
+        >
+          <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400" />
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+              <span class="font-medium text-zinc-100">{{ d.name }}</span>
+              <span
+                v-if="d.known"
+                class="rounded-full bg-sky-500/15 px-2 py-0.5 text-[11px] text-sky-300"
+              >
+                {{ d.known }}
+              </span>
+              <span
+                v-if="store.isAsiManaged(d.name)"
+                class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300"
+              >
+                managed
+              </span>
+            </div>
+            <p class="truncate font-mono text-xs text-zinc-500">{{ d.rel_path }}</p>
+          </div>
+          <button
+            v-if="!store.isAsiManaged(d.name)"
+            class="shrink-0 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+            :disabled="busy"
+            title="Add this deployed plugin to the managed Library"
+            @click="adopt(d)"
+          >
+            Adopt
+          </button>
+        </li>
+      </ul>
+
+      <p v-if="gameInfo.deployed_patches.length" class="mt-2 text-xs text-zinc-500">
+        Patch WADs:
+        <span class="font-mono text-zinc-400">{{ gameInfo.deployed_patches.join(", ") }}</span>
+      </p>
+    </section>
 
     <!-- ASI plugins -->
     <section v-if="asiMods.length" class="mt-6">
@@ -253,7 +306,7 @@ async function deployEnabled() {
 
     <!-- Empty -->
     <div
-      v-if="!mods.length && !asiMods.length"
+      v-if="!mods.length && !asiMods.length && !(gameInfo && gameInfo.deployed_asi.length)"
       class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center"
     >
       <p class="text-zinc-400">No mods yet.</p>

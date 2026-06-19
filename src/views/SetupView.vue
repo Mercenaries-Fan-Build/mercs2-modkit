@@ -11,6 +11,7 @@ const { gameInfo, busy, error } = storeToRefs(store);
 
 const updateToV11 = ref(true);
 const outputPath = ref<string | null>(null);
+const showAnyway = ref(false);
 const stage = ref("");
 const pmcMsg = ref<string | null>(null);
 const crackResult = ref<CrackResult | null>(null);
@@ -84,6 +85,24 @@ async function runCrack() {
         {{ error }}
       </div>
 
+      <!-- Already prepared -->
+      <div
+        v-if="store.gameFullySetUp"
+        class="mt-6 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4"
+      >
+        <p class="text-sm font-medium text-emerald-300">Your game is ready ✓</p>
+        <p class="mt-1 text-sm text-emerald-300/80">
+          v1.1, cracked, and pmc_bb.dll installed — no setup needed.
+        </p>
+        <button
+          class="mt-2 text-xs text-zinc-400 underline hover:text-zinc-200"
+          @click="showAnyway = !showAnyway"
+        >
+          {{ showAnyway ? "Hide setup steps" : "Run setup anyway" }}
+        </button>
+      </div>
+
+      <template v-if="!store.gameFullySetUp || showAnyway">
       <!-- Step 1: pmc_bb.dll -->
       <section class="mt-6 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-start justify-between gap-4">
@@ -171,6 +190,7 @@ async function runCrack() {
         Tip: install pmc_bb.dll first, then crack — the cracked exe references
         pmc_bb.dll, which must be present in the folder.
       </p>
+      </template>
     </template>
   </div>
 </template>

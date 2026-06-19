@@ -102,7 +102,7 @@ function versionTone(v: string): string {
         <span
           v-if="gameInfo.deployed_asi.length"
           class="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-300"
-          :title="gameInfo.deployed_asi.join('\n')"
+          :title="gameInfo.deployed_asi.map((a) => a.rel_path).join('\n')"
         >
           {{ gameInfo.deployed_asi.length }} ASI plugin{{
             gameInfo.deployed_asi.length === 1 ? "" : "s"

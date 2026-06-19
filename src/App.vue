@@ -36,7 +36,12 @@ onMounted(() => store.init());
         >
           Browse
         </RouterLink>
-        <RouterLink to="/setup" class="nav-link" active-class="nav-link-active">
+        <RouterLink
+          v-if="!store.gameFullySetUp"
+          to="/setup"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
           Setup
         </RouterLink>
         <RouterLink
@@ -58,6 +63,13 @@ onMounted(() => store.init());
           active-class="nav-link-active"
         >
           Build &amp; Deploy
+        </RouterLink>
+        <RouterLink
+          to="/diagnostics"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Diagnostics
         </RouterLink>
       </nav>
 
