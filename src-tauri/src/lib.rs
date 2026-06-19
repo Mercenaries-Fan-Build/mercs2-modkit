@@ -12,6 +12,7 @@ use commands::deploy::deploy_asi;
 use commands::game::detect_game;
 use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::launch::launch_game;
+use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::registry::fetch_catalog;
 use commands::setup::{crack_game, install_pmc_bb};
@@ -39,6 +40,8 @@ pub fn run() {
             install_pmc_bb,
             crack_game,
             launch_game,
+            analyze_log,
+            locate_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

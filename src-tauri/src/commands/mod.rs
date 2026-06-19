@@ -6,6 +6,7 @@ pub mod deploy;
 pub mod game;
 pub mod installer;
 pub mod launch;
+pub mod logprobe;
 pub mod mod_loader;
 pub mod paths;
 pub mod registry;
