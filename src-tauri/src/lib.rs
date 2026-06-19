@@ -11,7 +11,7 @@ use commands::conflict_resolver::build_conflict_graph;
 use commands::deploy::deploy_asi;
 use commands::game::detect_game;
 use commands::installer::{import_local_asi, install_catalog_mod};
-use commands::launch::launch_game;
+use commands::launch::{is_game_running, launch_game, stop_game, GameProcess};
 use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::registry::fetch_catalog;
@@ -24,6 +24,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(GameProcess::default())
         .invoke_handler(tauri::generate_handler![
             load_mod,
             validate_manifest,
@@ -40,6 +41,8 @@ pub fn run() {
             install_pmc_bb,
             crack_game,
             launch_game,
+            is_game_running,
+            stop_game,
             analyze_log,
             locate_log,
         ])

@@ -33,6 +33,8 @@ interface ProjectState {
   // Base game
   gamePath: string | null;
   gameInfo: GameInfo | null;
+  /** Whether the game instance modkit launched is currently running. */
+  gameRunning: boolean;
   // WAD-asset mods — array order is the load order (top wins conflicts).
   mods: LoadedMod[];
   // ASI-plugin mods (deployed into the game's ASI loader folder).
@@ -57,6 +59,7 @@ export const useProjectStore = defineStore("project", {
   state: (): ProjectState => ({
     gamePath: null,
     gameInfo: null,
+    gameRunning: false,
     mods: [],
     asiMods: [],
     enabled: {},
@@ -465,9 +468,34 @@ export const useProjectStore = defineStore("project", {
           exePath: this.gameInfo.exe_path,
           gameRoot: this.gameInfo.root,
         });
+        this.gameRunning = true;
+      } catch (e) {
+        this.error = String(e);
+        // Reconcile with reality (e.g. "already running" means it IS running).
+        await this.refreshRunning();
+        throw e;
+      }
+    },
+
+    /** Stop the instance modkit launched. */
+    async stopGame() {
+      this.error = null;
+      try {
+        await invoke("stop_game");
       } catch (e) {
         this.error = String(e);
         throw e;
+      } finally {
+        await this.refreshRunning();
+      }
+    },
+
+    /** Poll whether our launched instance is still alive. */
+    async refreshRunning() {
+      try {
+        this.gameRunning = await invoke<boolean>("is_game_running");
+      } catch {
+        this.gameRunning = false;
       }
     },
 

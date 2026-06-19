@@ -1,10 +1,47 @@
 <script setup lang="ts">
+import { onMounted, onBeforeUnmount, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 
 const store = useProjectStore();
-const { gameInfo, gamePath, busy } = storeToRefs(store);
+const { gameInfo, gamePath, busy, gameRunning } = storeToRefs(store);
+
+// In-flight launch/stop, so the button can't be double-fired.
+const transitioning = ref(false);
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  store.refreshRunning();
+  pollTimer = setInterval(() => store.refreshRunning(), 2500);
+});
+onBeforeUnmount(() => {
+  if (pollTimer) clearInterval(pollTimer);
+});
+
+async function play() {
+  if (transitioning.value || gameRunning.value) return;
+  transitioning.value = true;
+  try {
+    await store.launchGame();
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    transitioning.value = false;
+  }
+}
+
+async function stop() {
+  if (transitioning.value) return;
+  transitioning.value = true;
+  try {
+    await store.stopGame();
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    transitioning.value = false;
+  }
+}
 
 async function chooseFolder() {
   const dir = await open({
@@ -120,13 +157,31 @@ function versionTone(v: string): string {
       </div>
 
       <div class="flex items-center gap-2">
-        <button
-          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-          :disabled="busy"
-          title="Launch Mercenaries 2"
-          @click="store.launchGame()"
+        <span
+          v-if="gameRunning"
+          class="flex items-center gap-1.5 text-xs font-medium text-emerald-400"
+          title="Mercenaries 2 is running (launched by modkit)"
         >
-          ▶ Play
+          <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
+          Running
+        </span>
+        <button
+          v-if="!gameRunning"
+          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          :disabled="busy || transitioning"
+          title="Launch Mercenaries 2"
+          @click="play"
+        >
+          {{ transitioning ? "Launching…" : "▶ Play" }}
+        </button>
+        <button
+          v-else
+          class="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+          :disabled="transitioning"
+          title="Stop the running game"
+          @click="stop"
+        >
+          {{ transitioning ? "Stopping…" : "■ Stop" }}
         </button>
         <button
           class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
