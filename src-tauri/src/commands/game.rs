@@ -26,8 +26,31 @@ pub struct GameInfo {
     pub data_dir: Option<String>,
     /// Patch WADs already present in the data dir.
     pub deployed_patches: Vec<String>,
-    /// `.asi` plugins already deployed (scripts/, plugins/, update/, root).
-    pub deployed_asi: Vec<String>,
+    /// `.asi` plugins already deployed (root shallow; scripts/plugins/update recursive).
+    pub deployed_asi: Vec<DeployedAsi>,
+    /// Discovered `pmc_blackbox.log`, if present in the install.
+    pub log_path: Option<String>,
+}
+
+/// Discover the game's `pmc_blackbox.log` (written to the install root, with
+/// `scripts/` as a fallback location).
+fn discover_log(root: &Path) -> Option<String> {
+    [root.join("pmc_blackbox.log"), root.join("scripts/pmc_blackbox.log")]
+        .iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+/// A `.asi` plugin found deployed in the game install.
+#[derive(Debug, Serialize)]
+pub struct DeployedAsi {
+    pub name: String,
+    /// Path relative to the game root, forward-slashed.
+    pub rel_path: String,
+    pub abs_path: String,
+    pub size: u64,
+    /// Friendly label if this is a recognised project plugin.
+    pub known: Option<String>,
 }
 
 /// ASI loader proxy DLL names, in preference order. For this project the
@@ -38,8 +61,9 @@ const ASI_PROXIES: &[&str] = &[
     "pmc_bb.dll",
 ];
 
-/// Folders the ASI Loader scans for `.asi` plugins, relative to the game root.
-const ASI_PLUGIN_DIRS: &[&str] = &[".", "scripts", "plugins", "update"];
+/// Loader subfolders scanned recursively (root is scanned shallow). The loader
+/// runs with `LoadRecursively=1`, so nested `.asi` files are also picked up.
+const ASI_PLUGIN_SUBDIRS: &[&str] = &["scripts", "plugins", "update"];
 
 fn find_asi_loader(root: &Path) -> Option<String> {
     ASI_PROXIES
@@ -48,33 +72,80 @@ fn find_asi_loader(root: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// List deployed `.asi` plugins across the loader's search folders.
-fn list_deployed_asi(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    for sub in ASI_PLUGIN_DIRS {
-        let dir = root.join(sub);
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_file()
-                    && p.extension()
-                        .and_then(|x| x.to_str())
-                        .map(|x| x.eq_ignore_ascii_case("asi"))
-                        .unwrap_or(false)
-                {
-                    if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
-                        let label = if *sub == "." {
-                            n.to_string()
-                        } else {
-                            format!("{sub}/{n}")
-                        };
-                        out.push(label);
-                    }
-                }
+fn is_asi(p: &Path) -> bool {
+    p.extension()
+        .and_then(|x| x.to_str())
+        .map(|x| x.eq_ignore_ascii_case("asi"))
+        .unwrap_or(false)
+}
+
+/// Friendly label for recognised project plugins.
+fn known_label(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "cruise.asi" => Some("SecuROM spoof"),
+        "dlc_enable.asi" => Some("DLC activator"),
+        "net_hooks.asi" => Some("Network hooks"),
+        "windowed_mode.asi" => Some("Windowed mode"),
+        _ => None,
+    }
+}
+
+fn push_asi(p: &Path, root: &Path, out: &mut Vec<DeployedAsi>) {
+    let name = match p.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n.to_string(),
+        None => return,
+    };
+    let rel = p
+        .strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    out.push(DeployedAsi {
+        known: known_label(&name).map(|s| s.to_string()),
+        name,
+        rel_path: rel,
+        abs_path: p.to_string_lossy().to_string(),
+        size,
+    });
+}
+
+fn collect_recursive(dir: &Path, root: &Path, depth: usize, out: &mut Vec<DeployedAsi>) {
+    if depth > 4 {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_recursive(&p, root, depth + 1, out);
+            } else if is_asi(&p) {
+                push_asi(&p, root, out);
             }
         }
     }
-    out.sort();
+}
+
+/// List deployed `.asi` plugins: the root (shallow) plus scripts/plugins/update
+/// (recursive), deduped by absolute path.
+fn list_deployed_asi(root: &Path) -> Vec<DeployedAsi> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_file() && is_asi(&p) {
+                push_asi(&p, root, &mut out);
+            }
+        }
+    }
+    for sub in ASI_PLUGIN_SUBDIRS {
+        let d = root.join(sub);
+        if d.is_dir() {
+            collect_recursive(&d, root, 0, &mut out);
+        }
+    }
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    out.dedup_by(|a, b| a.abs_path == b.abs_path);
     out
 }
 
@@ -179,5 +250,6 @@ pub fn detect_game(path: String) -> Result<GameInfo, String> {
         data_dir: data_dir.map(|d| d.to_string_lossy().to_string()),
         deployed_patches,
         deployed_asi: list_deployed_asi(&root),
+        log_path: discover_log(&root),
     })
 }
