@@ -3,7 +3,7 @@ import { onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
-import type { CatalogEntry } from "../types";
+import type { CatalogMod } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
 
 const store = useProjectStore();
@@ -16,12 +16,12 @@ onMounted(() => {
   if (store.catalog.length === 0) store.fetchCatalog();
 });
 
-async function install(entry: CatalogEntry) {
-  installing.value = entry.name;
+async function install(item: CatalogMod) {
+  installing.value = item.name;
   lastInstalled.value = null;
   try {
-    const res = await store.installFromCatalog(entry);
-    lastInstalled.value = `Installed ${entry.name} ${res.version} (${res.kind.toUpperCase()}, ${res.staged_files} file${res.staged_files === 1 ? "" : "s"})`;
+    const res = await store.installFromCatalog(item);
+    lastInstalled.value = `Enabled ${item.name} ${res.version} (${res.kind.toUpperCase()}, ${res.staged_files} file${res.staged_files === 1 ? "" : "s"})`;
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -36,8 +36,8 @@ async function install(entry: CatalogEntry) {
       <div>
         <h2 class="text-xl font-semibold">Browse Catalog</h2>
         <p class="text-sm text-zinc-500">
-          Curated mods. Installing pulls the repo's latest release artifacts into
-          staging.
+          Mods from curated repositories. Enabling stages just that mod's release
+          asset(s); deploy them from the Library.
         </p>
       </div>
       <button
@@ -81,27 +81,34 @@ async function install(entry: CatalogEntry) {
 
     <ul v-if="catalog.length" class="mt-6 space-y-3">
       <li
-        v-for="entry in catalog"
-        :key="entry.repository"
+        v-for="item in catalog"
+        :key="`${item.repository}#${item.slug}`"
         class="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
       >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <p class="font-medium text-zinc-100">{{ entry.name }}</p>
-            <p class="mt-0.5 text-sm text-zinc-400">{{ entry.description }}</p>
+            <div class="flex items-center gap-2">
+              <p class="font-medium text-zinc-100">{{ item.name }}</p>
+              <span
+                v-if="item.version"
+                class="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                >v{{ item.version }}</span
+              >
+            </div>
+            <p class="mt-0.5 text-sm text-zinc-400">{{ item.description }}</p>
             <button
               class="mt-1 truncate text-xs text-sky-400 hover:underline"
-              @click="openUrl(entry.repository)"
+              @click="openUrl(item.repository)"
             >
-              {{ entry.repository }}
+              {{ item.repo_name }} · {{ item.repository }}
             </button>
           </div>
           <button
             class="shrink-0 rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
             :disabled="busy"
-            @click="install(entry)"
+            @click="install(item)"
           >
-            Install
+            Enable
           </button>
         </div>
       </li>
@@ -113,8 +120,10 @@ async function install(entry: CatalogEntry) {
     >
       <p class="text-zinc-400">The catalog is empty.</p>
       <p class="mt-1 text-sm text-zinc-600">
-        Add entries to <code class="text-zinc-400">registry.json</code> — each
-        with a name, description, and git repository.
+        Add repository sources to
+        <code class="text-zinc-400">registry.json</code>. Each repo exposes its
+        mods via <code class="text-zinc-400">repository.json</code> +
+        <code class="text-zinc-400">mods/&lt;slug&gt;/modkit.json</code>.
       </p>
     </div>
   </div>

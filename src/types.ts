@@ -98,14 +98,20 @@ export interface DeployedAsi {
   known: string | null;
 }
 
-export interface CatalogEntry {
+/** One enableable mod, expanded from a source repo's index. */
+export interface CatalogMod {
+  repository: string; // source repo URL
+  repo_name: string; // display name of the source repository
+  slug: string; // mod id, unique within its repository
   name: string;
   description: string;
-  repository: string;
+  kind: string; // "asi" | "wad" (informational)
+  assets: string[]; // release asset filenames this mod deploys
+  version: string | null;
 }
 
 export interface Catalog {
-  entries: CatalogEntry[];
+  mods: CatalogMod[];
   source: string; // "remote" | "bundled"
 }
 

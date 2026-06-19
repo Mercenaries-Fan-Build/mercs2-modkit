@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AsiMod,
   BuildResult,
-  CatalogEntry,
+  CatalogMod,
   Catalog,
   ConflictGraph,
   CrackResult,
@@ -39,8 +39,8 @@ interface ProjectState {
   asiMods: AsiMod[];
   /** mod id -> enabled (defaults to true). Shared across both mod kinds. */
   enabled: Record<string, boolean>;
-  // Curated catalog
-  catalog: CatalogEntry[];
+  // Mod catalog (per-mod rows expanded from repository sources)
+  catalog: CatalogMod[];
   catalogSource: string | null;
   // Settings
   asiTarget: string; // ".", "scripts", "plugins", "update"
@@ -158,7 +158,7 @@ export const useProjectStore = defineStore("project", {
       this.error = null;
       try {
         const cat = await invoke<Catalog>("fetch_catalog");
-        this.catalog = cat.entries;
+        this.catalog = cat.mods;
         this.catalogSource = cat.source;
       } catch (e) {
         this.error = String(e);
@@ -167,23 +167,23 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /** Install a catalog entry: stage its release, then register it by kind. */
-    async installFromCatalog(entry: CatalogEntry): Promise<InstallResult> {
+    /** Enable a catalog mod: stage its release asset(s), then register it by kind. */
+    async installFromCatalog(item: CatalogMod): Promise<InstallResult> {
       this.busy = true;
       this.error = null;
       try {
         const res = await invoke<InstallResult>("install_catalog_mod", {
-          entry,
+          item,
         });
         if (res.kind === "wad") {
           await this.loadModFromDir(res.mod_root);
         } else {
-          const id = slugify(entry.name);
+          const id = slugify(`${item.repo_name}-${item.slug}`);
           if (!this.asiMods.some((m) => m.id === id)) {
             this.asiMods.push({
               id,
-              name: entry.name,
-              description: entry.description,
+              name: item.name,
+              description: item.description,
               version: res.version,
               modRoot: res.mod_root,
               asiFiles: res.asi_files,

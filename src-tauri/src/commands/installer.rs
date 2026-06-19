@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::commands::paths::{downloading_dir, staging_dir};
-use crate::commands::registry::CatalogEntry;
+use crate::commands::registry::CatalogMod;
 
 /// Outcome of a successful install: where the mod was staged and what kind it is.
 #[derive(Debug, Serialize)]
@@ -274,28 +274,50 @@ pub fn import_local_asi(paths: Vec<String>, name: Option<String>) -> Result<Inst
     })
 }
 
-/// Install a catalog entry: download its latest release artifacts, unpack them
-/// into staging, and return the loadable mod root.
+/// Enable a single catalog mod: download its source repo's latest release, stage
+/// only the asset(s) this mod declares (or the whole release if it declares none),
+/// and return the loadable mod root.
 #[tauri::command]
-pub async fn install_catalog_mod(entry: CatalogEntry) -> Result<InstallResult, String> {
-    let id = slugify(&entry.name);
-    let (host, path) = parse_repo(&entry.repository)?;
+pub async fn install_catalog_mod(item: CatalogMod) -> Result<InstallResult, String> {
+    // Stage per (repo, mod) so two mods from one repo — or same-named mods from
+    // different repos — never collide.
+    let id = slugify(&format!("{}-{}", item.repo_name, item.slug));
+    let (host, path) = parse_repo(&item.repository)?;
 
     let client = reqwest::Client::builder()
         .user_agent("mercs2-modkit")
         .build()
         .map_err(|e| e.to_string())?;
 
-    let (tag, assets) = match host {
+    let (tag, all_assets) = match host {
         Host::GitHub => github_artifacts(&client, &path).await?,
         Host::GitLab => gitlab_artifacts(&client, &path).await?,
     };
-    if assets.is_empty() {
+    if all_assets.is_empty() {
         return Err(format!(
             "The latest release of {} has no downloadable artifacts",
-            entry.name
+            item.name
         ));
     }
+
+    // Select just this mod's declared assets; empty list = whole release (legacy).
+    let assets: Vec<(String, String)> = if item.assets.is_empty() {
+        all_assets
+    } else {
+        let mut chosen = Vec::new();
+        for want in &item.assets {
+            match all_assets.iter().find(|(n, _)| n.eq_ignore_ascii_case(want)) {
+                Some((n, u)) => chosen.push((n.clone(), u.clone())),
+                None => {
+                    return Err(format!(
+                        "Release {tag} of {} is missing declared asset '{want}'",
+                        item.name
+                    ))
+                }
+            }
+        }
+        chosen
+    };
 
     // Fresh download + staging dirs for this mod.
     let dl = downloading_dir()?.join(&id);
@@ -330,7 +352,7 @@ pub async fn install_catalog_mod(entry: CatalogEntry) -> Result<InstallResult, S
         if asi.is_empty() {
             return Err(format!(
                 "Release artifacts of {} contain neither a manifest.json nor an .asi plugin",
-                entry.name
+                item.name
             ));
         }
         ("asi", stage.clone(), asi)
