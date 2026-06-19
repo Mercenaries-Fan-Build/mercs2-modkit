@@ -2,10 +2,12 @@
 //!
 //! `registry.json` is a hand-maintained list of repository sources (fetched from a
 //! remote URL the curator maintains, falling back to the bundled copy offline).
-//! Each source repo is itself an **index of mods**: a root `repository.json` lists
-//! the mod folders, and each `mods/<slug>/modkit.json` self-describes one mod and the
-//! release asset(s) it deploys. We scan every source into per-mod rows, deduped, so
-//! the user enables individual mods rather than installing a repo wholesale.
+//! Each source repo is itself an **index of mods**: a root `repository.json` whose
+//! `mods` array lists objects — `{ slug, name, description, type, assets, version }` —
+//! one per enableable mod (a bare slug string is also tolerated, legacy). We scan
+//! every source into per-mod rows, deduped, so the user enables individual mods
+//! rather than installing a repo wholesale. Parsing is per-entry: a single bad mod
+//! is skipped, never collapsing the repo to one bundle row.
 
 use std::collections::HashSet;
 
@@ -63,11 +65,13 @@ pub struct Catalog {
 struct RepoIndex {
     #[serde(default)]
     name: Option<String>,
+    /// Left as raw JSON so a single malformed entry can be skipped without
+    /// failing the whole index (which would collapse the repo to one bundle row).
     #[serde(default)]
-    mods: Vec<RepoMod>,
+    mods: Vec<serde_json::Value>,
 }
 
-/// One mod entry inside `repository.json`'s `mods` array (objects, not strings).
+/// One mod entry inside `repository.json`'s `mods` array.
 #[derive(Debug, Deserialize)]
 struct RepoMod {
     slug: String,
@@ -82,6 +86,47 @@ struct RepoMod {
     assets: Vec<String>,
     #[serde(default)]
     version: Option<String>,
+}
+
+/// Coerce one `mods` entry — an object, or a bare slug string (legacy) — into a
+/// `CatalogMod`. Returns `None` for entries we can't make sense of (skipped).
+fn repo_mod_to_catalog(value: serde_json::Value, src: &RepoSource, repo_name: &str) -> Option<CatalogMod> {
+    let base = |slug: String, name: String, description: String, kind: String, assets: Vec<String>, version: Option<String>| {
+        CatalogMod {
+            repository: src.repository.clone(),
+            repo_name: repo_name.to_string(),
+            slug,
+            name,
+            description,
+            kind,
+            assets,
+            version,
+        }
+    };
+    if let Ok(m) = serde_json::from_value::<RepoMod>(value.clone()) {
+        return Some(base(
+            m.slug,
+            m.name,
+            m.description,
+            m.kind.unwrap_or_else(|| "asi".to_string()),
+            m.assets,
+            m.version,
+        ));
+    }
+    // Legacy form: a bare slug string. No assets known → whole-release download.
+    if let Some(slug) = value.as_str() {
+        if !slug.is_empty() {
+            return Some(base(
+                slug.to_string(),
+                slug.to_string(),
+                String::new(),
+                "asi".to_string(),
+                Vec::new(),
+                None,
+            ));
+        }
+    }
+    None
 }
 
 fn slugify(name: &str) -> String {
@@ -181,19 +226,12 @@ async fn scan_repo(client: &reqwest::Client, src: &RepoSource) -> Vec<CatalogMod
     };
     let repo_name = index.name.unwrap_or_else(|| src.name.clone());
 
+    // Coerce each entry independently; skip malformed ones rather than collapsing
+    // the whole repo to a single bundle row.
     let mods: Vec<CatalogMod> = index
         .mods
         .into_iter()
-        .map(|m| CatalogMod {
-            repository: src.repository.clone(),
-            repo_name: repo_name.clone(),
-            slug: m.slug,
-            name: m.name,
-            description: m.description,
-            kind: m.kind.unwrap_or_else(|| "asi".to_string()),
-            assets: m.assets,
-            version: m.version,
-        })
+        .filter_map(|v| repo_mod_to_catalog(v, src, &repo_name))
         .collect();
 
     if mods.is_empty() {
@@ -258,5 +296,54 @@ pub async fn fetch_catalog() -> Catalog {
     Catalog {
         mods,
         source: label.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn src() -> RepoSource {
+        RepoSource {
+            name: "Fallback".into(),
+            description: String::new(),
+            repository: "https://github.com/owner/repo".into(),
+        }
+    }
+
+    #[test]
+    fn parses_object_mods_into_per_mod_rows() {
+        let json = r#"{
+            "name": "QoL",
+            "mods": [
+                {"slug":"windowed-mode","name":"Windowed Mode","type":"asi","assets":["windowed_mode.asi"]},
+                {"slug":"quiet-freeplay-vo","name":"Quiet Freeplay VO","type":"asi","assets":["quiet_freeplay_vo.asi","quiet_freeplay_vo.ini"]}
+            ]
+        }"#;
+        let idx: RepoIndex = serde_json::from_str(json).unwrap();
+        let mods: Vec<CatalogMod> = idx
+            .mods
+            .into_iter()
+            .filter_map(|v| repo_mod_to_catalog(v, &src(), "QoL"))
+            .collect();
+        assert_eq!(mods.len(), 2, "expected per-mod rows, not a bundle");
+        assert_eq!(mods[0].name, "Windowed Mode");
+        assert_eq!(mods[0].kind, "asi");
+        assert_eq!(mods[1].assets, vec!["quiet_freeplay_vo.asi", "quiet_freeplay_vo.ini"]);
+    }
+
+    #[test]
+    fn tolerates_legacy_string_and_skips_bad_entries() {
+        // A mix of a legacy bare-slug string, a valid object, and a junk entry.
+        let json = r#"{"mods": ["windowed-mode", {"slug":"b","name":"B"}, 123]}"#;
+        let idx: RepoIndex = serde_json::from_str(json).unwrap();
+        let mods: Vec<CatalogMod> = idx
+            .mods
+            .into_iter()
+            .filter_map(|v| repo_mod_to_catalog(v, &src(), "R"))
+            .collect();
+        assert_eq!(mods.len(), 2);
+        assert_eq!(mods[0].slug, "windowed-mode");
+        assert_eq!(mods[1].slug, "b");
     }
 }
