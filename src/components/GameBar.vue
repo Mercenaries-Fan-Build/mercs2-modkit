@@ -170,6 +170,7 @@ function versionTone(v: string): string {
           class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
           :disabled="busy || transitioning"
           title="Launch Mercenaries 2"
+          data-gamepad-play
           @click="play"
         >
           {{ transitioning ? "Launching…" : "▶ Play" }}
@@ -179,6 +180,7 @@ function versionTone(v: string): string {
           class="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
           :disabled="transitioning"
           title="Stop the running game"
+          data-gamepad-play
           @click="stop"
         >
           {{ transitioning ? "Stopping…" : "■ Stop" }}

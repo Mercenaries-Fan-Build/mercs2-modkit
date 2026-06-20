@@ -1,13 +1,23 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import { RouterLink, RouterView } from "vue-router";
 import { storeToRefs } from "pinia";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "./stores/project";
+import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 
 const store = useProjectStore();
 const { mods, asiMods, conflictCount, modkitUpdate } = storeToRefs(store);
+
+// Drive the whole UI from a controller when no keyboard is handy.
+const { connected: padConnected, controllerId } = useGamepadNavigation();
+
+// Controller ids look like "Xbox 360 Controller (STANDARD GAMEPAD ...)" —
+// keep just the human-readable name before the parenthetical.
+const padName = computed(
+  () => controllerId.value?.split(" (")[0]?.trim() || "Controller"
+);
 
 onMounted(() => {
   store.init();
@@ -76,6 +86,34 @@ onMounted(() => {
           Diagnostics
         </RouterLink>
       </nav>
+
+      <div
+        v-if="padConnected"
+        class="flex items-center gap-2 px-5 py-2 text-xs border-t border-zinc-800 text-emerald-400"
+        :title="`${padName} connected — navigate with the D-pad/stick, A to select, B to go back`"
+      >
+        <!-- gamepad glyph -->
+        <svg
+          class="h-4 w-4 shrink-0"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <line x1="6" y1="11" x2="10" y2="11" />
+          <line x1="8" y1="9" x2="8" y2="13" />
+          <line x1="15" y1="11" x2="15.01" y2="11" />
+          <line x1="18" y1="9" x2="18.01" y2="9" />
+          <path
+            d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.544-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"
+          />
+        </svg>
+        <span class="truncate">{{ padName }} connected</span>
+      </div>
+      <div v-else>No controller connected</div>
 
       <div class="px-5 py-3 text-xs border-t border-zinc-800">
         <button

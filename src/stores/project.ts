@@ -676,13 +676,19 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    async launchGame() {
+    /** Resolve Proton/runtime paths (autodiscovery + overrides) for display. */
+    async discoverRuntime(overrides: RuntimeOverrides | null = null) {
+      return await invoke<RuntimeInfo>("discover_runtime", { overrides });
+    },
+
+    async launchGame(overrides: RuntimeOverrides | null = null) {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.error = null;
       try {
         await invoke("launch_game", {
           exePath: this.gameInfo.exe_path,
           gameRoot: this.gameInfo.root,
+          overrides,
         });
         this.gameRunning = true;
       } catch (e) {

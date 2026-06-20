@@ -16,6 +16,14 @@
   color-scheme: dark;
 }
 
+/* When a controller is driving the UI, programmatic .focus() won't reliably
+   trigger :focus-visible, so force a clear highlight on whatever is focused. */
+body.gamepad-active :focus {
+  outline: 2px solid rgb(16 185 129);
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}
+
 html,
 body,
 #app {

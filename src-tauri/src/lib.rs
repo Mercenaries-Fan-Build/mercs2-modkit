@@ -11,7 +11,7 @@ use commands::conflict_resolver::build_conflict_graph;
 use commands::deploy::{deploy_asi, trash_paths};
 use commands::game::detect_game;
 use commands::installer::{import_local_asi, install_catalog_mod};
-use commands::launch::{is_game_running, launch_game, stop_game, GameProcess};
+use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::registry::fetch_catalog;
@@ -43,6 +43,7 @@ pub fn run() {
             install_pmc_bb,
             crack_game,
             launch_game,
+            discover_runtime,
             is_game_running,
             stop_game,
             analyze_log,
