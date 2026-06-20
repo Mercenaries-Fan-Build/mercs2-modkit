@@ -1,0 +1,43 @@
+id: com.mercenaries-fan-build.modkit
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+command: mercs2-modkit
+
+finish-args:
+  # GUI access (Steam Deck Desktop Mode is KDE Plasma on Wayland/X11)
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Internal storage: Steam library lives under ~/.local/share/Steam.
+  # A modding tool needs to read/write game install files anywhere on the host.
+  - --filesystem=host
+  # Steam Deck: games on a microSD / external drive are mounted under /run/media,
+  # which `host` does NOT expose to the sandbox. Required to reach SD-card libraries.
+  - --filesystem=/run/media
+
+modules:
+  - name: mercs2-modkit
+    buildsystem: simple
+    sources:
+      # Populated by CI: the tauri-produced .deb is copied next to this manifest as app.deb
+      - type: file
+        path: app.deb
+    build-commands:
+      # Unpack the Debian package (control + data archives)
+      - ar -x app.deb
+      - tar -xf data.tar.*
+      # Binary
+      - install -Dm755 usr/bin/mercs2-modkit /app/bin/mercs2-modkit
+      # Desktop entry, renamed to the Flatpak app-id and pointed at the renamed icon
+      - install -Dm644 usr/share/applications/mercs2-modkit.desktop
+          /app/share/applications/com.mercenaries-fan-build.modkit.desktop
+      - desktop-file-edit --set-icon=com.mercenaries-fan-build.modkit
+          /app/share/applications/com.mercenaries-fan-build.modkit.desktop
+      # Icons: copy every hicolor size the deb ships, renamed to the app-id
+      - |
+        for png in $(find usr/share/icons/hicolor -name 'mercs2-modkit.png'); do
+          dir=$(dirname "$png")
+          install -Dm644 "$png" "/app/share/icons/hicolor/$(basename "$(dirname "$dir")")/apps/com.mercenaries-fan-build.modkit.png"
+        done

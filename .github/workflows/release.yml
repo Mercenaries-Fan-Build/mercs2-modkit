@@ -37,13 +37,14 @@ jobs:
             build-essential \
             curl \
             wget \
-            file
+            file \
+            rpm
 
       - name: Install frontend dependencies
         run: npm ci
 
       - name: Build Tauri app (Linux x64)
-        run: npm run tauri build -- --target x86_64-unknown-linux-gnu --bundles deb,appimage
+        run: npm run tauri build -- --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -52,6 +53,7 @@ jobs:
           path: |
             src-tauri/target/x86_64-unknown-linux-gnu/release/mercs2-modkit
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
@@ -61,7 +63,53 @@ jobs:
         with:
           files: |
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+
+  flatpak:
+    needs: linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mercs2-modkit-linux-x86_64
+          path: artifacts
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//47 org.gnome.Sdk//47
+
+      - name: Stage .deb next to the manifest
+        run: |
+          deb=$(find artifacts -name '*.deb' | head -n1)
+          test -n "$deb" || { echo "No .deb found in artifacts"; exit 1; }
+          cp "$deb" src-tauri/flatpak/app.deb
+
+      - name: Build Flatpak bundle
+        run: |
+          flatpak-builder --user --force-clean --repo=repo \
+            build-dir src-tauri/flatpak/com.mercenaries-fan-build.modkit.yml
+          flatpak build-bundle repo mercs2-modkit-x86_64.flatpak \
+            com.mercenaries-fan-build.modkit
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mercs2-modkit-linux-flatpak
+          path: mercs2-modkit-x86_64.flatpak
+          if-no-files-found: error
+
+      - name: Attach to GitHub release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mercs2-modkit-x86_64.flatpak
 
   windows:
     runs-on: windows-latest
