@@ -226,3 +226,31 @@ export interface BuildOptions {
   split_by_patch: boolean;
   merge_into: string | null;
 }
+
+/**
+ * User-supplied overrides for Proton/runtime discovery (any field may be
+ * omitted or null). Mirrors the Rust `LaunchOverrides` struct, which is
+ * `#[serde(rename_all = "camelCase")]`, so keys are camelCase.
+ */
+export interface RuntimeOverrides {
+  steamRoot?: string | null;
+  proton?: string | null;
+  sniper?: string | null;
+  prefix?: string | null;
+  useContainer?: boolean | null;
+}
+
+/**
+ * What runtime discovery resolved to, surfaced to the UI so the user can
+ * confirm or override before launching. Mirrors the Rust `RuntimeInfo` struct
+ * (`#[serde(rename_all = "camelCase")]`).
+ */
+export interface RuntimeInfo {
+  steamRoot: string | null;
+  proton: string | null;
+  sniper: string | null;
+  /** Whether a launch would run inside the sniper container. */
+  container: boolean;
+  /** Non-fatal notes (e.g. "no sniper runtime found — will run bare Proton"). */
+  notes: string[];
+}

@@ -18,6 +18,8 @@ import type {
   ModkitUpdate,
   ReleaseInfo,
   Resolution,
+  RuntimeInfo,
+  RuntimeOverrides,
   TrashResult,
   ValidationResult,
 } from "../types";
