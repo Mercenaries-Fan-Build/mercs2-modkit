@@ -1,4 +1,4 @@
-id: com.mercenaries-fan-build.modkit
+id: com.mercenaries_fan_build.modkit
 runtime: org.gnome.Platform
 runtime-version: "47"
 sdk: org.gnome.Sdk
@@ -32,12 +32,12 @@ modules:
       - install -Dm755 usr/bin/mercs2-modkit /app/bin/mercs2-modkit
       # Desktop entry, renamed to the Flatpak app-id and pointed at the renamed icon
       - install -Dm644 usr/share/applications/mercs2-modkit.desktop
-          /app/share/applications/com.mercenaries-fan-build.modkit.desktop
-      - desktop-file-edit --set-icon=com.mercenaries-fan-build.modkit
-          /app/share/applications/com.mercenaries-fan-build.modkit.desktop
+          /app/share/applications/com.mercenaries_fan_build.modkit.desktop
+      - desktop-file-edit --set-icon=com.mercenaries_fan_build.modkit
+          /app/share/applications/com.mercenaries_fan_build.modkit.desktop
       # Icons: copy every hicolor size the deb ships, renamed to the app-id
       - |
         for png in $(find usr/share/icons/hicolor -name 'mercs2-modkit.png'); do
           dir=$(dirname "$png")
-          install -Dm644 "$png" "/app/share/icons/hicolor/$(basename "$(dirname "$dir")")/apps/com.mercenaries-fan-build.modkit.png"
+          install -Dm644 "$png" "/app/share/icons/hicolor/$(basename "$(dirname "$dir")")/apps/com.mercenaries_fan_build.modkit.png"
         done

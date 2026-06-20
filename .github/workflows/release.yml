@@ -94,9 +94,9 @@ jobs:
       - name: Build Flatpak bundle
         run: |
           flatpak-builder --user --force-clean --repo=repo \
-            build-dir src-tauri/flatpak/com.mercenaries-fan-build.modkit.yml
+            build-dir src-tauri/flatpak/com.mercenaries_fan_build.modkit.yml
           flatpak build-bundle repo mercs2-modkit-x86_64.flatpak \
-            com.mercenaries-fan-build.modkit
+            com.mercenaries_fan_build.modkit
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
