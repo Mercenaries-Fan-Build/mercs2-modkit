@@ -19,6 +19,12 @@
 //! the 32-bit NVIDIA driver libs must be installed and match the running module
 //! (else 32-bit DXVK only sees llvmpipe and renders in software). On Windows/macOS
 //! we spawn the exe directly.
+//!
+//! When the modkit itself runs as a Flatpak (e.g. on a Steam Deck), Proton can't
+//! drive its pressure-vessel/bwrap container from *inside* our sandbox, so the
+//! whole invocation is run on the host via `flatpak-spawn --host`. Discovery
+//! resolves the real host `$HOME` (Flatpak rewrites it to a per-app dir) so it
+//! still finds the host Steam install through `--filesystem=host`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -151,9 +157,24 @@ fn build_command(game_dir: &Path, run_exe: &Path, _ov: &LaunchOverrides) -> Resu
 // Linux: Proton discovery + container launch
 // ----------------------------------------------------------------------------
 
+/// True when running inside a Flatpak sandbox.
+#[cfg(target_os = "linux")]
+fn in_flatpak() -> bool {
+    Path::new("/.flatpak-info").exists() || std::env::var_os("FLATPAK_ID").is_some()
+}
+
+/// The real host home. Inside Flatpak `$HOME` is `<real_home>/.var/app/<id>`, but
+/// Steam/Proton live under the real home (reachable via `--filesystem=host`), so
+/// strip the per-app suffix. Outside Flatpak this is just `$HOME`.
 #[cfg(target_os = "linux")]
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    let h = std::env::var_os("HOME").map(PathBuf::from)?;
+    if let Some(s) = h.to_str() {
+        if let Some(idx) = s.find("/.var/app/") {
+            return Some(PathBuf::from(&s[..idx]));
+        }
+    }
+    Some(h)
 }
 
 /// override arg → `MERCS2_*` env var → None (caller falls back to autodiscovery).
@@ -356,24 +377,77 @@ fn build_command(game_dir: &Path, run_exe: &Path, ov: &LaunchOverrides) -> Resul
     }
     std::fs::create_dir_all(&r.prefix).map_err(|e| format!("Failed to create Proton prefix: {e}"))?;
 
-    let mut cmd = if r.use_container {
+    use std::ffi::OsString;
+
+    // The proton/sniper invocation itself (program + arguments).
+    let mut argv: Vec<OsString> = Vec::new();
+    if r.use_container {
         let sniper = r.sniper.expect("use_container implies a sniper path");
-        let mut c = Command::new(sniper);
-        c.arg("--verb=waitforexitandrun")
-            .arg("--")
-            .arg(&r.proton)
-            .arg("waitforexitandrun")
-            .arg(run_exe);
+        argv.push(sniper.into_os_string());
+        argv.push("--verb=waitforexitandrun".into());
+        argv.push("--".into());
+        argv.push(r.proton.clone().into_os_string());
+        argv.push("waitforexitandrun".into());
+        argv.push(run_exe.as_os_str().to_os_string());
+    } else {
+        argv.push(r.proton.clone().into_os_string());
+        argv.push("waitforexitandrun".into());
+        argv.push(run_exe.as_os_str().to_os_string());
+    }
+
+    // The pressure-vessel (sniper) container only exposes the home dir, the Steam
+    // install, the compat-data prefix and the tool paths by default. A game that
+    // lives outside that tree — a second drive, or the Steam Deck's microSD under
+    // /run/media — is invisible inside the container unless we add it. Point the
+    // install path at the game dir and bind-mount its canonical path so the exe
+    // resolves on a Deck regardless of where the library sits.
+    let game_mount = std::fs::canonicalize(game_dir).unwrap_or_else(|_| game_dir.to_path_buf());
+    let envs: [(&str, OsString); 8] = [
+        ("STEAM_COMPAT_CLIENT_INSTALL_PATH", r.steam_root.clone().into_os_string()),
+        ("STEAM_COMPAT_DATA_PATH", r.prefix.clone().into_os_string()),
+        ("STEAM_COMPAT_INSTALL_PATH", game_mount.clone().into_os_string()),
+        ("STEAM_COMPAT_MOUNTS", game_mount.clone().into_os_string()),
+        // Manual (non-Steam) launch: give Proton a stable app id so prefix/log
+        // naming is deterministic and pressure-vessel doesn't warn. 0 = no app.
+        ("SteamAppId", "0".into()),
+        ("SteamGameId", "0".into()),
+        ("STEAM_COMPAT_APP_ID", "0".into()),
+        ("PROTON_LOG", "0".into()),
+    ];
+
+    let cmd = if in_flatpak() {
+        // Proton drives pressure-vessel/bwrap, which can't create the nested user
+        // namespaces it needs from inside the Flatpak sandbox. Run it on the host
+        // through the Flatpak portal instead (needs --talk-name=org.freedesktop.Flatpak
+        // in the manifest). flatpak-spawn doesn't inherit our env, so pass each var
+        // explicitly and set the host-side working directory.
+        let mut c = Command::new("flatpak-spawn");
+        // --watch-bus ties the host process to this proxy's D-Bus connection, so
+        // stop_game (which kills the proxy) and modkit exiting also stop the game
+        // instead of orphaning it on the host.
+        c.arg("--host").arg("--watch-bus");
+        let mut dir = OsString::from("--directory=");
+        dir.push(&game_mount);
+        c.arg(dir);
+        for (k, v) in &envs {
+            let mut e = OsString::from("--env=");
+            e.push(k);
+            e.push("=");
+            e.push(v);
+            c.arg(e);
+        }
+        c.arg("--");
+        c.args(&argv);
         c
     } else {
-        let mut c = Command::new(&r.proton);
-        c.arg("waitforexitandrun").arg(run_exe);
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
+        c.current_dir(game_dir);
+        for (k, v) in &envs {
+            c.env(k, v);
+        }
         c
     };
-    cmd.current_dir(game_dir)
-        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &r.steam_root)
-        .env("STEAM_COMPAT_DATA_PATH", &r.prefix)
-        .env("PROTON_LOG", "0");
     Ok(cmd)
 }
 

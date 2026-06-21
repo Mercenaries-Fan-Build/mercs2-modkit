@@ -10,12 +10,19 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
+  # Network: the app downloads pmc_bb.dll, apply_crack, wad_simulator and mod
+  # release assets from the GitHub API at runtime. Without this the sandbox blocks
+  # every release lookup and it surfaces as "releases/latest doesn't exist".
+  - --share=network
   # Internal storage: Steam library lives under ~/.local/share/Steam.
   # A modding tool needs to read/write game install files anywhere on the host.
   - --filesystem=host
   # Steam Deck: games on a microSD / external drive are mounted under /run/media,
   # which `host` does NOT expose to the sandbox. Required to reach SD-card libraries.
   - --filesystem=/run/media
+  # Launch the game on the host (Proton/pressure-vessel can't run nested inside the
+  # sandbox). Grants access to the Flatpak portal used by `flatpak-spawn --host`.
+  - --talk-name=org.freedesktop.Flatpak
 
 modules:
   - name: mercs2-modkit

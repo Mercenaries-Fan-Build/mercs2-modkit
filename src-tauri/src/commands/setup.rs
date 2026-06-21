@@ -22,12 +22,13 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Download the first asset of a repo's latest release matching `pick`.
+/// Download an asset of a repo's latest release, trying each predicate in
+/// `picks` in priority order (first predicate that any asset matches wins).
 /// Returns `(release_tag, asset_name, bytes)`.
 async fn download_latest_asset(
     client: &reqwest::Client,
     repo: &str,
-    pick: impl Fn(&str) -> bool,
+    picks: &[&(dyn Fn(&str) -> bool + Sync)],
 ) -> Result<(String, String, Vec<u8>), String> {
     let api = format!("https://api.github.com/repos/{repo}/releases/latest");
     let v: serde_json::Value = client
@@ -42,17 +43,18 @@ async fn download_latest_asset(
         .map_err(|e| e.to_string())?;
 
     let tag = v["tag_name"].as_str().unwrap_or("latest").to_string();
-    let (name, url) = v["assets"]
-        .as_array()
-        .ok_or("Latest release has no assets")?
+    let assets = v["assets"].as_array().ok_or("Latest release has no assets")?;
+    let (name, url) = picks
         .iter()
-        .find_map(|a| {
-            let n = a["name"].as_str()?;
-            if pick(n) {
-                Some((n.to_string(), a["browser_download_url"].as_str()?.to_string()))
-            } else {
-                None
-            }
+        .find_map(|pick| {
+            assets.iter().find_map(|a| {
+                let n = a["name"].as_str()?;
+                if pick(n) {
+                    Some((n.to_string(), a["browser_download_url"].as_str()?.to_string()))
+                } else {
+                    None
+                }
+            })
         })
         .ok_or_else(|| format!("No matching asset in the latest release of {repo}"))?;
 
@@ -71,7 +73,7 @@ async fn download_latest_asset(
     Ok((tag, name, bytes))
 }
 
-/// Platform token used to pick the right `apply_crack` build.
+/// OS token used to pick the right `apply_crack` build.
 fn platform_token() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
@@ -79,6 +81,20 @@ fn platform_token() -> &'static str {
         "macos"
     } else {
         "linux"
+    }
+}
+
+/// CPU-arch token (paired with the OS token) to pick the matching `apply_crack`
+/// build when a release ships more than one arch (e.g. windows i686 + x86_64).
+fn arch_token() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "x86") {
+        "i686"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        ""
     }
 }
 
@@ -98,9 +114,11 @@ pub async fn install_pmc_bb(game_root: String) -> Result<InstallDllResult, Strin
     }
 
     let client = client()?;
-    let (tag, _name, bytes) =
-        download_latest_asset(&client, PMC_BB_REPO, |n| n.eq_ignore_ascii_case("pmc_bb.dll"))
-            .await?;
+    // pmc_bb.dll is the injected Windows ASI loader — one platform-independent
+    // asset, matched by exact name regardless of the host the modkit runs on.
+    let pick_dll = |n: &str| n.eq_ignore_ascii_case("pmc_bb.dll");
+    let picks: [&(dyn Fn(&str) -> bool + Sync); 1] = [&pick_dll];
+    let (tag, _name, bytes) = download_latest_asset(&client, PMC_BB_REPO, &picks).await?;
 
     let dest = root.join("pmc_bb.dll");
     if dest.exists() {
@@ -137,12 +155,18 @@ pub async fn crack_game(
     }
 
     let client = client()?;
-    let token = platform_token();
-    let (_tag, name, bytes) = download_latest_asset(&client, CRACK_REPO, |n| {
-        n.starts_with("apply_crack") && n.contains(token)
-    })
-    .await
-    .map_err(|e| format!("{e}. No apply_crack build for this platform ({token})?"))?;
+    let os = platform_token();
+    let arch = arch_token();
+    // Prefer the build matching our exact OS+arch (releases now ship e.g. both
+    // windows-i686 and windows-x86_64); fall back to any build for this OS so a
+    // single-arch release still resolves. apply_crack only byte-patches the exe,
+    // so the patched output is identical across arches — this is host-compat only.
+    let exact = |n: &str| n.starts_with("apply_crack") && n.contains(os) && n.contains(arch);
+    let os_only = |n: &str| n.starts_with("apply_crack") && n.contains(os);
+    let picks: [&(dyn Fn(&str) -> bool + Sync); 2] = [&exact, &os_only];
+    let (_tag, name, bytes) = download_latest_asset(&client, CRACK_REPO, &picks)
+        .await
+        .map_err(|e| format!("{e}. No apply_crack build for {os}/{arch}."))?;
 
     // Cache the tool binary and make it executable.
     let bindir = app_data_dir()?.join("bin");

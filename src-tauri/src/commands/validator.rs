@@ -9,7 +9,7 @@ use std::process::Command;
 use serde::Serialize;
 
 /// GitHub repo that publishes the `wad_simulator` release binaries.
-const REPO: &str = "Mercenaries-Fan-Build/notes-on-the-released-game";
+const REPO: &str = "Mercenaries-Fan-Build/mercs2-wad-simulator";
 
 /// Outcome of running the simulator against a WAD.
 #[derive(Debug, Serialize)]
