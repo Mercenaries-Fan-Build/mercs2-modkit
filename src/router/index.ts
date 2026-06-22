@@ -11,6 +11,11 @@ export const router = createRouter({
       component: () => import("../views/CatalogView.vue"),
     },
     {
+      path: "/game",
+      name: "game-info",
+      component: () => import("../views/GameInfoView.vue"),
+    },
+    {
       path: "/setup",
       name: "setup",
       component: () => import("../views/SetupView.vue"),

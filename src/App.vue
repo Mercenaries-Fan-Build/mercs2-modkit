@@ -43,7 +43,8 @@ onMounted(() => {
         <p class="text-xs text-zinc-500">Mercenaries 2 mod manager</p>
       </div>
 
-      <nav class="flex-1 space-y-1 px-3 py-4 text-sm">
+      <nav class="flex-1 space-y-1 px-3 py-2 text-sm">
+        <div class="uppercase monospace text-xs text-gray-400 px-4 py-2 -mx-3 tracking-widest bg-zinc-950 rounded-lg">the game</div>
         <RouterLink to="/" class="nav-link" active-class="nav-link-active">
           Library
           <span class="ml-auto rounded-full bg-zinc-800 px-2 text-xs">
@@ -55,7 +56,7 @@ onMounted(() => {
           class="nav-link"
           active-class="nav-link-active"
         >
-          Browse
+          Mod Market
         </RouterLink>
         <RouterLink
           v-if="!store.gameFullySetUp"
@@ -85,12 +86,25 @@ onMounted(() => {
         >
           Build &amp; Deploy
         </RouterLink>
+        <div class="uppercase monospace text-xs text-gray-400 px-4 py-2 -mx-3 tracking-widest bg-zinc-950 rounded-lg">debugging</div>
         <RouterLink
           to="/diagnostics"
           class="nav-link"
           active-class="nav-link-active"
         >
           Diagnostics
+        </RouterLink>
+        <RouterLink
+          to="/game"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Game Info
+          <span
+            v-if="componentUpdatesAvailable.length"
+            class="ml-auto h-1.5 w-1.5 rounded-full bg-amber-400"
+            title="An update is available for a core component"
+          />
         </RouterLink>
       </nav>
 
@@ -120,7 +134,9 @@ onMounted(() => {
         </svg>
         <span class="truncate">{{ padName }} connected</span>
       </div>
-      <div v-else>No controller connected</div>
+      <div v-else>
+        <span class="mx-8 text-sm text-gray-400">No controller connected</span>
+      </div>
 
       <div class="space-y-1.5 px-5 py-3 text-xs border-t border-zinc-800">
         <button
