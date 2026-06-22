@@ -51,30 +51,45 @@ async function deploy(item: CatalogMod) {
     working.value = null;
   }
 }
+
+// Pull the newer release into the Library, preserving enabled/deployed state.
+async function update(item: CatalogMod) {
+  const lib = store.catalogLibMod(item);
+  if (!lib) return;
+  working.value = keyOf(item);
+  lastAction.value = null;
+  try {
+    await store.updateAsiMod(lib);
+    lastAction.value = `Updated ${item.name} → v${item.version}`;
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    working.value = null;
+  }
+}
 </script>
 
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
-    <header class="flex items-center justify-between">
-      <div>
-        <h2 class="text-xl font-semibold">Browse Catalog</h2>
-        <p class="text-sm text-zinc-500">
-          Mods from curated repositories. Download → enable → deploy; state is
-          reconciled against your game folder.
-        </p>
-      </div>
-      <button
-        class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
-        :disabled="busy"
-        @click="store.fetchCatalog()"
-      >
-        Refresh
-      </button>
+    <header>
+      <h2 class="text-xl font-semibold">Browse Catalog</h2>
+      <p class="text-sm text-zinc-500">
+        Mods from curated repositories. Download → enable → deploy; state is
+        reconciled against your game folder.
+      </p>
     </header>
 
     <p v-if="catalogSource" class="mt-1 text-xs text-zinc-600">
       source: {{ catalogSource }}
     </p>
+
+    <button
+      class="mt-4 rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+      :disabled="busy"
+      @click="store.fetchCatalog()"
+    >
+      Refresh
+    </button>
 
     <ProgressBar
       v-if="busy && !working"
@@ -121,6 +136,13 @@ async function deploy(item: CatalogMod) {
                 class="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-500"
                 >{{ item.kind }}</span
               >
+              <!-- A newer release than the installed Library copy exists -->
+              <span
+                v-if="store.catalogUpdate(item)"
+                class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300"
+                :title="`A newer release (v${store.catalogUpdate(item)}) is available — your Library copy is older`"
+                >update available</span
+              >
               <!-- Lifecycle state, reconciled against the game folder -->
               <span
                 v-if="store.catalogModState(item) === 'deployed'"
@@ -149,6 +171,16 @@ async function deploy(item: CatalogMod) {
 
           <!-- Action depends on lifecycle state: download -> enable -> deploy -->
           <div class="flex shrink-0 items-center gap-2">
+            <!-- A newer release exists for an already-downloaded mod -->
+            <button
+              v-if="store.catalogUpdate(item)"
+              class="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-amber-400 disabled:opacity-50"
+              :disabled="busy"
+              :title="`Update the Library copy to v${store.catalogUpdate(item)} and redeploy if deployed`"
+              @click="update(item)"
+            >
+              Update → v{{ store.catalogUpdate(item) }}
+            </button>
             <button
               v-if="store.catalogModState(item) === 'none'"
               class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"

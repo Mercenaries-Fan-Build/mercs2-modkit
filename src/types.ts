@@ -159,6 +159,20 @@ export interface ModkitUpdate {
   available: boolean;
 }
 
+/**
+ * Release-update status for one of modkit's core components (the pmc_bb.dll ASI
+ * loader, the apply_crack SecuROM-bypass tool). `current` is the version modkit
+ * last installed, or null if unknown (installed out-of-band / before tracking).
+ */
+export interface ComponentUpdate {
+  /** Human label, e.g. "pmc_bb.dll (ASI loader)". */
+  name: string;
+  current: string | null;
+  latest: string;
+  url: string;
+  available: boolean;
+}
+
 export interface InstallDllResult {
   path: string;
   version: string;
@@ -169,6 +183,7 @@ export interface CrackResult {
   output_path: string;
   stdout: string;
   stderr: string;
+  tool_version: string; // apply_crack release tag that was downloaded & run
 }
 
 // --- loadprobe report (pmc_blackbox.log analysis) ---

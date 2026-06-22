@@ -6,6 +6,7 @@ import type {
   BuildResult,
   CatalogMod,
   Catalog,
+  ComponentUpdate,
   ConflictGraph,
   CrackResult,
   DeployedAsi,
@@ -27,6 +28,10 @@ import type {
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
 const ASI_TARGET_KEY = "mercs2-modkit:asiTarget";
 const LIBRARY_KEY = "mercs2-modkit:library";
+// Versions of the core components modkit last installed, remembered so a later
+// release of either can be flagged as an available update.
+const PMC_BB_VERSION_KEY = "mercs2-modkit:pmcBbVersion";
+const CRACK_VERSION_KEY = "mercs2-modkit:crackVersion";
 
 function slugify(name: string): string {
   return name
@@ -75,6 +80,9 @@ function findCatalogForLib(
 
 /** Repository whose releases drive modkit's own self-update check. */
 const MODKIT_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-modkit";
+/** Repos publishing the core components modkit installs (release-checked too). */
+const PMC_BB_REPO = "https://github.com/Mercenaries-Fan-Build/pmc-blackbox";
+const CRACK_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-securom-bypass";
 
 interface ProjectState {
   // Base game
@@ -93,6 +101,11 @@ interface ProjectState {
   catalogSource: string | null;
   // modkit self-update (vs its GitHub releases)
   modkitUpdate: ModkitUpdate | null;
+  // Versions of the core components modkit last installed (null = unknown).
+  pmcBbVersion: string | null;
+  crackVersion: string | null;
+  // Release-update status per core component, keyed "pmc_bb" / "apply_crack".
+  componentUpdates: Record<string, ComponentUpdate>;
   // Settings
   asiTarget: string; // ".", "scripts", "plugins", "update"
   // Conflicts & build
@@ -115,6 +128,9 @@ export const useProjectStore = defineStore("project", {
     catalog: [],
     catalogSource: null,
     modkitUpdate: null,
+    pmcBbVersion: null,
+    crackVersion: null,
+    componentUpdates: {},
     asiTarget: "scripts",
     conflictGraph: null,
     resolutions: {},
@@ -190,6 +206,28 @@ export const useProjectStore = defineStore("project", {
       };
     },
     /**
+     * The newer version string when this catalog mod offers a release newer
+     * than the Library copy the user already downloaded, else null. Drives the
+     * "update available" badge + Update button in the Browse view.
+     */
+    catalogUpdate(state) {
+      return (item: CatalogMod): string | null => {
+        const asis = catalogAsiNames(item);
+        const lib = state.asiMods.find((m) =>
+          m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
+        );
+        if (
+          lib &&
+          item.version &&
+          lib.version &&
+          semverGt(item.version, lib.version)
+        ) {
+          return item.version;
+        }
+        return null;
+      };
+    },
+    /**
      * Lifecycle state of a catalog mod, reconciled against the game folder:
      *   "deployed"   — its .asi(s) are present in the game install
      *   "enabled"    — downloaded to the Library and enabled (not yet deployed)
@@ -217,6 +255,8 @@ export const useProjectStore = defineStore("project", {
     /** Restore remembered settings + the saved library on app start. */
     async init() {
       this.asiTarget = localStorage.getItem(ASI_TARGET_KEY) ?? "scripts";
+      this.pmcBbVersion = localStorage.getItem(PMC_BB_VERSION_KEY);
+      this.crackVersion = localStorage.getItem(CRACK_VERSION_KEY);
 
       // Restore the library (WAD mods, ASI plugins, enable flags).
       try {
@@ -489,6 +529,49 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
+    /**
+     * Check the GitHub releases of modkit's core components (the pmc_bb.dll ASI
+     * loader and the apply_crack tool) for newer versions than the ones modkit
+     * last installed. Mirrors {@link checkModkitUpdate}; results land in
+     * `componentUpdates` keyed by component id. Best-effort — offline / no-release
+     * lookups are ignored so any prior result is preserved.
+     */
+    async checkComponentUpdates() {
+      const checks: Array<{
+        key: string;
+        name: string;
+        repo: string;
+        current: string | null;
+      }> = [
+        {
+          key: "pmc_bb",
+          name: "pmc_bb.dll (ASI loader)",
+          repo: PMC_BB_REPO,
+          current: this.pmcBbVersion,
+        },
+        {
+          key: "apply_crack",
+          name: "apply_crack (SecuROM bypass)",
+          repo: CRACK_REPO,
+          current: this.crackVersion,
+        },
+      ];
+      for (const { key, name, repo, current } of checks) {
+        try {
+          const rel = await invoke<ReleaseInfo>("latest_release", { repo });
+          this.componentUpdates[key] = {
+            name,
+            current,
+            latest: rel.tag,
+            url: rel.url,
+            available: !!current && semverGt(rel.tag, current),
+          };
+        } catch {
+          /* offline or no releases yet — keep any prior result */
+        }
+      }
+    },
+
     async setGameFolder(path: string) {
       this.gamePath = path;
       localStorage.setItem(GAME_PATH_KEY, path);
@@ -622,7 +705,12 @@ export const useProjectStore = defineStore("project", {
         const res = await invoke<InstallDllResult>("install_pmc_bb", {
           gameRoot: this.gameInfo.root,
         });
+        // Remember what we just installed so future release checks compare
+        // like-for-like (this also clears any stale "update available" flag).
+        this.pmcBbVersion = res.version;
+        localStorage.setItem(PMC_BB_VERSION_KEY, res.version);
         await this.refreshGame().catch(() => {});
+        void this.checkComponentUpdates();
         return res;
       } catch (e) {
         this.error = String(e);
@@ -646,6 +734,13 @@ export const useProjectStore = defineStore("project", {
           outputPath: opts.outputPath,
           updateToV11: opts.updateToV11,
         });
+        // Remember the apply_crack build we ran so a later release shows as an
+        // available update.
+        if (res.tool_version) {
+          this.crackVersion = res.tool_version;
+          localStorage.setItem(CRACK_VERSION_KEY, res.tool_version);
+          void this.checkComponentUpdates();
+        }
         await this.refreshGame().catch(() => {});
         return res;
       } catch (e) {
@@ -683,7 +778,10 @@ export const useProjectStore = defineStore("project", {
       return await invoke<RuntimeInfo>("discover_runtime", { overrides });
     },
 
-    async launchGame(overrides: RuntimeOverrides | null = null) {
+    async launchGame(
+      overrides: RuntimeOverrides | null = null,
+      verboseLog = false,
+    ) {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.error = null;
       try {
@@ -691,6 +789,7 @@ export const useProjectStore = defineStore("project", {
           exePath: this.gameInfo.exe_path,
           gameRoot: this.gameInfo.root,
           overrides,
+          verboseLog,
         });
         this.gameRunning = true;
       } catch (e) {

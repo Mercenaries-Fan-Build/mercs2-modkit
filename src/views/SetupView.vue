@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
@@ -7,7 +7,11 @@ import type { CrackResult } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
 
 const store = useProjectStore();
-const { gameInfo, busy, error } = storeToRefs(store);
+const { gameInfo, busy, error, componentUpdates, pmcBbVersion, crackVersion } =
+  storeToRefs(store);
+
+const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
+const crackUpdate = computed(() => componentUpdates.value["apply_crack"]);
 
 const updateToV11 = ref(true);
 const outputPath = ref<string | null>(null);
@@ -115,15 +119,36 @@ async function runCrack() {
               places it next to the exe.
             </p>
             <p class="mt-1 text-xs" :class="gameInfo.has_pmc_bb ? 'text-emerald-400' : 'text-zinc-500'">
-              {{ gameInfo.has_pmc_bb ? "Currently installed ✓" : "Not installed" }}
+              {{ gameInfo.has_pmc_bb ? "Currently installed ✓" : "Not installed"
+              }}<span v-if="gameInfo.has_pmc_bb && pmcBbVersion">
+                ({{ pmcBbVersion }})</span
+              >
+            </p>
+            <p
+              v-if="pmcBbUpdate?.available"
+              class="mt-1 flex items-center gap-1.5 text-xs font-medium text-amber-300"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              New release available → {{ pmcBbUpdate.latest }}
             </p>
           </div>
           <button
-            class="shrink-0 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+            class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            :class="
+              pmcBbUpdate?.available
+                ? 'bg-amber-500 text-zinc-900 hover:bg-amber-400'
+                : 'bg-emerald-600 hover:bg-emerald-500'
+            "
             :disabled="busy"
             @click="installPmcBb"
           >
-            {{ gameInfo.has_pmc_bb ? "Reinstall" : "Install" }}
+            {{
+              pmcBbUpdate?.available
+                ? "Update"
+                : gameInfo.has_pmc_bb
+                  ? "Reinstall"
+                  : "Install"
+            }}
           </button>
         </div>
         <p
@@ -140,6 +165,19 @@ async function runCrack() {
         <p class="mt-1 text-sm text-zinc-400">
           Applies the SecuROM bypass (and optionally updates v1.0 → v1.1),
           writing a new cracked exe that loads pmc_bb.dll.
+        </p>
+        <p
+          v-if="crackVersion"
+          class="mt-1 text-xs"
+          :class="crackUpdate?.available ? 'text-amber-300' : 'text-zinc-500'"
+        >
+          <template v-if="crackUpdate?.available">
+            <span
+              class="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-400 align-middle"
+            />New apply_crack release available → {{ crackUpdate.latest }}
+            (you last ran {{ crackVersion }}) — re-crack to apply it.
+          </template>
+          <template v-else>Last ran apply_crack {{ crackVersion }}.</template>
         </p>
 
         <label class="mt-3 flex items-center gap-2 text-sm text-zinc-300">

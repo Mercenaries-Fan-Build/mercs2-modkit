@@ -81,6 +81,7 @@ pub fn launch_game(
     exe_path: String,
     game_root: Option<String>,
     overrides: Option<LaunchOverrides>,
+    verbose_log: Option<bool>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|_| "Game process lock poisoned")?;
 
@@ -107,8 +108,10 @@ pub fn launch_game(
     // won't run under Wine.
     let run_exe = launch_exe(&game_dir, &exe);
     let ov = overrides.unwrap_or_default();
+    // Verbose pmc_blackbox log hooks are opt-in per launch (expensive); default off.
+    let verbose = verbose_log.unwrap_or(false);
 
-    let mut cmd = build_command(&game_dir, &run_exe, &ov)?;
+    let mut cmd = build_command(&game_dir, &run_exe, &ov, verbose)?;
     let child = cmd
         .spawn()
         .map_err(|e| format!("Failed to launch game: {e}"))?;
@@ -147,9 +150,17 @@ fn launch_exe(game_dir: &Path, detected: &Path) -> PathBuf {
 
 /// Windows/macOS: spawn the exe directly with the install dir as the cwd.
 #[cfg(not(target_os = "linux"))]
-fn build_command(game_dir: &Path, run_exe: &Path, _ov: &LaunchOverrides) -> Result<Command, String> {
+fn build_command(
+    game_dir: &Path,
+    run_exe: &Path,
+    _ov: &LaunchOverrides,
+    verbose: bool,
+) -> Result<Command, String> {
     let mut cmd = Command::new(run_exe);
     cmd.current_dir(game_dir);
+    // Gate pmc_blackbox's verbose log hooks; set explicitly so an inherited
+    // value can't silently turn it back on.
+    cmd.env("PMC_VERBOSE_LOG", if verbose { "1" } else { "0" });
     Ok(cmd)
 }
 
@@ -360,7 +371,12 @@ fn resolve_runtime(ov: &LaunchOverrides) -> RuntimeInfo {
 /// Linux: build the launch command from resolved/overridden runtime paths, after
 /// a preflight that fails with an actionable fix for each known blocker.
 #[cfg(target_os = "linux")]
-fn build_command(game_dir: &Path, run_exe: &Path, ov: &LaunchOverrides) -> Result<Command, String> {
+fn build_command(
+    game_dir: &Path,
+    run_exe: &Path,
+    ov: &LaunchOverrides,
+    verbose: bool,
+) -> Result<Command, String> {
     let r = resolve(ov)?;
 
     if r.use_container {
@@ -402,7 +418,7 @@ fn build_command(game_dir: &Path, run_exe: &Path, ov: &LaunchOverrides) -> Resul
     // install path at the game dir and bind-mount its canonical path so the exe
     // resolves on a Deck regardless of where the library sits.
     let game_mount = std::fs::canonicalize(game_dir).unwrap_or_else(|_| game_dir.to_path_buf());
-    let envs: [(&str, OsString); 8] = [
+    let envs: [(&str, OsString); 9] = [
         ("STEAM_COMPAT_CLIENT_INSTALL_PATH", r.steam_root.clone().into_os_string()),
         ("STEAM_COMPAT_DATA_PATH", r.prefix.clone().into_os_string()),
         ("STEAM_COMPAT_INSTALL_PATH", game_mount.clone().into_os_string()),
@@ -413,6 +429,9 @@ fn build_command(game_dir: &Path, run_exe: &Path, ov: &LaunchOverrides) -> Resul
         ("SteamGameId", "0".into()),
         ("STEAM_COMPAT_APP_ID", "0".into()),
         ("PROTON_LOG", "0".into()),
+        // Gate pmc_blackbox's verbose log hooks. Proton forwards the process
+        // environment into the Wine process, so the in-game DLL reads this.
+        ("PMC_VERBOSE_LOG", if verbose { "1".into() } else { "0".into() }),
     ];
 
     let cmd = if in_flatpak() {

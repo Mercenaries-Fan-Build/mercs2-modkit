@@ -139,6 +139,9 @@ pub struct CrackResult {
     pub output_path: String,
     pub stdout: String,
     pub stderr: String,
+    /// Release tag of the `apply_crack` build that was downloaded and run, so the
+    /// UI can persist it and later flag a newer release.
+    pub tool_version: String,
 }
 
 /// Download `apply_crack` and run it on the exe to apply the SecuROM bypass,
@@ -164,7 +167,7 @@ pub async fn crack_game(
     let exact = |n: &str| n.starts_with("apply_crack") && n.contains(os) && n.contains(arch);
     let os_only = |n: &str| n.starts_with("apply_crack") && n.contains(os);
     let picks: [&(dyn Fn(&str) -> bool + Sync); 2] = [&exact, &os_only];
-    let (_tag, name, bytes) = download_latest_asset(&client, CRACK_REPO, &picks)
+    let (tag, name, bytes) = download_latest_asset(&client, CRACK_REPO, &picks)
         .await
         .map_err(|e| format!("{e}. No apply_crack build for {os}/{arch}."))?;
 
@@ -198,5 +201,6 @@ pub async fn crack_game(
         output_path: out,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        tool_version: tag,
     })
 }

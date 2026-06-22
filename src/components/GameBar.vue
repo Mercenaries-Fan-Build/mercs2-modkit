@@ -10,6 +10,10 @@ const { gameInfo, gamePath, busy, gameRunning } = storeToRefs(store);
 // In-flight launch/stop, so the button can't be double-fired.
 const transitioning = ref(false);
 
+// Arm pmc_blackbox's verbose log hooks for the next launch. Off by default —
+// the per-line disk flush is too costly for regular play; opt in to diagnose.
+const verboseLog = ref(false);
+
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   store.refreshRunning();
@@ -23,7 +27,7 @@ async function play() {
   if (transitioning.value || gameRunning.value) return;
   transitioning.value = true;
   try {
-    await store.launchGame();
+    await store.launchGame(null, verboseLog.value);
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -88,73 +92,76 @@ function versionTone(v: string): string {
 
     <!-- Game detected -->
     <template v-else>
-      <div class="flex items-center gap-3">
+      <div class="flex items-start gap-3">
         <div
           class="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-800 text-xs font-bold text-zinc-400"
         >
           M2
         </div>
-        <div>
+        <div class="min-w-0">
           <p class="text-sm font-medium text-zinc-100">Mercenaries 2</p>
           <p class="font-mono text-[11px] text-zinc-500" :title="gamePath ?? ''">
             {{ tail(gameInfo.root) }}
           </p>
+          <!-- Status badges live under the folder path so they don't crowd the
+               launch controls; compact 10px chips that wrap as needed. -->
+          <div class="mt-1 flex flex-wrap items-center gap-1.5">
+            <span
+              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+              :class="versionTone(gameInfo.version)"
+            >
+              {{ gameInfo.version }}
+            </span>
+            <span
+              v-if="gameInfo.variant !== 'unknown'"
+              class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+            >
+              {{ gameInfo.variant }}
+            </span>
+            <span
+              class="chip"
+              :class="gameInfo.has_pmc_bb ? 'chip-ok' : 'chip-off'"
+              title="pmc_bb.dll — our ASI loader + SecuROM spoof"
+            >
+              {{
+                gameInfo.has_pmc_bb
+                  ? "pmc_bb.dll ✓ (ASI loader)"
+                  : "pmc_bb.dll ✗ (ASI loader)"
+              }}
+            </span>
+            <span
+              v-if="
+                gameInfo.asi_loader_proxy &&
+                gameInfo.asi_loader_proxy !== 'pmc_bb.dll'
+              "
+              class="chip chip-off"
+              :title="`Alternate ASI loader proxy: ${gameInfo.asi_loader_proxy}`"
+            >
+              alt loader: {{ gameInfo.asi_loader_proxy }}
+            </span>
+            <span
+              v-if="gameInfo.deployed_asi.length"
+              class="rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300"
+              :title="gameInfo.deployed_asi.map((a) => a.rel_path).join('\n')"
+            >
+              {{ gameInfo.deployed_asi.length }} ASI plugin{{
+                gameInfo.deployed_asi.length === 1 ? "" : "s"
+              }}
+            </span>
+            <span
+              v-if="gameInfo.deployed_patches.length"
+              class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[10px] text-indigo-300"
+              :title="gameInfo.deployed_patches.join('\n')"
+            >
+              {{ gameInfo.deployed_patches.length }} patch WAD{{
+                gameInfo.deployed_patches.length === 1 ? "" : "s"
+              }} deployed
+            </span>
+          </div>
         </div>
       </div>
 
-      <div class="flex flex-1 flex-wrap items-center gap-1.5">
-        <span
-          class="rounded-full px-2 py-0.5 text-xs font-medium"
-          :class="versionTone(gameInfo.version)"
-        >
-          {{ gameInfo.version }}
-        </span>
-        <span
-          v-if="gameInfo.variant !== 'unknown'"
-          class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400"
-        >
-          {{ gameInfo.variant }}
-        </span>
-        <span
-          class="chip"
-          :class="gameInfo.has_pmc_bb ? 'chip-ok' : 'chip-off'"
-          title="pmc_bb.dll — our ASI loader + SecuROM spoof"
-        >
-          {{
-            gameInfo.has_pmc_bb
-              ? "pmc_bb.dll ✓ (ASI loader)"
-              : "pmc_bb.dll ✗ (ASI loader)"
-          }}
-        </span>
-        <span
-          v-if="
-            gameInfo.asi_loader_proxy &&
-            gameInfo.asi_loader_proxy !== 'pmc_bb.dll'
-          "
-          class="chip chip-off"
-          :title="`Alternate ASI loader proxy: ${gameInfo.asi_loader_proxy}`"
-        >
-          alt loader: {{ gameInfo.asi_loader_proxy }}
-        </span>
-        <span
-          v-if="gameInfo.deployed_asi.length"
-          class="rounded-full bg-violet-500/15 px-2 py-0.5 text-xs text-violet-300"
-          :title="gameInfo.deployed_asi.map((a) => a.rel_path).join('\n')"
-        >
-          {{ gameInfo.deployed_asi.length }} ASI plugin{{
-            gameInfo.deployed_asi.length === 1 ? "" : "s"
-          }}
-        </span>
-        <span
-          v-if="gameInfo.deployed_patches.length"
-          class="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs text-indigo-300"
-          :title="gameInfo.deployed_patches.join('\n')"
-        >
-          {{ gameInfo.deployed_patches.length }} patch WAD{{
-            gameInfo.deployed_patches.length === 1 ? "" : "s"
-          }} deployed
-        </span>
-      </div>
+      <div class="flex-1"></div>
 
       <div class="flex items-center gap-2">
         <span
@@ -165,11 +172,28 @@ function versionTone(v: string): string {
           <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
           Running
         </span>
+        <label
+          v-if="!gameRunning"
+          class="flex items-center gap-1.5 text-xs text-zinc-400 select-none"
+          title="Arm pmc_blackbox's verbose Lua/engine log hooks for this launch. Off by default — the per-line disk flush is expensive, so reserve it for diagnostic runs."
+        >
+          <input
+            type="checkbox"
+            v-model="verboseLog"
+            :disabled="busy || transitioning"
+            class="accent-emerald-600"
+          />
+          Verbose log
+        </label>
         <button
           v-if="!gameRunning"
           class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
           :disabled="busy || transitioning"
-          title="Launch Mercenaries 2"
+          :title="
+            verboseLog
+              ? 'Launch Mercenaries 2 with verbose pmc_blackbox logging'
+              : 'Launch Mercenaries 2'
+          "
           data-gamepad-play
           @click="play"
         >
@@ -206,8 +230,8 @@ function versionTone(v: string): string {
 <style scoped>
 .chip {
   border-radius: 9999px;
-  padding: 0.125rem 0.5rem;
-  font-size: 0.75rem;
+  padding: 0.125rem 0.375rem;
+  font-size: 0.625rem;
 }
 .chip-ok {
   background-color: rgb(16 185 129 / 0.15);

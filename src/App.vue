@@ -8,7 +8,13 @@ import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 
 const store = useProjectStore();
-const { mods, asiMods, conflictCount, modkitUpdate } = storeToRefs(store);
+const { mods, asiMods, conflictCount, modkitUpdate, componentUpdates } =
+  storeToRefs(store);
+
+// Core components (pmc_bb, apply_crack) with a newer release than what's installed.
+const componentUpdatesAvailable = computed(() =>
+  Object.values(componentUpdates.value).filter((c) => c.available)
+);
 
 // Drive the whole UI from a controller when no keyboard is handy.
 const { connected: padConnected, controllerId } = useGamepadNavigation();
@@ -22,6 +28,7 @@ const padName = computed(
 onMounted(() => {
   store.init();
   store.checkModkitUpdate();
+  store.checkComponentUpdates();
 });
 </script>
 
@@ -115,7 +122,7 @@ onMounted(() => {
       </div>
       <div v-else>No controller connected</div>
 
-      <div class="px-5 py-3 text-xs border-t border-zinc-800">
+      <div class="space-y-1.5 px-5 py-3 text-xs border-t border-zinc-800">
         <button
           v-if="modkitUpdate?.available"
           class="flex items-center gap-1.5 font-medium text-emerald-400 hover:underline"
@@ -128,6 +135,17 @@ onMounted(() => {
         <span v-else class="text-zinc-600">
           v{{ modkitUpdate?.current ?? "0.1.0" }}
         </span>
+        <!-- Core components (pmc_bb.dll, apply_crack) with a newer release. -->
+        <button
+          v-for="comp in componentUpdatesAvailable"
+          :key="comp.name"
+          class="flex items-center gap-1.5 font-medium text-amber-400 hover:underline"
+          :title="`Installed ${comp.current ?? '?'} — open the ${comp.latest} release of ${comp.name}.`"
+          @click="openUrl(comp.url)"
+        >
+          <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
+          {{ comp.name.split(" ")[0] }} update → {{ comp.latest }}
+        </button>
       </div>
     </aside>
 
