@@ -43,6 +43,17 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Set release version from tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+            echo "Stamping build with version $VERSION"
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          else
+            echo "Not a tag build; keeping version from tauri.conf.json"
+          fi
+
       - name: Build Tauri app (Linux x64)
         run: npm run tauri build -- --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage
 
@@ -72,6 +83,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Determine release version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="dev"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Flatpak bundle version: $VERSION"
+
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
         with:
@@ -95,21 +117,21 @@ jobs:
         run: |
           flatpak-builder --user --force-clean --repo=repo \
             build-dir src-tauri/flatpak/com.mercenaries_fan_build.modkit.yml
-          flatpak build-bundle repo mercs2-modkit-x86_64.flatpak \
+          flatpak build-bundle repo "mercs2-modkit-${VERSION}-x86_64.flatpak" \
             com.mercenaries_fan_build.modkit
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mercs2-modkit-linux-flatpak
-          path: mercs2-modkit-x86_64.flatpak
+          path: mercs2-modkit-${{ env.VERSION }}-x86_64.flatpak
           if-no-files-found: error
 
       - name: Attach to GitHub release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: mercs2-modkit-x86_64.flatpak
+          files: mercs2-modkit-${{ env.VERSION }}-x86_64.flatpak
 
   windows:
     runs-on: windows-latest
@@ -131,6 +153,17 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Set release version from tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+            echo "Stamping build with version $VERSION"
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          else
+            echo "Not a tag build; keeping version from tauri.conf.json"
+          fi
 
       - name: Build Tauri app (Windows x64)
         run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
