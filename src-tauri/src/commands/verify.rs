@@ -394,6 +394,13 @@ fn is_wad(key: &str) -> bool {
     key.ends_with(".wad")
 }
 
+/// A WAD whose every block hashed to empty is truncated/damaged (e.g. a 2.4 GB
+/// vz.wad cut down to its 2 MB header). The generator uses this to refuse to
+/// ship a bogus baseline.
+pub fn wad_looks_truncated(wm: &WadManifest) -> bool {
+    !wm.blocks.is_empty() && wm.blocks.iter().all(|b| b.size == 0)
+}
+
 // ----------------------------------------------------------------------------
 // Manifest building (shared by the command and the offline generator)
 // ----------------------------------------------------------------------------
@@ -780,4 +787,161 @@ fn identify_exe(root: &Path, name: &str, catalog: &[ExeEntry]) -> Option<ExeRepo
 
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
     serde_json::from_slice(bytes).map_err(|e| format!("Manifest isn't valid JSON: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn exe(version: &str, variant: &str, label: Option<&str>, requires: Option<&str>, hash: &str) -> ExeEntry {
+        ExeEntry {
+            version: version.into(),
+            variant: variant.into(),
+            label: label.map(Into::into),
+            requires: requires.map(Into::into),
+            note: Some("caveat".into()),
+            size: 3,
+            hash: hash.into(),
+        }
+    }
+
+    #[test]
+    fn excludes_executables_caches_and_config() {
+        // Executables — incl. the named variants that leaked into a baseline once.
+        for k in [
+            "mercenaries2.exe",
+            "mercenaries2.cracked.exe",
+            "mercenaries2 (v1.0 signed).exe",
+            "mercenaries2(v1.1 cruise.dll).exe",
+            "pmc_bb.dll",
+            "vz-patch.wad",
+            "foo-patch.wad",
+            "precache/display0.precache",
+            "scripts/plugin.asi",
+            "mercs2.ini",
+            "data/cdbsizes.ini",
+            "d3d.log",
+            "x.bak",
+            ".ds_store",
+            ".vs/slnx.sqlite",
+        ] {
+            assert!(is_excluded(k), "{k} should be excluded");
+        }
+    }
+
+    #[test]
+    fn keeps_real_distribution_files() {
+        // Including non-Mercenaries2 installer executables, which are real files.
+        for k in [
+            "binkw32.dll",
+            "data/vz.wad",
+            "data/english.wad",
+            "msvcr71.dll",
+            "support/winui.dll",
+            "__installer/disk1/easetup.exe",
+        ] {
+            assert!(!is_excluded(k), "{k} should NOT be excluded");
+        }
+    }
+
+    #[test]
+    fn rel_key_lowercases_and_forward_slashes() {
+        let root = Path::new("/game");
+        let got = rel_key(root, Path::new("/game/Data/VZ.WAD")).unwrap();
+        assert_eq!(got, "data/vz.wad");
+    }
+
+    #[test]
+    fn md5_matches_known_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a");
+        std::fs::write(&f, b"abc").unwrap();
+        let (size, hash) = md5_file(&f).unwrap();
+        assert_eq!(size, 3);
+        assert_eq!(hash, "900150983cd24fb0d6963f7d28e17f72");
+
+        std::fs::write(&f, b"").unwrap();
+        assert_eq!(md5_file(&f).unwrap().1, "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn identifies_exe_and_warns_on_missing_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap();
+        // md5("abc") = 900150983cd24fb0d6963f7d28e17f72
+        let catalog = vec![exe(
+            "v1.1",
+            "cracked",
+            Some("cruise.dll crack"),
+            Some("cruise.dll"),
+            "900150983cd24fb0d6963f7d28e17f72",
+        )];
+
+        // Sidecar absent → identified, plus a missing-DLL warning and the caveat.
+        let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
+        assert_eq!(r.identified_as.as_deref(), Some("v1.1 cracked — cruise.dll crack"));
+        assert_eq!(r.notes.len(), 2);
+        assert!(r.notes.iter().any(|n| n.contains("cruise.dll") && n.contains("game folder")));
+
+        // Sidecar present → only the caveat note.
+        std::fs::write(dir.path().join("cruise.dll"), b"x").unwrap();
+        let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
+        assert_eq!(r.notes, vec!["caveat".to_string()]);
+    }
+
+    #[test]
+    fn unrecognized_exe_hints_by_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap(); // size 3
+        let catalog = vec![exe("v1.1", "cracked", None, None, "deadbeef")]; // size 3, wrong hash
+        let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
+        assert!(r.identified_as.is_none());
+        assert_eq!(r.notes.len(), 1);
+        assert!(r.notes[0].contains("Unrecognized"));
+    }
+
+    #[test]
+    fn truncated_wad_is_flagged() {
+        let empty = WadManifest {
+            blocks: vec![
+                BlockFp { path: "a".into(), size: 0, hash: "x".into() },
+                BlockFp { path: "b".into(), size: 0, hash: "y".into() },
+            ],
+            assets: vec![],
+        };
+        assert!(wad_looks_truncated(&empty));
+
+        let ok = WadManifest {
+            blocks: vec![BlockFp { path: "a".into(), size: 10, hash: "x".into() }],
+            assets: vec![],
+        };
+        assert!(!wad_looks_truncated(&ok));
+        // An empty catalogue is not "truncated".
+        assert!(!wad_looks_truncated(&WadManifest { blocks: vec![], assets: vec![] }));
+    }
+
+    #[test]
+    fn manifest_json_roundtrips_and_tolerates_old_shape() {
+        let m = Manifest {
+            algo: "md5".into(),
+            files: [("binkw32.dll".to_string(), ManifestEntry { size: 1, hash: "h".into() })]
+                .into_iter()
+                .collect(),
+            exes: vec![exe("v1.0", "ea-signed", None, None, "h")],
+            wads: BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_slice(json.as_bytes()).unwrap();
+        assert_eq!(back.files["binkw32.dll"].size, 1);
+        assert_eq!(back.exes.len(), 1);
+
+        // A pre-feature manifest (no exes/wads, exe without requires/note) still loads.
+        let old = br#"{"algo":"md5","files":{"a":{"size":2,"hash":"z"}},
+            "exes":[{"version":"v1.0","variant":"unsigned","size":1,"hash":"e"}]}"#;
+        let parsed = parse_manifest(old).unwrap();
+        assert!(parsed.wads.is_empty());
+        assert_eq!(parsed.exes[0].requires, None);
+        assert_eq!(parsed.exes[0].note, None);
+    }
 }

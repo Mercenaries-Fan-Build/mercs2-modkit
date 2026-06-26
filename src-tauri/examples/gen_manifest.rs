@@ -123,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Refuse to write rather than ship a bogus baseline (we got bitten by a
     // 2.4 GB vz.wad truncated to its 2 MB header).
     for (key, w) in &manifest.wads {
-        if !w.blocks.is_empty() && w.blocks.iter().all(|b| b.size == 0) {
+        if mercs2_modkit_lib::commands::verify::wad_looks_truncated(w) {
             return Err(format!(
                 "{key}: every block hashed to empty — the reference WAD looks \
                  truncated/damaged ({} bytes). Restore a clean copy and re-run.",
