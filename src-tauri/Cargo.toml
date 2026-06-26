@@ -35,3 +35,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Unpacking downloaded mod release artifacts
 zip = "2"
 
+# Game-file integrity verification: MD5 hashing, parallelized across files
+md-5 = "0.10"
+rayon = "1"
+

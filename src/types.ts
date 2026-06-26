@@ -199,6 +199,58 @@ export interface InstallVcRedistResult {
   message: string;
 }
 
+/** A vanilla file that exists but no longer matches its manifest fingerprint. */
+export interface FileDiff {
+  path: string;
+  expected_size: number;
+  actual_size: number;
+  expected_hash: string;
+  actual_hash: string;
+}
+
+/** Identification of one on-disk executable against the catalog. */
+export interface ExeReport {
+  file: string;
+  size: number;
+  hash: string;
+  identifiedAs: string | null; // catalog description when the hash matched
+  notes: string[]; // unrecognized hint, missing sidecar DLL, modding caveat
+}
+
+/** Block-level diff for one WAD whose whole-file hash didn't match. */
+export interface WadDiff {
+  wad: string;
+  modified: string[]; // vanilla blocks present but changed
+  missing: string[]; // vanilla blocks absent
+  added: string[]; // blocks with no vanilla counterpart (added content)
+  affectedAssets: number; // catalogued assets carried by the changed/missing blocks
+}
+
+/** Result of verifying the install against a known-good manifest. */
+export interface VerifyReport {
+  ok: number;
+  missing: string[]; // shared files absent on disk (critical)
+  corrupt: FileDiff[]; // present but changed/damaged
+  extra: string[]; // on disk, not in the manifest (mods/saves) — informational
+  ignored: number; // excluded files skipped (exe, caches, config, mods)
+  exes: ExeReport[]; // identification of the main + cracked executables
+  wadDetails: WadDiff[]; // per-WAD block breakdown for mismatched WADs
+  manifestSource: string;
+}
+
+export interface GenerateManifestResult {
+  path: string;
+  fileCount: number;
+  blockCount: number;
+  totalBytes: number;
+}
+
+/** `verify-progress` / `manifest-progress` event payload. */
+export interface HashProgress {
+  done: number;
+  total: number;
+}
+
 // --- loadprobe report (pmc_blackbox.log analysis) ---
 
 export type Verdict =

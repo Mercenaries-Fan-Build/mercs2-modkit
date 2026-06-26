@@ -14,4 +14,5 @@ pub mod setup;
 pub mod updates;
 pub mod validator;
 pub mod vcredist;
+pub mod verify;
 pub mod wad_builder;

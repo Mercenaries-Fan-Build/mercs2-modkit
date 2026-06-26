@@ -25,6 +25,8 @@ import type {
   ValidationResult,
   VcRedistStatus,
   InstallVcRedistResult,
+  VerifyReport,
+  GenerateManifestResult,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
@@ -627,6 +629,29 @@ export const useProjectStore = defineStore("project", {
       } finally {
         this.busy = false;
       }
+    },
+
+    /** Verify the install against a known-good manifest (Steam-style). Pass a
+     *  local manifest path to test before publishing; omit it to fetch the
+     *  published manifest for the detected version. */
+    async verifyGame(manifestPath?: string): Promise<VerifyReport> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      return await invoke<VerifyReport>("verify_game", {
+        gameRoot: this.gameInfo.root,
+        manifestPath: manifestPath ?? null,
+      });
+    },
+
+    /** Maintainer tool: hash a clean install into a reference manifest. */
+    async generateManifest(): Promise<GenerateManifestResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      return await invoke<GenerateManifestResult>("generate_manifest", {
+        gameRoot: this.gameInfo.root,
+        version: this.gameInfo.version,
+        variant: this.gameInfo.variant,
+      });
     },
 
     async loadModFromDir(path: string) {

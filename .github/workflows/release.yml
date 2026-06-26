@@ -5,6 +5,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Strips maintainer-only UI (e.g. the reference-manifest card) from pipeline
+# release builds. Local `tauri dev`/`tauri build` leave it unset, so it shows.
+env:
+  VITE_RELEASE_BUILD: "true"
+
 jobs:
   linux:
     runs-on: ubuntu-22.04
