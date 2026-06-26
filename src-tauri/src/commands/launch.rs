@@ -104,6 +104,12 @@ pub fn launch_game(
         .or_else(|| exe.parent().map(|p| p.to_path_buf()))
         .ok_or("Could not resolve the game directory")?;
 
+    // Note: the VC++ 2008 runtime is offered as an optional install in Game Info,
+    // but it is NOT a launch precondition — the game ships its CRTs (msvcr71/80)
+    // app-locally, so a missing system VC90 must not block launch. The real cause
+    // of a "binkw32.dll was not found" dialog is usually a missing/damaged game
+    // file; Diagnostics → "Verify game files" pinpoints that.
+
     // Prefer the de-DRM'd exe (it imports pmc_bb.dll); the stock SecuROM exe
     // won't run under Wine.
     let run_exe = launch_exe(&game_dir, &exe);

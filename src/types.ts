@@ -186,6 +186,19 @@ export interface CrackResult {
   tool_version: string; // apply_crack release tag that was downloaded & run
 }
 
+/** Whether the 32-bit Microsoft Visual C++ 2008 runtime is installed. */
+export interface VcRedistStatus {
+  applicable: boolean; // false on non-Windows hosts (handled by the Proton prefix)
+  installed: boolean;
+  detail: string;
+}
+
+export interface InstallVcRedistResult {
+  installed: boolean;
+  already_present: boolean;
+  message: string;
+}
+
 // --- loadprobe report (pmc_blackbox.log analysis) ---
 
 export type Verdict =

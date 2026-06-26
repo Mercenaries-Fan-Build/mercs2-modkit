@@ -5,13 +5,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
 
 const store = useProjectStore();
-const { gameInfo, busy, error, pmcBbVersion, componentUpdates } =
+const { gameInfo, busy, error, pmcBbVersion, componentUpdates, vcRedist } =
   storeToRefs(store);
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
 const checking = ref(false);
 const stage = ref("");
 const pmcMsg = ref<string | null>(null);
+const vcMsg = ref<string | null>(null);
 
 function versionTone(v: string): string {
   if (v === "v1.1") return "bg-emerald-500/15 text-emerald-300";
@@ -44,6 +45,19 @@ async function installPmcBb() {
   try {
     const res = await store.installPmcBb();
     pmcMsg.value = `Installed pmc_bb.dll ${res.version} → ${res.path}`;
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    stage.value = "";
+  }
+}
+
+async function installVcRedist() {
+  stage.value = "Downloading the Microsoft VC++ 2008 runtime… (approve the UAC prompt)";
+  vcMsg.value = null;
+  try {
+    const res = await store.installVcRedist();
+    vcMsg.value = res.message;
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -119,6 +133,13 @@ async function installPmcBb() {
             Needs v1.1 + cracked exe + pmc_bb.dll. Finish in
             <RouterLink to="/setup" class="underline">Setup</RouterLink>.
           </template>
+        </p>
+        <p
+          v-if="store.vcRedistMissing"
+          class="mt-2 text-sm font-medium text-amber-300"
+        >
+          ⚠ The 32-bit Visual C++ 2008 runtime is missing — the game won't launch
+          (“binkw32.dll was not found”) until it's installed below.
         </p>
       </div>
 
@@ -278,6 +299,77 @@ async function installPmcBb() {
                   ? "Reinstall"
                   : "Install"
             }}
+          </button>
+        </div>
+      </section>
+
+      <!-- Microsoft Visual C++ 2008 runtime (host dependency) -->
+      <section
+        v-if="vcRedist?.applicable"
+        class="mt-4 rounded-xl border p-5"
+        :class="
+          vcRedist.installed
+            ? 'border-zinc-800'
+            : 'border-amber-500/40 bg-amber-500/5'
+        "
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <h3 class="font-medium text-zinc-100">
+              Microsoft Visual C++ 2008 runtime
+            </h3>
+            <p class="mt-1 text-sm text-zinc-400">
+              The game and its binkw32.dll are 32-bit and need the VC++ 2008
+              (x86) runtime. Without it, Windows can't load binkw32.dll and shows
+              <span class="text-zinc-300"
+                >“binkw32.dll was not found”</span
+              >
+              at launch.
+            </p>
+
+            <dl class="mt-3 space-y-2 text-sm">
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Status</dt>
+                <dd>
+                  <span
+                    class="rounded-full px-2 py-0.5 text-xs font-medium"
+                    :class="
+                      vcRedist.installed
+                        ? 'bg-emerald-500/15 text-emerald-300'
+                        : 'bg-amber-500/15 text-amber-300'
+                    "
+                    >{{
+                      vcRedist.installed ? "Installed ✓" : "Not installed"
+                    }}</span
+                  >
+                </dd>
+              </div>
+            </dl>
+
+            <p
+              v-if="!vcRedist.installed"
+              class="mt-3 text-sm text-amber-300/90"
+            >
+              modkit will download the genuine Microsoft-signed installer,
+              verify its signature, and run it (you'll see a Windows UAC prompt
+              showing Microsoft as the publisher).
+            </p>
+
+            <p
+              v-if="vcMsg"
+              class="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300"
+            >
+              {{ vcMsg }}
+            </p>
+          </div>
+
+          <button
+            v-if="!vcRedist.installed"
+            class="shrink-0 rounded-lg bg-amber-500 px-3 py-2 text-sm font-medium text-zinc-900 hover:bg-amber-400 disabled:opacity-50"
+            :disabled="busy"
+            @click="installVcRedist"
+          >
+            Install runtime
           </button>
         </div>
       </section>
