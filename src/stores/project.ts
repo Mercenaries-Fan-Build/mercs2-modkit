@@ -23,6 +23,10 @@ import type {
   RuntimeOverrides,
   TrashResult,
   ValidationResult,
+  VcRedistStatus,
+  InstallVcRedistResult,
+  VerifyReport,
+  GenerateManifestResult,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
@@ -106,6 +110,8 @@ interface ProjectState {
   crackVersion: string | null;
   // Release-update status per core component, keyed "pmc_bb" / "apply_crack".
   componentUpdates: Record<string, ComponentUpdate>;
+  // Host's 32-bit VC++ 2008 runtime status (null = not yet checked).
+  vcRedist: VcRedistStatus | null;
   // Settings
   asiTarget: string; // ".", "scripts", "plugins", "update"
   // Conflicts & build
@@ -131,6 +137,7 @@ export const useProjectStore = defineStore("project", {
     pmcBbVersion: null,
     crackVersion: null,
     componentUpdates: {},
+    vcRedist: null,
     asiTarget: "scripts",
     conflictGraph: null,
     resolutions: {},
@@ -158,6 +165,11 @@ export const useProjectStore = defineStore("project", {
     gameReady(state): boolean {
       const g = state.gameInfo;
       return !!g && g.version !== "unknown";
+    },
+    /** Host is missing the 32-bit VC++ 2008 runtime the game needs to launch. */
+    vcRedistMissing(state): boolean {
+      const v = state.vcRedist;
+      return !!v && v.applicable && !v.installed;
     },
     /** Fully prepared for modding: v1.1, cracked, with the ASI loader installed. */
     gameFullySetUp(state): boolean {
@@ -590,6 +602,56 @@ export const useProjectStore = defineStore("project", {
         this.error = String(e);
         throw e;
       }
+      // Probe the host runtime alongside detection (non-fatal if it fails).
+      void this.checkVcRedist();
+    },
+
+    /** Check whether the host has the 32-bit VC++ 2008 runtime the game needs. */
+    async checkVcRedist() {
+      try {
+        this.vcRedist = await invoke<VcRedistStatus>("check_vcredist");
+      } catch {
+        /* leave any prior result in place */
+      }
+    },
+
+    /** Download & run the Microsoft-signed VC++ 2008 redistributable. */
+    async installVcRedist(): Promise<InstallVcRedistResult> {
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<InstallVcRedistResult>("install_vcredist");
+        await this.checkVcRedist();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Verify the install against a known-good manifest (Steam-style). Pass a
+     *  local manifest path to test before publishing; omit it to fetch the
+     *  published manifest for the detected version. */
+    async verifyGame(manifestPath?: string): Promise<VerifyReport> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      return await invoke<VerifyReport>("verify_game", {
+        gameRoot: this.gameInfo.root,
+        manifestPath: manifestPath ?? null,
+      });
+    },
+
+    /** Maintainer tool: hash a clean install into a reference manifest. */
+    async generateManifest(): Promise<GenerateManifestResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      return await invoke<GenerateManifestResult>("generate_manifest", {
+        gameRoot: this.gameInfo.root,
+        version: this.gameInfo.version,
+        variant: this.gameInfo.variant,
+      });
     },
 
     async loadModFromDir(path: string) {

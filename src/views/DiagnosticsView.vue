@@ -1,16 +1,145 @@
 <script setup lang="ts">
-import { ref, watchEffect } from "vue";
+import { ref, computed, watchEffect, onUnmounted } from "vue";
 import { storeToRefs } from "pinia";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useProjectStore } from "../stores/project";
-import type { LogReport } from "../types";
+import type {
+  LogReport,
+  VerifyReport,
+  GenerateManifestResult,
+  HashProgress,
+} from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
+import Spinner from "../components/Spinner.vue";
 
 const store = useProjectStore();
 const { busy, error, gameInfo } = storeToRefs(store);
 
 const logPath = ref<string | null>(null);
 const report = ref<LogReport | null>(null);
+
+// --- Verify game files ---
+const verifying = ref(false);
+const generating = ref(false);
+const verifyReport = ref<VerifyReport | null>(null);
+const genResult = ref<GenerateManifestResult | null>(null);
+const progress = ref<HashProgress | null>(null);
+// Latest textual phase ("Reading manifest…", "Inspecting blocks in …").
+const statusMsg = ref<string | null>(null);
+// Inline error for this section (separate from the shared store error).
+const opError = ref<string | null>(null);
+// A locally generated manifest, used to verify before it's published.
+const localManifest = ref<string | null>(null);
+
+// The maintainer card is for building the bundled manifest; pipeline release
+// builds set VITE_RELEASE_BUILD, so it shows only in local/dev builds.
+const isMaintainerBuild = import.meta.env.VITE_RELEASE_BUILD !== "true";
+
+const progressPct = computed(() =>
+  progress.value && progress.value.total > 0
+    ? Math.round((progress.value.done / progress.value.total) * 100)
+    : 0
+);
+// One-line status under the bar: phase text plus a count when we have one.
+const statusLabel = computed(() => {
+  const p = progress.value;
+  const phase = statusMsg.value ?? "Working…";
+  return p && p.total > 0
+    ? `${phase} — ${p.done}/${p.total} (${progressPct.value}%)`
+    : phase;
+});
+const verifyClean = computed(
+  () =>
+    !!verifyReport.value &&
+    verifyReport.value.missing.length === 0 &&
+    verifyReport.value.corrupt.length === 0
+);
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const u = ["KB", "MB", "GB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(1)} ${u[i]}`;
+}
+
+// Stream numeric progress + textual status from the backend during a run.
+let unlisten: UnlistenFn[] = [];
+async function withProgress<T>(
+  progressEvent: string,
+  statusEvent: string,
+  initialStatus: string,
+  run: () => Promise<T>
+): Promise<T> {
+  progress.value = null; // indeterminate until the first numeric tick
+  statusMsg.value = initialStatus;
+  unlisten = [
+    await listen<HashProgress>(progressEvent, (ev) => (progress.value = ev.payload)),
+    await listen<string>(statusEvent, (ev) => (statusMsg.value = ev.payload)),
+  ];
+  try {
+    return await run();
+  } finally {
+    unlisten.forEach((u) => u());
+    unlisten = [];
+    progress.value = null;
+    statusMsg.value = null;
+  }
+}
+onUnmounted(() => unlisten.forEach((u) => u()));
+
+async function runVerify(useLocal = false) {
+  verifying.value = true;
+  verifyReport.value = null;
+  opError.value = null;
+  try {
+    verifyReport.value = await withProgress(
+      "verify-progress",
+      "verify-status",
+      "Starting…",
+      () => store.verifyGame(useLocal ? (localManifest.value ?? undefined) : undefined)
+    );
+  } catch (e) {
+    opError.value = String(e);
+  } finally {
+    verifying.value = false;
+  }
+}
+
+async function pickAndVerify() {
+  const f = await open({
+    title: "Select a reference manifest",
+    filters: [{ name: "Manifest", extensions: ["json"] }],
+  });
+  if (typeof f !== "string") return;
+  localManifest.value = f;
+  await runVerify(true);
+}
+
+async function generate() {
+  generating.value = true;
+  genResult.value = null;
+  opError.value = null;
+  try {
+    genResult.value = await withProgress(
+      "manifest-progress",
+      "manifest-status",
+      "Scanning install…",
+      () => store.generateManifest()
+    );
+    localManifest.value = genResult.value.path;
+  } catch (e) {
+    opError.value = String(e);
+  } finally {
+    generating.value = false;
+  }
+}
 
 // Use the log discovered during game detection (reactive to folder changes).
 watchEffect(() => {
@@ -59,10 +188,256 @@ function verdictTone(kind: string): string {
     <header>
       <h2 class="text-xl font-semibold">Diagnostics</h2>
       <p class="text-sm text-zinc-500">
-        Analyze <code class="text-zinc-400">pmc_blackbox.log</code> to see how far
-        the world-load got and classify the end-state.
+        Check your install is intact and analyze
+        <code class="text-zinc-400">pmc_blackbox.log</code> to see how far the
+        world-load got.
       </p>
     </header>
+
+    <!-- Verify game files -->
+    <section class="mt-5 rounded-xl border border-zinc-800 p-5">
+      <h3 class="font-medium text-zinc-100">Verify game files</h3>
+      <p class="mt-1 text-sm text-zinc-400">
+        Hash every file in your install and compare it to a known-good baseline —
+        catches a partial extraction or a damaged copy (e.g. a missing
+        <code class="text-zinc-300">binkw32.dll</code>) before it turns into a
+        cryptic launch error. Mods and modkit-managed files are ignored.
+      </p>
+
+      <div class="mt-4 flex flex-wrap items-center gap-2">
+        <button
+          class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          :disabled="!gameInfo || verifying || generating"
+          @click="runVerify(false)"
+        >
+          <Spinner v-if="verifying" />
+          {{ verifying ? "Verifying…" : "Verify game files" }}
+        </button>
+        <button
+          class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          :disabled="!gameInfo || verifying || generating"
+          @click="pickAndVerify"
+        >
+          Use a local manifest…
+        </button>
+        <span v-if="!gameInfo" class="text-xs text-zinc-500">
+          Set your game folder first.
+        </span>
+      </div>
+
+      <ProgressBar
+        v-if="verifying"
+        :indeterminate="!progress?.total"
+        :value="progressPct"
+        :label="statusLabel"
+        class="mt-4"
+      />
+
+      <p
+        v-if="opError"
+        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+      >
+        {{ opError }}
+      </p>
+
+      <!-- Verify report -->
+      <template v-if="verifyReport && !verifying">
+        <div
+          class="mt-4 rounded-lg border px-4 py-3 text-sm"
+          :class="
+            verifyClean
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+              : 'border-red-500/30 bg-red-500/10 text-red-300'
+          "
+        >
+          <template v-if="verifyClean">
+            All {{ verifyReport.ok }} vanilla files present and intact ✓
+          </template>
+          <template v-else>
+            {{ verifyReport.missing.length }} missing ·
+            {{ verifyReport.corrupt.length }} corrupt ·
+            {{ verifyReport.ok }} OK
+          </template>
+        </div>
+
+        <div v-if="verifyReport.missing.length" class="mt-3">
+          <h4 class="text-sm font-medium text-red-300">
+            Missing files ({{ verifyReport.missing.length }})
+          </h4>
+          <p class="mt-1 text-xs text-zinc-500">
+            These vanilla files are absent from your install — a sign of a
+            partial extraction or a damaged copy.
+          </p>
+          <ul
+            class="mt-2 max-h-48 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs text-red-300/90"
+          >
+            <li v-for="m in verifyReport.missing" :key="m">{{ m }}</li>
+          </ul>
+        </div>
+
+        <div v-if="verifyReport.corrupt.length" class="mt-3">
+          <h4 class="text-sm font-medium text-amber-300">
+            Corrupt / changed ({{ verifyReport.corrupt.length }})
+          </h4>
+          <ul
+            class="mt-2 max-h-48 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs text-amber-300/90"
+          >
+            <li v-for="c in verifyReport.corrupt" :key="c.path">
+              {{ c.path }} —
+              <span class="text-zinc-500"
+                >{{ fmtBytes(c.actual_size) }} on disk, expected
+                {{ fmtBytes(c.expected_size) }}</span
+              >
+            </li>
+          </ul>
+        </div>
+
+        <div
+          v-for="w in verifyReport.wadDetails"
+          :key="w.wad"
+          class="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3"
+        >
+          <h4 class="font-mono text-sm font-medium text-amber-300">
+            {{ w.wad }} — block-level
+          </h4>
+          <p
+            v-if="!w.modified.length && !w.missing.length && !w.added.length"
+            class="mt-1 text-xs text-emerald-300/80"
+          >
+            All block payloads intact — only the archive header/metadata differs
+            (e.g. a re-saved WAD). Asset content is unchanged.
+          </p>
+          <p v-else class="mt-1 text-xs text-zinc-400">
+            {{ w.modified.length }} modified · {{ w.missing.length }} missing ·
+            {{ w.added.length }} added ·
+            <span class="text-zinc-300"
+              >{{ w.affectedAssets }} catalogued asset(s) affected</span
+            >
+          </p>
+          <details v-if="w.modified.length || w.missing.length" class="mt-2">
+            <summary
+              class="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300"
+            >
+              show changed blocks
+            </summary>
+            <ul
+              class="mt-2 max-h-48 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs"
+            >
+              <li v-for="b in w.modified" :key="'m' + b" class="text-amber-300/90">
+                ~ {{ b }}
+              </li>
+              <li v-for="b in w.missing" :key="'x' + b" class="text-red-300/90">
+                − {{ b }}
+              </li>
+            </ul>
+          </details>
+        </div>
+
+        <div v-if="verifyReport.exes.length" class="mt-3">
+          <h4 class="text-sm font-medium text-zinc-300">Executables</h4>
+          <ul class="mt-2 space-y-2 text-xs">
+            <li v-for="e in verifyReport.exes" :key="e.file">
+              <p
+                class="font-mono"
+                :class="e.identifiedAs ? 'text-emerald-300/90' : 'text-amber-300/90'"
+              >
+                {{ e.file }} →
+                <span v-if="e.identifiedAs">{{ e.identifiedAs }} ✓</span>
+                <span v-else>unrecognized</span>
+              </p>
+              <p
+                v-for="n in e.notes"
+                :key="n"
+                class="mt-0.5 pl-4 text-amber-300/80"
+              >
+                ⚠ {{ n }}
+              </p>
+            </li>
+          </ul>
+        </div>
+
+        <details v-if="verifyReport.extra.length" class="mt-3">
+          <summary class="cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">
+            {{ verifyReport.extra.length }} extra file(s) not in the manifest
+            (mods / saves — expected)
+          </summary>
+          <ul
+            class="mt-2 max-h-40 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs text-zinc-500"
+          >
+            <li v-for="x in verifyReport.extra" :key="x">{{ x }}</li>
+          </ul>
+        </details>
+
+        <p class="mt-3 text-xs text-zinc-600">
+          baseline: {{ verifyReport.manifestSource }} ·
+          {{ verifyReport.ignored }} excluded file(s) ignored (exe, caches,
+          config, mods)
+        </p>
+      </template>
+
+      <!-- Maintainer: generate a reference manifest (local/dev builds only) -->
+      <div
+        v-if="isMaintainerBuild"
+        class="mt-5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-4"
+      >
+        <h4 class="text-sm font-medium text-zinc-300">
+          Reference manifest (maintainer)
+        </h4>
+        <p class="mt-1 text-xs text-zinc-500">
+          The canonical "known-good versions" manifest is
+          <strong>bundled with the app</strong>. To update it, run the
+          <code class="text-zinc-400">gen_manifest</code> example against your
+          reference files, commit
+          <code class="text-zinc-400">manifests/mercs2.manifest.json</code>, and
+          rebuild. This button writes a copy to app data from a
+          <em>fresh, never-launched, unmodded</em> install for local testing —
+          then use “Verify against it”.
+        </p>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            class="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            :disabled="!gameInfo || verifying || generating"
+            @click="generate"
+          >
+            <Spinner v-if="generating" :size="14" />
+            {{ generating ? "Hashing…" : "Generate from this install" }}
+          </button>
+          <button
+            v-if="localManifest"
+            class="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            :disabled="verifying || generating"
+            @click="runVerify(true)"
+          >
+            Verify against it
+          </button>
+        </div>
+        <ProgressBar
+          v-if="generating"
+          :indeterminate="!progress?.total"
+          :value="progressPct"
+          :label="statusLabel"
+          class="mt-3"
+        />
+        <p
+          v-if="genResult"
+          class="mt-3 flex flex-wrap items-center gap-2 text-xs text-emerald-300"
+        >
+          Wrote {{ genResult.fileCount }} files
+          ({{ fmtBytes(genResult.totalBytes) }}) →
+          <button class="underline" @click="openPath(genResult.path)">
+            {{ genResult.path }}
+          </button>
+        </p>
+      </div>
+    </section>
+
+    <hr class="mt-6 border-zinc-800" />
+
+    <h3 class="mt-6 font-medium text-zinc-100">Crash log analysis</h3>
+    <p class="text-sm text-zinc-500">
+      Analyze <code class="text-zinc-400">pmc_blackbox.log</code> to see how far
+      the world-load got and classify the end-state.
+    </p>
 
     <!-- Log picker -->
     <div class="mt-5 flex gap-2">

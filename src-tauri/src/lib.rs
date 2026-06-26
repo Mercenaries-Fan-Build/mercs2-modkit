@@ -3,7 +3,7 @@
 //! Exposes commands for loading mods, detecting asset types, computing
 //! conflicts, assembling patch WADs, and validating them with `wad_simulator`.
 
-mod commands;
+pub mod commands;
 mod models;
 
 use commands::asset_catalog::detect_asset_type;
@@ -18,6 +18,8 @@ use commands::registry::fetch_catalog;
 use commands::setup::{crack_game, install_pmc_bb};
 use commands::updates::latest_release;
 use commands::validator::{fetch_wad_simulator, validate_wad};
+use commands::vcredist::{check_vcredist, install_vcredist};
+use commands::verify::{generate_manifest, verify_game};
 use commands::wad_builder::assemble_patch_wad;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,6 +51,10 @@ pub fn run() {
             analyze_log,
             locate_log,
             latest_release,
+            check_vcredist,
+            install_vcredist,
+            generate_manifest,
+            verify_game,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

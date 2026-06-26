@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Local reference game files (copyrighted, multi-GB) used to generate manifests.
+# The generated manifests under manifests/ ARE committed; the game files are not.
+/storage/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
