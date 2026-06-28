@@ -173,12 +173,23 @@ jobs:
       - name: Build Tauri app (Windows x64)
         run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
 
+      - name: Package portable zip (exe + manifest)
+        shell: pwsh
+        run: |
+          $zip = "mercs2-modkit-portable-windows-x86_64.zip"
+          $stage = "portable-stage"
+          New-Item -ItemType Directory -Path "$stage/manifests" | Out-Null
+          Copy-Item "src-tauri/target/x86_64-pc-windows-msvc/release/mercs2-modkit.exe" "$stage/"
+          Copy-Item "manifests/mercs2.manifest.json" "$stage/manifests/"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip
+          echo "PORTABLE_ZIP=$zip" >> $env:GITHUB_ENV
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mercs2-modkit-windows-x86_64
           path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/mercs2-modkit.exe
+            ${{ env.PORTABLE_ZIP }}
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
 
@@ -187,5 +198,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/mercs2-modkit.exe
+            ${{ env.PORTABLE_ZIP }}
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe

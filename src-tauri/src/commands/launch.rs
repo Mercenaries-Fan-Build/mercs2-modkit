@@ -68,7 +68,8 @@ pub struct RuntimeInfo {
 
 /// ASI-loader config the engine expects next to the exe (mirrors the verified
 /// Windows baseline). `DontLoadFromDllMain=0` arms the SecuROM spoof during
-/// DllMain, before the entry point.
+/// DllMain, before the entry point. Only written on the Linux/Proton launch path.
+#[cfg(target_os = "linux")]
 const GLOBAL_INI: &str =
     "[GlobalSets]\nLoadPlugins=1\nDontLoadFromDllMain=0\nLoadFromScriptsOnly=0\nLoadRecursively=1\n";
 
@@ -132,7 +133,7 @@ pub fn discover_runtime(overrides: Option<LaunchOverrides>) -> RuntimeInfo {
     let _ov = overrides.unwrap_or_default();
     #[cfg(target_os = "linux")]
     {
-        return resolve_runtime(&_ov);
+        resolve_runtime(&_ov)
     }
     #[cfg(not(target_os = "linux"))]
     {
