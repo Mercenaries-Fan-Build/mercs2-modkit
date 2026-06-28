@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("hashing {} ({} exe variants)…", tree.display(), specs.len());
     let last_decile = AtomicUsize::new(usize::MAX);
     let progress = |done: usize, total: usize| {
-        let decile = if total == 0 { 10 } else { done * 10 / total };
+        let decile = (done * 10).checked_div(total).unwrap_or(10);
         if last_decile.swap(decile, Ordering::Relaxed) != decile {
             eprintln!("  {}%  ({done}/{total})", decile * 10);
         }
