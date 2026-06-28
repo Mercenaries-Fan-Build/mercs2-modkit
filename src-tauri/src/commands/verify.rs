@@ -331,7 +331,7 @@ impl<'a> Ticker<'a> {
     }
     fn tick(&self) {
         let d = self.done.fetch_add(1, Ordering::Relaxed) + 1;
-        let pct = if self.total == 0 { 100 } else { d * 100 / self.total };
+        let pct = (d * 100).checked_div(self.total).unwrap_or(100);
         if self.last_pct.swap(pct, Ordering::Relaxed) != pct {
             (self.progress)(d, self.total);
         }

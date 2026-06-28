@@ -133,7 +133,7 @@ pub fn discover_runtime(overrides: Option<LaunchOverrides>) -> RuntimeInfo {
     let _ov = overrides.unwrap_or_default();
     #[cfg(target_os = "linux")]
     {
-        return resolve_runtime(&_ov);
+        resolve_runtime(&_ov)
     }
     #[cfg(not(target_os = "linux"))]
     {
