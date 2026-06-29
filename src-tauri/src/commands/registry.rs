@@ -355,6 +355,7 @@ mod tests {
             name: "Fallback".into(),
             description: String::new(),
             repository: "https://github.com/owner/repo".into(),
+            branch: None,
         }
     }
 
