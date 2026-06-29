@@ -304,19 +304,38 @@ pub async fn install_catalog_mod(item: CatalogMod) -> Result<InstallResult, Stri
     let assets: Vec<(String, String)> = if item.assets.is_empty() {
         all_assets
     } else {
-        let mut chosen = Vec::new();
-        for want in &item.assets {
-            match all_assets.iter().find(|(n, _)| n.eq_ignore_ascii_case(want)) {
-                Some((n, u)) => chosen.push((n.clone(), u.clone())),
+        // First try: every declared asset exists as a loose release file.
+        let direct: Vec<(String, String)> = item
+            .assets
+            .iter()
+            .filter_map(|want| {
+                all_assets
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(want))
+                    .map(|(n, u)| (n.clone(), u.clone()))
+            })
+            .collect();
+        if direct.len() == item.assets.len() {
+            direct
+        } else {
+            // Second try: a zip whose name contains the mod slug
+            // (e.g. "multiplayer-restore.zip" for slug "multiplayer-restore").
+            // The zip is extracted and the declared assets are expected inside it.
+            let slug_lc = item.slug.to_ascii_lowercase();
+            let zip = all_assets.iter().find(|(n, _)| {
+                let nl = n.to_ascii_lowercase();
+                nl.ends_with(".zip") && nl.contains(&slug_lc)
+            });
+            match zip {
+                Some((n, u)) => vec![(n.clone(), u.clone())],
                 None => {
                     return Err(format!(
-                        "Release {tag} of {} is missing declared asset '{want}'",
-                        item.name
+                        "Release {tag} of {} has no matching loose assets and no zip named after its slug '{}'",
+                        item.name, item.slug
                     ))
                 }
             }
         }
-        chosen
     };
 
     // Fresh download + staging dirs for this mod.
