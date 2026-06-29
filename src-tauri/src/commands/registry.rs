@@ -21,13 +21,16 @@ const REGISTRY_URL: &str =
 const BUNDLED: &str = include_str!("../../registry.json");
 
 /// A repository source as listed in `registry.json`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoSource {
     pub name: String,
     #[serde(default)]
     pub description: String,
     /// Git repository hosting an index of mods.
     pub repository: String,
+    /// Branch to read `repository.json` from. Falls back to `main` then `master` if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// One enableable mod, expanded from a source repo's index.
@@ -50,6 +53,9 @@ pub struct CatalogMod {
     pub assets: Vec<String>,
     #[serde(default)]
     pub version: Option<String>,
+    /// Mods that must not be enabled alongside this one, as `"repo-url#slug"`.
+    #[serde(default)]
+    pub incompatible: Vec<String>,
 }
 
 /// The flattened, deduped catalog plus where the source list came from.
@@ -86,12 +92,15 @@ struct RepoMod {
     assets: Vec<String>,
     #[serde(default)]
     version: Option<String>,
+    /// Mods that must not be enabled alongside this one, as `"repo-url#slug"`.
+    #[serde(default)]
+    incompatible: Vec<String>,
 }
 
 /// Coerce one `mods` entry — an object, or a bare slug string (legacy) — into a
 /// `CatalogMod`. Returns `None` for entries we can't make sense of (skipped).
 fn repo_mod_to_catalog(value: serde_json::Value, src: &RepoSource, repo_name: &str) -> Option<CatalogMod> {
-    let base = |slug: String, name: String, description: String, kind: String, assets: Vec<String>, version: Option<String>| {
+    let base = |slug: String, name: String, description: String, kind: String, assets: Vec<String>, version: Option<String>, incompatible: Vec<String>| {
         CatalogMod {
             repository: src.repository.clone(),
             repo_name: repo_name.to_string(),
@@ -101,6 +110,7 @@ fn repo_mod_to_catalog(value: serde_json::Value, src: &RepoSource, repo_name: &s
             kind,
             assets,
             version,
+            incompatible,
         }
     };
     if let Ok(m) = serde_json::from_value::<RepoMod>(value.clone()) {
@@ -111,6 +121,7 @@ fn repo_mod_to_catalog(value: serde_json::Value, src: &RepoSource, repo_name: &s
             m.kind.unwrap_or_else(|| "asi".to_string()),
             m.assets,
             m.version,
+            m.incompatible,
         ));
     }
     // Legacy form: a bare slug string. No assets known → whole-release download.
@@ -123,6 +134,7 @@ fn repo_mod_to_catalog(value: serde_json::Value, src: &RepoSource, repo_name: &s
                 "asi".to_string(),
                 Vec::new(),
                 None,
+                Vec::new(),
             ));
         }
     }
@@ -198,6 +210,7 @@ fn whole_repo_fallback(src: &RepoSource) -> CatalogMod {
         kind: String::new(),
         assets: Vec::new(),
         version: None,
+        incompatible: Vec::new(),
     }
 }
 
@@ -208,18 +221,18 @@ async fn scan_repo(client: &reqwest::Client, src: &RepoSource) -> Vec<CatalogMod
         None => return vec![whole_repo_fallback(src)],
     };
 
-    // Find the default branch carrying repository.json.
-    let mut branch = "main";
+    // Find the branch carrying repository.json — explicit if set, else try main/master.
+    let try_branches: Vec<&str> = match &src.branch {
+        Some(b) => vec![b.as_str()],
+        None => vec!["main", "master"],
+    };
     let mut index_txt = None;
-    for b in ["main", "master"] {
+    for b in try_branches {
         if let Some(t) = fetch_raw(client, &owner_repo, b, "repository.json").await {
-            branch = b;
             index_txt = Some(t);
             break;
         }
     }
-    // branch is resolved above (kept for any future per-mod fetches).
-    let _ = branch;
     let index: RepoIndex = match index_txt.and_then(|t| serde_json::from_str(&t).ok()) {
         Some(i) => i,
         None => return vec![whole_repo_fallback(src)],
@@ -257,6 +270,37 @@ async fn fetch_sources(client: &reqwest::Client) -> (Vec<RepoSource>, &'static s
     (parse_sources(BUNDLED), "bundled")
 }
 
+fn custom_sources_path() -> Result<std::path::PathBuf, String> {
+    let dir = crate::commands::paths::app_data_dir()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create app data dir: {e}"))?;
+    Ok(dir.join("custom_sources.json"))
+}
+
+/// Return the user's saved custom mod-source repositories.
+#[tauri::command]
+pub fn get_custom_sources() -> Vec<RepoSource> {
+    let path = match custom_sources_path() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Overwrite the saved custom mod-source list with `sources`.
+#[tauri::command]
+pub fn save_custom_sources(sources: Vec<RepoSource>) -> Result<(), String> {
+    let path = custom_sources_path()?;
+    let text = serde_json::to_string_pretty(&sources)
+        .map_err(|e| format!("Failed to serialize sources: {e}"))?;
+    std::fs::write(&path, text)
+        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
 /// Build the catalog: scan every (deduped) source repo into per-mod rows, then
 /// dedupe the mods themselves by `(repository, slug)`.
 #[tauri::command]
@@ -274,7 +318,10 @@ pub async fn fetch_catalog() -> Catalog {
         }
     };
 
-    let (sources, label) = fetch_sources(&client).await;
+    let (mut sources, label) = fetch_sources(&client).await;
+
+    // Append user-added custom sources (saved on disk) before dedup.
+    sources.extend(get_custom_sources());
 
     // Dedupe source repos by normalized URL (registry entries are indexes, not bundles).
     let mut seen_repos = HashSet::new();
@@ -308,6 +355,7 @@ mod tests {
             name: "Fallback".into(),
             description: String::new(),
             repository: "https://github.com/owner/repo".into(),
+            branch: None,
         }
     }
 

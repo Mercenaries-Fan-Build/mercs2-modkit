@@ -6,6 +6,7 @@ import type {
   BuildResult,
   CatalogMod,
   Catalog,
+  RepoSource,
   ComponentUpdate,
   ConflictGraph,
   CrackResult,
@@ -103,6 +104,8 @@ interface ProjectState {
   // Mod catalog (per-mod rows expanded from repository sources)
   catalog: CatalogMod[];
   catalogSource: string | null;
+  // User-added custom mod-source repositories (persisted on disk via Rust).
+  customSources: RepoSource[];
   // modkit self-update (vs its GitHub releases)
   modkitUpdate: ModkitUpdate | null;
   // Versions of the core components modkit last installed (null = unknown).
@@ -133,6 +136,7 @@ export const useProjectStore = defineStore("project", {
     enabled: {},
     catalog: [],
     catalogSource: null,
+    customSources: [],
     modkitUpdate: null,
     pmcBbVersion: null,
     crackVersion: null,
@@ -246,6 +250,31 @@ export const useProjectStore = defineStore("project", {
      *   "downloaded" — in the Library but disabled
      *   "none"       — not downloaded
      */
+    /**
+     * Returns the enabled catalog mod that hard-blocks `item` due to a declared
+     * incompatibility (bidirectional: A blocks B if A lists B or B lists A).
+     * Returns undefined if no conflict.
+     */
+    catalogModBlockedBy(state) {
+      return (item: CatalogMod): CatalogMod | undefined => {
+        const key = (c: CatalogMod) => `${c.repository}#${c.slug}`;
+        const itemKey = key(item);
+        return state.catalog.find((other) => {
+          if (other.repository === item.repository && other.slug === item.slug) return false;
+          const crossRef =
+            item.incompatible.includes(key(other)) ||
+            other.incompatible.includes(itemKey);
+          if (!crossRef) return false;
+          // Only blocks if the other mod is currently enabled in the library.
+          const asis = catalogAsiNames(other);
+          const lib = state.asiMods.find((m) =>
+            m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
+          );
+          return !!lib && state.enabled[lib.id] !== false;
+        });
+      };
+    },
+
     catalogModState(state) {
       return (item: CatalogMod): "none" | "downloaded" | "enabled" | "deployed" => {
         const asis = catalogAsiNames(item);
@@ -295,6 +324,8 @@ export const useProjectStore = defineStore("project", {
         );
       });
 
+      await this.loadCustomSources().catch(() => {});
+
       const saved = localStorage.getItem(GAME_PATH_KEY);
       if (saved) {
         this.gamePath = saved;
@@ -306,6 +337,33 @@ export const useProjectStore = defineStore("project", {
     setAsiTarget(target: string) {
       this.asiTarget = target;
       localStorage.setItem(ASI_TARGET_KEY, target);
+    },
+
+    async loadCustomSources() {
+      this.customSources = await invoke<RepoSource[]>("get_custom_sources");
+    },
+
+    async addCustomSource(url: string) {
+      const trimmed = url.trim().replace(/\.git$/, "").replace(/\/$/, "");
+      // Parse https://github.com/owner/repo/tree/branch-name
+      const treeMatch = trimmed.match(/^(https?:\/\/github\.com\/[^/]+\/[^/]+)\/tree\/(.+)$/);
+      const repo = treeMatch ? treeMatch[1] : trimmed;
+      const branch = treeMatch ? treeMatch[2] : undefined;
+      const name = repo.split("/").slice(-2).join("/");
+      const source: RepoSource = { name, description: "", repository: repo, ...(branch ? { branch } : {}) };
+      const updated = [...this.customSources, source];
+      await invoke("save_custom_sources", { sources: updated });
+      this.customSources = updated;
+    },
+
+    async removeCustomSource(repository: string) {
+      const norm = (u: string) =>
+        u.trim().replace(/\.git$/, "").replace(/\/$/, "").toLowerCase();
+      const updated = this.customSources.filter(
+        (s) => norm(s.repository) !== norm(repository)
+      );
+      await invoke("save_custom_sources", { sources: updated });
+      this.customSources = updated;
     },
 
     async fetchCatalog() {

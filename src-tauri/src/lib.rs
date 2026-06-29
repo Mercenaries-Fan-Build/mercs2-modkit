@@ -14,7 +14,7 @@ use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
-use commands::registry::fetch_catalog;
+use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
 use commands::setup::{crack_game, install_pmc_bb};
 use commands::updates::latest_release;
 use commands::validator::{fetch_wad_simulator, validate_wad};
@@ -38,6 +38,8 @@ pub fn run() {
             validate_wad,
             detect_game,
             fetch_catalog,
+            get_custom_sources,
+            save_custom_sources,
             install_catalog_mod,
             import_local_asi,
             deploy_asi,
