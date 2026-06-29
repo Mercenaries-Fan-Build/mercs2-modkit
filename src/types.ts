@@ -98,6 +98,15 @@ export interface DeployedAsi {
   known: string | null;
 }
 
+/** A repository source entry (mirrors Rust's RepoSource). */
+export interface RepoSource {
+  name: string;
+  description: string;
+  repository: string;
+  /** Branch to read repository.json from. Omit to fall back to main/master. */
+  branch?: string;
+}
+
 /** One enableable mod, expanded from a source repo's index. */
 export interface CatalogMod {
   repository: string; // source repo URL
@@ -108,6 +117,7 @@ export interface CatalogMod {
   kind: string; // "asi" | "wad" (informational)
   assets: string[]; // release asset filenames this mod deploys
   version: string | null;
+  incompatible: string[]; // "repo-url#slug" refs that must not be enabled alongside this
 }
 
 export interface Catalog {

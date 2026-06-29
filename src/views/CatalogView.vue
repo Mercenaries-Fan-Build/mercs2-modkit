@@ -7,10 +7,53 @@ import type { CatalogMod } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
 
 const store = useProjectStore();
-const { catalog, catalogSource, busy, error, gameInfo } = storeToRefs(store);
+const { catalog, catalogSource, busy, error, gameInfo, customSources } = storeToRefs(store);
 
 const working = ref<string | null>(null); // repository#slug currently acting on
 const lastAction = ref<string | null>(null);
+
+const showSources = ref(false);
+const newSourceUrl = ref("");
+const sourceError = ref<string | null>(null);
+const sourceWorking = ref(false);
+
+function isGithubUrl(url: string): boolean {
+  return /^https?:\/\/(www\.)?github\.com\/.+\/.+/.test(url.trim());
+}
+
+function sourceBranch(src: { branch?: string }): string | null {
+  return src.branch ?? null;
+}
+
+async function addSource() {
+  const url = newSourceUrl.value.trim();
+  if (!isGithubUrl(url)) {
+    sourceError.value = "Please enter a valid GitHub repository URL (https://github.com/owner/repo)";
+    return;
+  }
+  sourceError.value = null;
+  sourceWorking.value = true;
+  try {
+    await store.addCustomSource(url);
+    newSourceUrl.value = "";
+    await store.fetchCatalog();
+    lastAction.value = "Source added and catalog refreshed";
+  } catch (e) {
+    sourceError.value = String(e);
+  } finally {
+    sourceWorking.value = false;
+  }
+}
+
+async function removeSource(repository: string) {
+  sourceWorking.value = true;
+  try {
+    await store.removeCustomSource(repository);
+    await store.fetchCatalog();
+  } finally {
+    sourceWorking.value = false;
+  }
+}
 
 onMounted(() => {
   if (store.catalog.length === 0) store.fetchCatalog();
@@ -83,13 +126,84 @@ async function update(item: CatalogMod) {
       source: {{ catalogSource }}
     </p>
 
-    <button
-      class="mt-4 rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
-      :disabled="busy"
-      @click="store.fetchCatalog()"
+    <div class="mt-4 flex gap-2">
+      <button
+        class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+        :disabled="busy"
+        @click="store.fetchCatalog()"
+      >
+        Refresh
+      </button>
+      <button
+        class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+        @click="showSources = !showSources"
+      >
+        Mod Sources
+        <span class="ml-1 rounded bg-zinc-800 px-1 text-zinc-500">{{ customSources.length }}</span>
+      </button>
+    </div>
+
+    <!-- Custom sources panel -->
+    <div
+      v-if="showSources"
+      class="mt-4 rounded-xl border border-zinc-700 bg-zinc-900/70 p-4"
     >
-      Refresh
-    </button>
+      <h3 class="text-sm font-medium text-zinc-200">Custom Mod Sources</h3>
+      <p class="mt-0.5 text-xs text-zinc-500">
+        Any GitHub repository that provides a <code class="text-zinc-400">repository.json</code> index
+        can be added as a source. Its mods appear in the catalog after a refresh.
+      </p>
+
+      <!-- Existing custom sources -->
+      <ul v-if="customSources.length" class="mt-3 space-y-2">
+        <li
+          v-for="src in customSources"
+          :key="src.repository"
+          class="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
+        >
+          <div class="min-w-0">
+            <p class="truncate text-xs font-medium text-zinc-300">{{ src.name }}</p>
+            <button
+              class="truncate text-xs text-sky-400 hover:underline"
+              @click="openUrl(src.repository)"
+            >
+              {{ src.repository }}
+            </button>
+            <span
+              v-if="sourceBranch(src)"
+              class="ml-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+            >{{ sourceBranch(src) }}</span>
+          </div>
+          <button
+            class="shrink-0 rounded px-2 py-1 text-xs text-zinc-500 hover:bg-red-900/40 hover:text-red-300 disabled:opacity-50"
+            :disabled="sourceWorking"
+            @click="removeSource(src.repository)"
+          >
+            Remove
+          </button>
+        </li>
+      </ul>
+      <p v-else class="mt-3 text-xs text-zinc-600">No custom sources added yet.</p>
+
+      <!-- Add source form -->
+      <div class="mt-4 flex gap-2">
+        <input
+          v-model="newSourceUrl"
+          type="url"
+          placeholder="https://github.com/owner/repo  (or /tree/branch-name)"
+          class="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-sky-500 focus:outline-none"
+          @keydown.enter="addSource"
+        />
+        <button
+          class="shrink-0 rounded-md bg-sky-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-600 disabled:opacity-50"
+          :disabled="sourceWorking || !newSourceUrl.trim()"
+          @click="addSource"
+        >
+          Add
+        </button>
+      </div>
+      <p v-if="sourceError" class="mt-2 text-xs text-red-400">{{ sourceError }}</p>
+    </div>
 
     <ProgressBar
       v-if="busy && !working"
@@ -190,15 +304,24 @@ async function update(item: CatalogMod) {
             >
               Download
             </button>
-            <button
-              v-else-if="store.catalogModState(item) === 'downloaded'"
-              class="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-              :disabled="busy"
-              title="Mark this mod for deployment"
-              @click="enable(item)"
-            >
-              Enable
-            </button>
+            <template v-else-if="store.catalogModState(item) === 'downloaded'">
+              <span
+                v-if="store.catalogModBlockedBy(item)"
+                class="rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-1.5 text-sm text-red-400"
+                :title="`Incompatible with ${store.catalogModBlockedBy(item)!.name} (currently enabled) — disable it first`"
+              >
+                Incompatible with {{ store.catalogModBlockedBy(item)!.name }}
+              </span>
+              <button
+                v-else
+                class="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                :disabled="busy"
+                title="Mark this mod for deployment"
+                @click="enable(item)"
+              >
+                Enable
+              </button>
+            </template>
             <button
               v-else-if="store.catalogModState(item) === 'enabled'"
               class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
