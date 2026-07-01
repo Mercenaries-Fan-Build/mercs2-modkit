@@ -473,3 +473,257 @@ fn write_zip(
     zip.finish().map_err(|e| format!("couldn't finalize the zip: {e}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::verify::{ExeReport, FileDiff, WadDiff};
+    use serde_json::json;
+    use std::io::Read;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// A verify report with two damaged files, one drilled WAD, and an exe.
+    fn dirty_report() -> VerifyReport {
+        VerifyReport {
+            ok: 1200,
+            missing: vec!["data/english.wad".into()],
+            corrupt: vec![FileDiff {
+                path: "binkw32.dll".into(),
+                expected_size: 100,
+                actual_size: 90,
+                expected_hash: "aaa".into(),
+                actual_hash: "bbb".into(),
+            }],
+            extra: vec!["mods/foo.wad".into()],
+            ignored: 42,
+            exes: vec![ExeReport {
+                file: "Mercenaries2.exe".into(),
+                size: 53_482_288,
+                hash: "deadbeef".into(),
+                identified_as: Some("v1.1 cracked".into()),
+                notes: vec!["bypass only — does not load ASI mods".into()],
+            }],
+            wad_details: vec![WadDiff {
+                wad: "data/vz.wad".into(),
+                modified: vec!["a".into(), "b".into()],
+                missing: vec![],
+                added: vec!["c".into()],
+                affected_assets: 5,
+            }],
+            manifest_source: "bundled".into(),
+        }
+    }
+
+    fn clean_report() -> VerifyReport {
+        VerifyReport {
+            ok: 1234,
+            missing: vec![],
+            corrupt: vec![],
+            extra: vec![],
+            ignored: 10,
+            exes: vec![],
+            wad_details: vec![],
+            manifest_source: "bundled".into(),
+        }
+    }
+
+    #[test]
+    fn fmt_bytes_scales_units() {
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024), "1.0 KB");
+        assert_eq!(fmt_bytes(1536), "1.5 KB");
+        assert_eq!(fmt_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn zip_stem_strips_extension_and_falls_back() {
+        assert_eq!(zip_stem(Path::new("/tmp/mercs2-modkit-debug-2026-06-30.zip")), "mercs2-modkit-debug-2026-06-30");
+        assert_eq!(zip_stem(Path::new("bundle.zip")), "bundle");
+        // No usable stem → the safe default.
+        assert_eq!(zip_stem(Path::new("")), "mercs2-modkit-debug");
+    }
+
+    #[test]
+    fn is_clean_reflects_missing_and_corrupt() {
+        assert!(is_clean(&clean_report()));
+        assert!(!is_clean(&dirty_report()));
+    }
+
+    #[test]
+    fn collect_logs_walks_root_and_loader_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("scripts/nested")).unwrap();
+        std::fs::create_dir_all(root.join("plugins")).unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+
+        write(&root.join("pmc_blackbox.log"), "root log");
+        write(&root.join("d3d.LOG"), "upper ext still a log"); // case-insensitive
+        write(&root.join("notes.txt"), "not a log");
+        write(&root.join("scripts/pmc_blackbox.log"), "scripts log");
+        write(&root.join("scripts/nested/deep.log"), "nested log");
+        write(&root.join("plugins/plugin.log"), "plugin log");
+        // A .log sitting in a non-scanned folder must be ignored.
+        write(&root.join("data/ignored.log"), "not scanned");
+
+        let logs = collect_logs(root);
+        let names: Vec<&str> = logs.iter().map(|l| l.arcname.as_str()).collect();
+
+        assert_eq!(logs.len(), 5, "got: {names:?}");
+        assert!(names.contains(&"logs/pmc_blackbox.log"));
+        assert!(names.contains(&"logs/d3d.LOG"));
+        assert!(names.contains(&"logs/scripts/pmc_blackbox.log"));
+        assert!(names.contains(&"logs/scripts/nested/deep.log"));
+        assert!(names.contains(&"logs/plugins/plugin.log"));
+        assert!(!names.iter().any(|n| n.contains("notes.txt")));
+        assert!(!names.iter().any(|n| n.contains("ignored.log")));
+        // Sorted for stable output.
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    fn sample_meta() -> Value {
+        json!({
+            "generatedAt": "2026-06-30T12:00:00.000Z",
+            "modkitVersion": "0.5.1",
+            "game": {
+                "root": "/games/Mercs2",
+                "exe_path": "/games/Mercs2/Mercenaries2.exe",
+                "exe_size": 53_482_288u64,
+                "version": "v1.1",
+                "variant": "cracked",
+                "has_pmc_bb": true,
+                "asi_loader_proxy": "pmc_bb.dll",
+                "data_dir": "/games/Mercs2/data",
+                "log_path": "/games/Mercs2/pmc_blackbox.log"
+            },
+            "pmcBbVersion": "v0.3.0",
+            "crackVersion": "v1.2.0",
+            "vcRedist": { "applicable": true, "installed": false, "detail": "not found in WinSxS" },
+            "region": { "applicable": true, "currentRegion": "us", "expectedRegion": "global" },
+            "wadMods": [
+                { "name": "Cool Skins", "version": "1.2.0", "enabled": true, "assetCount": 12 }
+            ],
+            "asiMods": [
+                { "name": "Windowed Mode", "version": "0.9", "enabled": false, "deployed": false }
+            ],
+            "deployedPatches": ["vz-patch.wad"]
+        })
+    }
+
+    #[test]
+    fn render_report_covers_every_section() {
+        let meta = sample_meta();
+        let report = dirty_report();
+        let logs = vec![LogFile {
+            arcname: "logs/pmc_blackbox.log".into(),
+            path: PathBuf::from("/x/pmc_blackbox.log"),
+            size: 2048,
+        }];
+        let r = render_report(&meta, Some(&report), &logs, &["a note".into()]);
+
+        // Header + environment
+        assert!(r.contains("Mercenaries 2 Modkit — Debug Bundle"));
+        assert!(r.contains("Generated: 2026-06-30T12:00:00.000Z"));
+        assert!(r.contains("Modkit version: 0.5.1"));
+        // Game + versions
+        assert!(r.contains("/games/Mercs2/Mercenaries2.exe"));
+        assert!(r.contains("v1.1 cracked"));
+        assert!(r.contains("pmc_bb.dll (ASI loader): v0.3.0"));
+        assert!(r.contains("apply_crack (SecuROM bypass): v1.2.0"));
+        // VC++ missing surfaces the detail
+        assert!(r.contains("VC++ 2008 runtime: MISSING — not found in WinSxS"));
+        // Region present
+        assert!(r.contains("Matchmaking region: us (pool expects global)"));
+        // Mods
+        assert!(r.contains("WAD-asset mods (1):"));
+        assert!(r.contains("Cool Skins 1.2.0  [enabled, 12 assets]"));
+        assert!(r.contains("ASI plugins (1):"));
+        assert!(r.contains("Windowed Mode 0.9  [disabled]"));
+        assert!(r.contains("vz-patch.wad"));
+        // Integrity
+        assert!(r.contains("Baseline: bundled"));
+        assert!(r.contains("1 missing · 1 corrupt · 1200 OK"));
+        assert!(r.contains("data/english.wad"));
+        assert!(r.contains("binkw32.dll"));
+        assert!(r.contains("data/vz.wad: 2 modified · 0 missing · 1 added · 5 asset(s) affected"));
+        assert!(r.contains("Mercenaries2.exe → v1.1 cracked ✓"));
+        assert!(r.contains("bypass only"));
+        // Logs + notes
+        assert!(r.contains("Included 1 log file(s):"));
+        assert!(r.contains("logs/pmc_blackbox.log (2.0 KB)"));
+        assert!(r.contains("a note"));
+    }
+
+    #[test]
+    fn render_report_handles_clean_and_absent_integrity() {
+        let meta = sample_meta();
+        let clean = render_report(&meta, Some(&clean_report()), &[], &[]);
+        assert!(clean.contains("all 1234 vanilla files present and intact"));
+        assert!(clean.contains("(no log files found in the install)"));
+
+        // Skipped integrity (no manifest) is reported, not fatal.
+        let skipped = render_report(&meta, None, &[], &["Integrity check skipped: no manifest".into()]);
+        assert!(skipped.contains("(not run — see notes)"));
+        assert!(skipped.contains("Integrity check skipped: no manifest"));
+    }
+
+    #[test]
+    fn render_info_json_merges_integrity_into_meta() {
+        let out = render_info_json(&sample_meta(), Some(&dirty_report()));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        // Original meta preserved…
+        assert_eq!(v["modkitVersion"], "0.5.1");
+        // …and the backend-computed integrity report grafted on.
+        assert_eq!(v["integrity"]["ok"], 1200);
+        assert_eq!(v["integrity"]["missing"][0], "data/english.wad");
+        assert_eq!(v["integrity"]["manifestSource"], "bundled");
+
+        // With no report, the key is present but null.
+        let none = render_info_json(&sample_meta(), None);
+        let v2: Value = serde_json::from_str(&none).unwrap();
+        assert!(v2["integrity"].is_null());
+    }
+
+    #[test]
+    fn write_zip_round_trips_report_json_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("pmc_blackbox.log");
+        write(&log_path, "the log body");
+        let logs = vec![LogFile {
+            arcname: "logs/pmc_blackbox.log".into(),
+            path: log_path,
+            size: 12,
+        }];
+        // A log whose file is missing must be skipped, not fatal.
+        let logs = {
+            let mut l = logs;
+            l.push(LogFile {
+                arcname: "logs/gone.log".into(),
+                path: dir.path().join("does-not-exist.log"),
+                size: 0,
+            });
+            l
+        };
+
+        let dest = dir.path().join("out/bundle.zip");
+        write_zip(&dest, "bundle", "REPORT", "{\"k\":1}", &logs).unwrap();
+
+        let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
+        let read = |a: &mut zip::ZipArchive<File>, name: &str| {
+            let mut s = String::new();
+            a.by_name(name).unwrap().read_to_string(&mut s).unwrap();
+            s
+        };
+        assert_eq!(read(&mut archive, "bundle/debug-report.txt"), "REPORT");
+        assert_eq!(read(&mut archive, "bundle/debug-info.json"), "{\"k\":1}");
+        assert_eq!(read(&mut archive, "bundle/logs/pmc_blackbox.log"), "the log body");
+        // The missing log was skipped entirely.
+        assert!(archive.by_name("bundle/logs/gone.log").is_err());
+    }
+}
