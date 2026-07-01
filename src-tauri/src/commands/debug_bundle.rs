@@ -8,13 +8,18 @@
 //! disk access — the integrity check (reusing [`verify::verify_install`]) and
 //! collecting the log files — then renders a human-readable report plus a
 //! machine-readable JSON dump and compresses the lot.
+//!
+//! Every bundled log is SHA-256'd (via `loadprobe::sha256`, the same digest the
+//! log analyzer uses) so the archive carries a `manifest.sha256` — a
+//! `sha256sum -c`-compatible list a recipient can use to confirm the logs
+//! weren't altered in transit — mirrored into `debug-info.json` under `files`.
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::path::BaseDirectory;
 use tauri::{Emitter, Manager, Window};
 use zip::write::SimpleFileOptions;
@@ -76,19 +81,21 @@ pub async fn build_debug_zip(
             }
         };
 
-        // 2. Gather log files from the install.
+        // 2. Gather log files from the install and SHA-256 each for the manifest.
         let _ = window.emit("debug-status", "Collecting logs…");
-        let logs = collect_logs(&root);
+        let logs = read_logs(collect_logs(&root), &mut notes);
 
-        // 3. Render reports.
+        // 3. Render the report, the machine-readable dump, and a
+        //    sha256sum-compatible manifest of the bundled logs.
         let _ = window.emit("debug-status", "Writing report…");
         let stem = zip_stem(&dest);
+        let manifest_txt = render_manifest(&logs);
         let report_txt = render_report(&meta, verify.as_ref(), &logs, &notes);
-        let info_json = render_info_json(&meta, verify.as_ref());
+        let info_json = render_info_json(&meta, verify.as_ref(), &logs);
 
         // 4. Compress everything under a single top-level folder.
         let _ = window.emit("debug-status", "Compressing…");
-        write_zip(&dest, &stem, &report_txt, &info_json, &logs)?;
+        write_zip(&dest, &stem, &report_txt, &info_json, &manifest_txt, &logs)?;
 
         let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
         let integrity_ok = verify.as_ref().map(is_clean).unwrap_or(true);
@@ -117,11 +124,49 @@ fn load_bundled_manifest(window: &Window) -> Result<Manifest, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("manifest isn't valid JSON: {e}"))
 }
 
-/// A log file to bundle: its path inside the zip (under `logs/`) and on disk.
+/// A candidate log file found on disk: its path inside the zip (under `logs/`)
+/// and its location. The true size comes from [`read_logs`], which sizes the
+/// bytes it hashes.
 struct LogFile {
     arcname: String,
     path: PathBuf,
+}
+
+/// A log that's been read and hashed, ready to write into the archive and list
+/// in the manifest.
+struct BundledLog {
+    arcname: String,
     size: u64,
+    /// Lowercase hex SHA-256 of `bytes`.
+    sha256: String,
+    bytes: Vec<u8>,
+}
+
+/// Read each candidate log's bytes and SHA-256 them. A log that can't be read
+/// (vanished mid-run, permissions) is skipped with a note rather than aborting
+/// the whole bundle.
+fn read_logs(candidates: Vec<LogFile>, notes: &mut Vec<String>) -> Vec<BundledLog> {
+    let mut out = Vec::new();
+    for c in candidates {
+        match std::fs::read(&c.path) {
+            Ok(bytes) => {
+                let sha256 = loadprobe::sha256::sha256_hex(&bytes);
+                out.push(BundledLog { arcname: c.arcname, size: bytes.len() as u64, sha256, bytes });
+            }
+            Err(e) => notes.push(format!("Skipped log {}: {e}", c.arcname)),
+        }
+    }
+    out
+}
+
+/// A `sha256sum -c`-compatible manifest of the bundled logs: `<hash>  <path>`,
+/// one per line (two spaces, matching coreutils' text-mode format).
+fn render_manifest(logs: &[BundledLog]) -> String {
+    let mut o = String::new();
+    for l in logs {
+        o.push_str(&format!("{}  {}\n", l.sha256, l.arcname));
+    }
+    o
 }
 
 /// Collect `*.log` files from the install root (shallow) and the ASI loader
@@ -131,9 +176,8 @@ fn collect_logs(root: &Path) -> Vec<LogFile> {
     let mut out: Vec<LogFile> = Vec::new();
     let mut push = |p: &Path| {
         if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("log")) {
-            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
             let rel = p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/");
-            out.push(LogFile { arcname: format!("logs/{rel}"), path: p.to_path_buf(), size });
+            out.push(LogFile { arcname: format!("logs/{rel}"), path: p.to_path_buf() });
         }
     };
 
@@ -212,8 +256,8 @@ fn s_or<'a>(v: &'a Value, key: &str, dflt: &'a str) -> &'a str {
 }
 
 /// The full machine-readable dump: the frontend meta with the (backend-computed)
-/// integrity report grafted on.
-fn render_info_json(meta: &Value, verify: Option<&VerifyReport>) -> String {
+/// integrity report and the bundled-log manifest (`files`) grafted on.
+fn render_info_json(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog]) -> String {
     let mut obj = meta.clone();
     if let Value::Object(map) = &mut obj {
         map.insert(
@@ -222,12 +266,17 @@ fn render_info_json(meta: &Value, verify: Option<&VerifyReport>) -> String {
                 .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
                 .unwrap_or(Value::Null),
         );
+        let files: Vec<Value> = logs
+            .iter()
+            .map(|l| json!({ "path": l.arcname, "size": l.size, "sha256": l.sha256 }))
+            .collect();
+        map.insert("files".into(), Value::Array(files));
     }
     serde_json::to_string_pretty(&obj).unwrap_or_else(|_| "{}".into())
 }
 
 /// Human-readable report: environment, versions, mod inventory, integrity, logs.
-fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[LogFile], notes: &[String]) -> String {
+fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog], notes: &[String]) -> String {
     let mut o = String::new();
     let line = |o: &mut String, k: &str, val: &str| {
         o.push_str(&format!("{k}: {val}\n"));
@@ -328,9 +377,17 @@ fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[LogFile], 
     if logs.is_empty() {
         o.push_str("(no log files found in the install)\n");
     } else {
-        o.push_str(&format!("Included {} log file(s):\n", logs.len()));
+        o.push_str(&format!(
+            "Included {} log file(s) — sha256 also in manifest.sha256:\n",
+            logs.len()
+        ));
         for l in logs {
-            o.push_str(&format!("  - {} ({})\n", l.arcname, fmt_bytes(l.size)));
+            o.push_str(&format!(
+                "  - {} ({})\n      sha256: {}\n",
+                l.arcname,
+                fmt_bytes(l.size),
+                l.sha256
+            ));
         }
     }
 
@@ -437,14 +494,15 @@ fn render_integrity(o: &mut String, v: &VerifyReport) {
 // Archive
 // ----------------------------------------------------------------------------
 
-/// Write the report, JSON dump, and log files into a `.zip` at `dest`, each
-/// entry under the `stem/` top-level folder.
+/// Write the report, JSON dump, manifest, and log files into a `.zip` at `dest`,
+/// each entry under the `stem/` top-level folder.
 fn write_zip(
     dest: &Path,
     stem: &str,
     report_txt: &str,
     info_json: &str,
-    logs: &[LogFile],
+    manifest_txt: &str,
+    logs: &[BundledLog],
 ) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("couldn't create output folder: {e}"))?;
@@ -461,13 +519,12 @@ fn write_zip(
 
     add("debug-report.txt", report_txt.as_bytes())?;
     add("debug-info.json", info_json.as_bytes())?;
-
+    // Only emit a manifest when there's something to attest to.
+    if !logs.is_empty() {
+        add("manifest.sha256", manifest_txt.as_bytes())?;
+    }
     for l in logs {
-        match std::fs::read(&l.path) {
-            Ok(bytes) => add(&l.arcname, &bytes)?,
-            // A log that vanished mid-run shouldn't sink the whole bundle.
-            Err(_) => continue,
-        }
+        add(&l.arcname, &l.bytes)?;
     }
 
     zip.finish().map_err(|e| format!("couldn't finalize the zip: {e}"))?;
@@ -616,15 +673,21 @@ mod tests {
         })
     }
 
+    fn bundled(arcname: &str, body: &str) -> BundledLog {
+        BundledLog {
+            arcname: arcname.into(),
+            size: body.len() as u64,
+            sha256: loadprobe::sha256::sha256_hex(body.as_bytes()),
+            bytes: body.as_bytes().to_vec(),
+        }
+    }
+
     #[test]
     fn render_report_covers_every_section() {
         let meta = sample_meta();
         let report = dirty_report();
-        let logs = vec![LogFile {
-            arcname: "logs/pmc_blackbox.log".into(),
-            path: PathBuf::from("/x/pmc_blackbox.log"),
-            size: 2048,
-        }];
+        // 2048 bytes so the size renders as "2.0 KB".
+        let logs = vec![bundled("logs/pmc_blackbox.log", &"x".repeat(2048))];
         let r = render_report(&meta, Some(&report), &logs, &["a note".into()]);
 
         // Header + environment
@@ -654,9 +717,10 @@ mod tests {
         assert!(r.contains("data/vz.wad: 2 modified · 0 missing · 1 added · 5 asset(s) affected"));
         assert!(r.contains("Mercenaries2.exe → v1.1 cracked ✓"));
         assert!(r.contains("bypass only"));
-        // Logs + notes
-        assert!(r.contains("Included 1 log file(s):"));
+        // Logs + notes (with per-log sha256 surfaced)
+        assert!(r.contains("Included 1 log file(s) — sha256 also in manifest.sha256:"));
         assert!(r.contains("logs/pmc_blackbox.log (2.0 KB)"));
+        assert!(r.contains(&format!("sha256: {}", loadprobe::sha256::sha256_hex(&[b'x'; 2048]))));
         assert!(r.contains("a note"));
     }
 
@@ -674,45 +738,67 @@ mod tests {
     }
 
     #[test]
-    fn render_info_json_merges_integrity_into_meta() {
-        let out = render_info_json(&sample_meta(), Some(&dirty_report()));
+    fn render_info_json_merges_integrity_and_files() {
+        let logs = vec![bundled("logs/a.log", "hello")];
+        let out = render_info_json(&sample_meta(), Some(&dirty_report()), &logs);
         let v: Value = serde_json::from_str(&out).unwrap();
         // Original meta preserved…
         assert_eq!(v["modkitVersion"], "0.5.1");
-        // …and the backend-computed integrity report grafted on.
+        // …the backend-computed integrity report grafted on…
         assert_eq!(v["integrity"]["ok"], 1200);
         assert_eq!(v["integrity"]["missing"][0], "data/english.wad");
         assert_eq!(v["integrity"]["manifestSource"], "bundled");
+        // …and the bundled-log manifest.
+        assert_eq!(v["files"][0]["path"], "logs/a.log");
+        assert_eq!(v["files"][0]["size"], 5);
+        assert_eq!(v["files"][0]["sha256"], loadprobe::sha256::sha256_hex(b"hello"));
 
-        // With no report, the key is present but null.
-        let none = render_info_json(&sample_meta(), None);
+        // With no report, integrity is null and files is an empty array.
+        let none = render_info_json(&sample_meta(), None, &[]);
         let v2: Value = serde_json::from_str(&none).unwrap();
         assert!(v2["integrity"].is_null());
+        assert_eq!(v2["files"], json!([]));
     }
 
     #[test]
-    fn write_zip_round_trips_report_json_and_logs() {
+    fn render_manifest_is_sha256sum_compatible() {
+        let logs = vec![bundled("logs/a.log", "abc"), bundled("logs/b.log", "")];
+        let m = render_manifest(&logs);
+        // Known SHA-256 vectors, two-space separator, one entry per line.
+        assert_eq!(
+            m,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  logs/a.log\n\
+             e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  logs/b.log\n"
+        );
+    }
+
+    #[test]
+    fn read_logs_hashes_and_skips_unreadable() {
         let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("pmc_blackbox.log");
-        write(&log_path, "the log body");
-        let logs = vec![LogFile {
-            arcname: "logs/pmc_blackbox.log".into(),
-            path: log_path,
-            size: 12,
-        }];
-        // A log whose file is missing must be skipped, not fatal.
-        let logs = {
-            let mut l = logs;
-            l.push(LogFile {
-                arcname: "logs/gone.log".into(),
-                path: dir.path().join("does-not-exist.log"),
-                size: 0,
-            });
-            l
-        };
+        write(&dir.path().join("real.log"), "abc");
+        let candidates = vec![
+            LogFile { arcname: "logs/real.log".into(), path: dir.path().join("real.log") },
+            LogFile { arcname: "logs/gone.log".into(), path: dir.path().join("missing.log") },
+        ];
+        let mut notes = Vec::new();
+        let logs = read_logs(candidates, &mut notes);
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].arcname, "logs/real.log");
+        assert_eq!(logs[0].size, 3);
+        assert_eq!(logs[0].sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("Skipped log logs/gone.log"));
+    }
+
+    #[test]
+    fn write_zip_round_trips_report_json_manifest_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = vec![bundled("logs/pmc_blackbox.log", "the log body")];
+        let manifest = render_manifest(&logs);
 
         let dest = dir.path().join("out/bundle.zip");
-        write_zip(&dest, "bundle", "REPORT", "{\"k\":1}", &logs).unwrap();
+        write_zip(&dest, "bundle", "REPORT", "{\"k\":1}", &manifest, &logs).unwrap();
 
         let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
         let read = |a: &mut zip::ZipArchive<File>, name: &str| {
@@ -723,7 +809,20 @@ mod tests {
         assert_eq!(read(&mut archive, "bundle/debug-report.txt"), "REPORT");
         assert_eq!(read(&mut archive, "bundle/debug-info.json"), "{\"k\":1}");
         assert_eq!(read(&mut archive, "bundle/logs/pmc_blackbox.log"), "the log body");
-        // The missing log was skipped entirely.
-        assert!(archive.by_name("bundle/logs/gone.log").is_err());
+        // The manifest is present and names the log with its digest.
+        let m = read(&mut archive, "bundle/manifest.sha256");
+        assert!(m.contains("  logs/pmc_blackbox.log\n"));
+        assert!(m.starts_with(&loadprobe::sha256::sha256_hex(b"the log body")));
+    }
+
+    #[test]
+    fn write_zip_omits_manifest_when_no_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bundle.zip");
+        write_zip(&dest, "bundle", "REPORT", "{}", "", &[]).unwrap();
+        let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
+        assert!(archive.by_name("bundle/debug-report.txt").is_ok());
+        // No logs → no manifest entry.
+        assert!(archive.by_name("bundle/manifest.sha256").is_err());
     }
 }
