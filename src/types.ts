@@ -255,6 +255,16 @@ export interface GenerateManifestResult {
   totalBytes: number;
 }
 
+/** Result of bundling logs, a mod inventory, versions, and an integrity check
+ *  into a dated debug `.zip`. */
+export interface DebugZipResult {
+  path: string;
+  bytes: number;
+  logCount: number;
+  integrityOk: boolean;
+  notes: string[];
+}
+
 /** `verify-progress` / `manifest-progress` event payload. */
 export interface HashProgress {
   done: number;

@@ -8,6 +8,7 @@ mod models;
 
 use commands::asset_catalog::detect_asset_type;
 use commands::conflict_resolver::build_conflict_graph;
+use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
 use commands::game::detect_game;
 use commands::installer::{import_local_asi, install_catalog_mod};
@@ -57,6 +58,7 @@ pub fn run() {
             install_vcredist,
             generate_manifest,
             verify_game,
+            build_debug_zip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
