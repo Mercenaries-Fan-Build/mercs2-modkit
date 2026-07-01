@@ -9,17 +9,19 @@
 //! collecting the log files — then renders a human-readable report plus a
 //! machine-readable JSON dump and compresses the lot.
 //!
-//! Every bundled log is SHA-256'd (via `loadprobe::sha256`, the same digest the
-//! log analyzer uses) so the archive carries a `manifest.sha256` — a
-//! `sha256sum -c`-compatible list a recipient can use to confirm the logs
-//! weren't altered in transit — mirrored into `debug-info.json` under `files`.
+//! The `debug-report.txt` summary and every bundled log are SHA-256'd (via
+//! `loadprobe::sha256`, the same digest the log analyzer uses) so the archive
+//! carries a `manifest.sha256` — a `sha256sum -c`-compatible list a recipient
+//! can use to confirm nothing was altered — mirrored into `debug-info.json`
+//! under `files`. `debug-info.json` is deliberately not in the manifest: it
+//! embeds those very digests, so it can't hash itself.
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tauri::path::BaseDirectory;
 use tauri::{Emitter, Manager, Window};
 use zip::write::SimpleFileOptions;
@@ -85,13 +87,14 @@ pub async fn build_debug_zip(
         let _ = window.emit("debug-status", "Collecting logs…");
         let logs = read_logs(collect_logs(&root), &mut notes);
 
-        // 3. Render the report, the machine-readable dump, and a
-        //    sha256sum-compatible manifest of the bundled logs.
+        // 3. Render the report, then digest it alongside the logs into a
+        //    sha256sum-compatible manifest and the machine-readable dump.
         let _ = window.emit("debug-status", "Writing report…");
         let stem = zip_stem(&dest);
-        let manifest_txt = render_manifest(&logs);
         let report_txt = render_report(&meta, verify.as_ref(), &logs, &notes);
-        let info_json = render_info_json(&meta, verify.as_ref(), &logs);
+        let digests = digest_files(&report_txt, &logs);
+        let manifest_txt = render_manifest(&digests);
+        let info_json = render_info_json(&meta, verify.as_ref(), &digests);
 
         // 4. Compress everything under a single top-level folder.
         let _ = window.emit("debug-status", "Compressing…");
@@ -159,12 +162,40 @@ fn read_logs(candidates: Vec<LogFile>, notes: &mut Vec<String>) -> Vec<BundledLo
     out
 }
 
-/// A `sha256sum -c`-compatible manifest of the bundled logs: `<hash>  <path>`,
-/// one per line (two spaces, matching coreutils' text-mode format).
-fn render_manifest(logs: &[BundledLog]) -> String {
+/// One entry in the bundle's tamper-evidence manifest: an archive-relative path
+/// and the SHA-256 of its bytes.
+#[derive(Debug, Clone, Serialize)]
+struct FileDigest {
+    path: String,
+    size: u64,
+    /// Lowercase hex SHA-256.
+    sha256: String,
+}
+
+/// Digest the files whose integrity the bundle attests to: the generated
+/// `debug-report.txt` (so an edited summary is detectable) followed by every
+/// bundled log. `debug-info.json` is intentionally excluded — it embeds these
+/// digests and so can't hash itself.
+fn digest_files(report_txt: &str, logs: &[BundledLog]) -> Vec<FileDigest> {
+    let mut files = vec![FileDigest {
+        path: "debug-report.txt".into(),
+        size: report_txt.len() as u64,
+        sha256: loadprobe::sha256::sha256_hex(report_txt.as_bytes()),
+    }];
+    files.extend(logs.iter().map(|l| FileDigest {
+        path: l.arcname.clone(),
+        size: l.size,
+        sha256: l.sha256.clone(),
+    }));
+    files
+}
+
+/// A `sha256sum -c`-compatible manifest: `<hash>  <path>`, one per line (two
+/// spaces, matching coreutils' text-mode format).
+fn render_manifest(files: &[FileDigest]) -> String {
     let mut o = String::new();
-    for l in logs {
-        o.push_str(&format!("{}  {}\n", l.sha256, l.arcname));
+    for f in files {
+        o.push_str(&format!("{}  {}\n", f.sha256, f.path));
     }
     o
 }
@@ -256,8 +287,8 @@ fn s_or<'a>(v: &'a Value, key: &str, dflt: &'a str) -> &'a str {
 }
 
 /// The full machine-readable dump: the frontend meta with the (backend-computed)
-/// integrity report and the bundled-log manifest (`files`) grafted on.
-fn render_info_json(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog]) -> String {
+/// integrity report and the manifest (`files`) grafted on.
+fn render_info_json(meta: &Value, verify: Option<&VerifyReport>, files: &[FileDigest]) -> String {
     let mut obj = meta.clone();
     if let Value::Object(map) = &mut obj {
         map.insert(
@@ -266,11 +297,10 @@ fn render_info_json(meta: &Value, verify: Option<&VerifyReport>, logs: &[Bundled
                 .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
                 .unwrap_or(Value::Null),
         );
-        let files: Vec<Value> = logs
-            .iter()
-            .map(|l| json!({ "path": l.arcname, "size": l.size, "sha256": l.sha256 }))
-            .collect();
-        map.insert("files".into(), Value::Array(files));
+        map.insert(
+            "files".into(),
+            serde_json::to_value(files).unwrap_or_else(|_| Value::Array(vec![])),
+        );
     }
     serde_json::to_string_pretty(&obj).unwrap_or_else(|_| "{}".into())
 }
@@ -398,6 +428,11 @@ fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog
         }
     }
 
+    o.push_str(
+        "\nTamper check: this report and every log are listed in manifest.sha256 — \
+         run `sha256sum -c manifest.sha256` to confirm the bundle wasn't altered.\n",
+    );
+
     o
 }
 
@@ -519,10 +554,9 @@ fn write_zip(
 
     add("debug-report.txt", report_txt.as_bytes())?;
     add("debug-info.json", info_json.as_bytes())?;
-    // Only emit a manifest when there's something to attest to.
-    if !logs.is_empty() {
-        add("manifest.sha256", manifest_txt.as_bytes())?;
-    }
+    // The manifest always attests debug-report.txt (plus any logs), so it's
+    // always present.
+    add("manifest.sha256", manifest_txt.as_bytes())?;
     for l in logs {
         add(&l.arcname, &l.bytes)?;
     }
@@ -722,6 +756,8 @@ mod tests {
         assert!(r.contains("logs/pmc_blackbox.log (2.0 KB)"));
         assert!(r.contains(&format!("sha256: {}", loadprobe::sha256::sha256_hex(&[b'x'; 2048]))));
         assert!(r.contains("a note"));
+        // Tamper-check hint
+        assert!(r.contains("sha256sum -c manifest.sha256"));
     }
 
     #[test]
@@ -738,9 +774,26 @@ mod tests {
     }
 
     #[test]
+    fn digest_files_covers_report_then_logs() {
+        let logs = vec![bundled("logs/a.log", "abc")];
+        let files = digest_files("REPORT BODY", &logs);
+        // The report is attested first…
+        assert_eq!(files[0].path, "debug-report.txt");
+        assert_eq!(files[0].size, "REPORT BODY".len() as u64);
+        assert_eq!(files[0].sha256, loadprobe::sha256::sha256_hex(b"REPORT BODY"));
+        // …then each log.
+        assert_eq!(files[1].path, "logs/a.log");
+        assert_eq!(files[1].sha256, loadprobe::sha256::sha256_hex(b"abc"));
+        assert_eq!(files.len(), 2);
+
+        // With no logs, the report alone is still attested.
+        assert_eq!(digest_files("x", &[]).len(), 1);
+    }
+
+    #[test]
     fn render_info_json_merges_integrity_and_files() {
-        let logs = vec![bundled("logs/a.log", "hello")];
-        let out = render_info_json(&sample_meta(), Some(&dirty_report()), &logs);
+        let files = digest_files("REPORT", &[bundled("logs/a.log", "hello")]);
+        let out = render_info_json(&sample_meta(), Some(&dirty_report()), &files);
         let v: Value = serde_json::from_str(&out).unwrap();
         // Original meta preserved…
         assert_eq!(v["modkitVersion"], "0.5.1");
@@ -748,12 +801,14 @@ mod tests {
         assert_eq!(v["integrity"]["ok"], 1200);
         assert_eq!(v["integrity"]["missing"][0], "data/english.wad");
         assert_eq!(v["integrity"]["manifestSource"], "bundled");
-        // …and the bundled-log manifest.
-        assert_eq!(v["files"][0]["path"], "logs/a.log");
-        assert_eq!(v["files"][0]["size"], 5);
-        assert_eq!(v["files"][0]["sha256"], loadprobe::sha256::sha256_hex(b"hello"));
+        // …and the manifest: report first, then the log.
+        assert_eq!(v["files"][0]["path"], "debug-report.txt");
+        assert_eq!(v["files"][0]["sha256"], loadprobe::sha256::sha256_hex(b"REPORT"));
+        assert_eq!(v["files"][1]["path"], "logs/a.log");
+        assert_eq!(v["files"][1]["size"], 5);
+        assert_eq!(v["files"][1]["sha256"], loadprobe::sha256::sha256_hex(b"hello"));
 
-        // With no report, integrity is null and files is an empty array.
+        // With no report/logs, integrity is null and files is an empty array.
         let none = render_info_json(&sample_meta(), None, &[]);
         let v2: Value = serde_json::from_str(&none).unwrap();
         assert!(v2["integrity"].is_null());
@@ -762,12 +817,15 @@ mod tests {
 
     #[test]
     fn render_manifest_is_sha256sum_compatible() {
-        let logs = vec![bundled("logs/a.log", "abc"), bundled("logs/b.log", "")];
-        let m = render_manifest(&logs);
+        let files = vec![
+            FileDigest { path: "debug-report.txt".into(), size: 3, sha256: loadprobe::sha256::sha256_hex(b"abc") },
+            FileDigest { path: "logs/b.log".into(), size: 0, sha256: loadprobe::sha256::sha256_hex(b"") },
+        ];
+        let m = render_manifest(&files);
         // Known SHA-256 vectors, two-space separator, one entry per line.
         assert_eq!(
             m,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  logs/a.log\n\
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  debug-report.txt\n\
              e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  logs/b.log\n"
         );
     }
@@ -795,7 +853,7 @@ mod tests {
     fn write_zip_round_trips_report_json_manifest_and_logs() {
         let dir = tempfile::tempdir().unwrap();
         let logs = vec![bundled("logs/pmc_blackbox.log", "the log body")];
-        let manifest = render_manifest(&logs);
+        let manifest = render_manifest(&digest_files("REPORT", &logs));
 
         let dest = dir.path().join("out/bundle.zip");
         write_zip(&dest, "bundle", "REPORT", "{\"k\":1}", &manifest, &logs).unwrap();
@@ -809,20 +867,24 @@ mod tests {
         assert_eq!(read(&mut archive, "bundle/debug-report.txt"), "REPORT");
         assert_eq!(read(&mut archive, "bundle/debug-info.json"), "{\"k\":1}");
         assert_eq!(read(&mut archive, "bundle/logs/pmc_blackbox.log"), "the log body");
-        // The manifest is present and names the log with its digest.
+        // The manifest attests the report (first) and the log with its digest.
         let m = read(&mut archive, "bundle/manifest.sha256");
-        assert!(m.contains("  logs/pmc_blackbox.log\n"));
-        assert!(m.starts_with(&loadprobe::sha256::sha256_hex(b"the log body")));
+        assert!(m.starts_with(&loadprobe::sha256::sha256_hex(b"REPORT")));
+        assert!(m.contains("  debug-report.txt\n"));
+        assert!(m.contains(&format!("{}  logs/pmc_blackbox.log\n", loadprobe::sha256::sha256_hex(b"the log body"))));
     }
 
     #[test]
-    fn write_zip_omits_manifest_when_no_logs() {
+    fn write_zip_always_includes_manifest_for_the_report() {
+        // Even with no logs, the manifest is present and attests debug-report.txt.
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("bundle.zip");
-        write_zip(&dest, "bundle", "REPORT", "{}", "", &[]).unwrap();
+        let manifest = render_manifest(&digest_files("REPORT", &[]));
+        write_zip(&dest, "bundle", "REPORT", "{}", &manifest, &[]).unwrap();
+
         let mut archive = zip::ZipArchive::new(File::open(&dest).unwrap()).unwrap();
-        assert!(archive.by_name("bundle/debug-report.txt").is_ok());
-        // No logs → no manifest entry.
-        assert!(archive.by_name("bundle/manifest.sha256").is_err());
+        let mut m = String::new();
+        archive.by_name("bundle/manifest.sha256").unwrap().read_to_string(&mut m).unwrap();
+        assert_eq!(m, format!("{}  debug-report.txt\n", loadprobe::sha256::sha256_hex(b"REPORT")));
     }
 }
