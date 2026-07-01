@@ -28,6 +28,7 @@ import type {
   InstallVcRedistResult,
   VerifyReport,
   GenerateManifestResult,
+  DebugZipResult,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
@@ -698,6 +699,54 @@ export const useProjectStore = defineStore("project", {
       return await invoke<VerifyReport>("verify_game", {
         gameRoot: this.gameInfo.root,
         manifestPath: manifestPath ?? null,
+      });
+    },
+
+    /**
+     * Bundle everything needed to diagnose this install into a dated `.zip` at
+     * `destPath`: the game logs, an inventory of installed mods, the versions of
+     * every moving part, and a fresh file-integrity check. Backend emits
+     * `debug-status` phase text while it works.
+     */
+    async buildDebugZip(destPath: string): Promise<DebugZipResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      let modkitVersion = "unknown";
+      try {
+        modkitVersion = await getVersion();
+      } catch {
+        /* non-Tauri context — leave "unknown" */
+      }
+      const meta = {
+        generatedAt: new Date().toISOString(),
+        modkitVersion,
+        game: this.gameInfo,
+        pmcBbVersion: this.pmcBbVersion,
+        crackVersion: this.crackVersion,
+        componentUpdates: this.componentUpdates,
+        vcRedist: this.vcRedist,
+        catalogSource: this.catalogSource,
+        wadMods: this.mods.map((m) => ({
+          id: m.id,
+          name: m.manifest.name,
+          version: m.manifest.version,
+          enabled: this.isEnabled(m.id),
+          assetCount: m.assets.length,
+        })),
+        asiMods: this.asiMods.map((m) => ({
+          id: m.id,
+          name: m.name,
+          version: m.version,
+          enabled: this.isEnabled(m.id),
+          deployed: this.isAsiDeployed(m),
+        })),
+        deployedAsi: this.gameInfo.deployed_asi,
+        deployedPatches: this.gameInfo.deployed_patches,
+      };
+      return await invoke<DebugZipResult>("build_debug_zip", {
+        gameRoot: this.gameInfo.root,
+        destPath,
+        meta,
       });
     },
 

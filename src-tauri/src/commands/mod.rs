@@ -2,6 +2,7 @@
 
 pub mod asset_catalog;
 pub mod conflict_resolver;
+pub mod debug_bundle;
 pub mod deploy;
 pub mod game;
 pub mod installer;

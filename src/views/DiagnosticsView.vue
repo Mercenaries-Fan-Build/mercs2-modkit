@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, watchEffect, onUnmounted } from "vue";
 import { storeToRefs } from "pinia";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useProjectStore } from "../stores/project";
 import type {
   LogReport,
   VerifyReport,
   GenerateManifestResult,
+  DebugZipResult,
   HashProgress,
 } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
@@ -32,6 +33,13 @@ const statusMsg = ref<string | null>(null);
 const opError = ref<string | null>(null);
 // A locally generated manifest, used to verify before it's published.
 const localManifest = ref<string | null>(null);
+
+// --- Build debug bundle ---
+const building = ref(false);
+const debugResult = ref<DebugZipResult | null>(null);
+const debugError = ref<string | null>(null);
+// Latest phase text streamed from the backend ("Verifying game files…", etc.).
+const debugStatus = ref<string | null>(null);
 
 // The maintainer card is for building the bundled manifest; pipeline release
 // builds set VITE_RELEASE_BUILD, so it shows only in local/dev builds.
@@ -138,6 +146,43 @@ async function generate() {
     opError.value = String(e);
   } finally {
     generating.value = false;
+  }
+}
+
+// A filesystem-safe timestamp (YYYY-MM-DD-HHMMSS) for the default zip name.
+function stamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  );
+}
+
+async function buildDebugBundle() {
+  const dest = await save({
+    title: "Save debug bundle",
+    defaultPath: `mercs2-modkit-debug-${stamp()}.zip`,
+    filters: [{ name: "Zip archive", extensions: ["zip"] }],
+  });
+  if (typeof dest !== "string") return;
+
+  building.value = true;
+  debugResult.value = null;
+  debugError.value = null;
+  debugStatus.value = "Starting…";
+  const stop = await listen<string>(
+    "debug-status",
+    (ev) => (debugStatus.value = ev.payload)
+  );
+  try {
+    debugResult.value = await store.buildDebugZip(dest);
+  } catch (e) {
+    debugError.value = String(e);
+  } finally {
+    stop();
+    building.value = false;
+    debugStatus.value = null;
   }
 }
 
@@ -428,6 +473,67 @@ function verdictTone(kind: string): string {
             {{ genResult.path }}
           </button>
         </p>
+      </div>
+    </section>
+
+    <!-- Build debug bundle -->
+    <section class="mt-5 rounded-xl border border-zinc-800 p-5">
+      <h3 class="font-medium text-zinc-100">Build debug bundle</h3>
+      <p class="mt-1 text-sm text-zinc-400">
+        Package everything a maintainer needs to diagnose a problem into one
+        dated <code class="text-zinc-300">.zip</code>: your game
+        <code class="text-zinc-300">.log</code> files, a list of installed mods,
+        the versions of everything (modkit, game, ASI loader, crack, VC++
+        runtime), and a fresh file-integrity check.
+      </p>
+
+      <div class="mt-4 flex flex-wrap items-center gap-2">
+        <button
+          class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          :disabled="!gameInfo || building"
+          @click="buildDebugBundle"
+        >
+          <Spinner v-if="building" />
+          {{ building ? "Building…" : "Build debug zip" }}
+        </button>
+        <span v-if="!gameInfo" class="text-xs text-zinc-500">
+          Set your game folder first.
+        </span>
+        <span v-else-if="building && debugStatus" class="text-xs text-zinc-500">
+          {{ debugStatus }}
+        </span>
+      </div>
+
+      <p
+        v-if="debugError"
+        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+      >
+        {{ debugError }}
+      </p>
+
+      <div
+        v-if="debugResult && !building"
+        class="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300"
+      >
+        <p>
+          Bundled {{ debugResult.logCount }} log file(s) +
+          {{ debugResult.integrityOk ? "a clean" : "a flagged" }} integrity
+          report ({{ fmtBytes(debugResult.bytes) }}).
+        </p>
+        <p class="mt-1 flex flex-wrap items-center gap-3">
+          <button class="underline" @click="revealItemInDir(debugResult.path)">
+            Show in folder
+          </button>
+          <button class="underline" @click="openPath(debugResult.path)">
+            Open
+          </button>
+        </p>
+        <ul
+          v-if="debugResult.notes.length"
+          class="mt-2 list-disc pl-5 text-xs text-amber-300/90"
+        >
+          <li v-for="n in debugResult.notes" :key="n">{{ n }}</li>
+        </ul>
       </div>
     </section>
 
