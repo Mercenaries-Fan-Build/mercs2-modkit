@@ -118,6 +118,10 @@ pub fn launch_game(
     // Verbose pmc_blackbox log hooks are opt-in per launch (expensive); default off.
     let verbose = verbose_log.unwrap_or(false);
 
+    // Snapshot the player's saves before the game can touch them. Best-effort:
+    // a failed backup (no saves yet, unreadable dir) must never block a launch.
+    let _ = crate::commands::save_backup::backup_before_launch(ov.prefix.as_deref());
+
     let mut cmd = build_command(&game_dir, &run_exe, &ov, verbose)?;
     let child = cmd
         .spawn()

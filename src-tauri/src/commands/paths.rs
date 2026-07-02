@@ -45,3 +45,8 @@ pub fn deployed_dir() -> Result<PathBuf, String> {
 pub fn trash_dir() -> Result<PathBuf, String> {
     stage("trash")
 }
+
+/// Timestamped snapshots of the player's SaveGames folder live here.
+pub fn save_backups_dir() -> Result<PathBuf, String> {
+    stage("save-backups")
+}
