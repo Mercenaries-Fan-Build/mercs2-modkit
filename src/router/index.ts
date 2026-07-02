@@ -42,6 +42,13 @@ export const router = createRouter({
       component: () => import("../views/ConflictView.vue"),
     },
     {
+      path: "/saves",
+      name: "saves",
+      component: () => import("../views/SavesView.vue"),
+    },
+    // Kept reachable by URL, but no longer in the sidebar (the "Build & Deploy"
+    // tab became "Save backups").
+    {
       path: "/export",
       name: "export",
       component: () => import("../views/ExportView.vue"),

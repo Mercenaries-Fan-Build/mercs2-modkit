@@ -321,6 +321,52 @@ export interface DebugZipResult {
   notes: string[];
 }
 
+/** One save-game `.profile` file, with parsed header details when readable. */
+export interface SaveFileInfo {
+  file_name: string;
+  size: number;
+  modified_unix: number;
+  /** The game's rolling `auto_*` slot (overwritten constantly by mission Lua). */
+  autosave: boolean;
+  character: string | null;
+  cash: number | null;
+  playtime_seconds: number | null;
+  saved_at_unix: number | null;
+  last_mission: string | null;
+}
+
+/** The live SaveGames folder and its contents. */
+export interface SavesInfo {
+  dir: string | null;
+  /** True when `dir` is the user's saved override, not the autodetected path. */
+  overridden: boolean;
+  exists: boolean;
+  saves: SaveFileInfo[];
+}
+
+/** One stored snapshot of the SaveGames folder. */
+export interface SaveBackupInfo {
+  id: string;
+  reason: string; // "pre-launch" | "pre-restore" | "manual"
+  created_unix: number;
+  file_count: number;
+  total_bytes: number;
+  characters: string[];
+}
+
+/** Result of a snapshot attempt (id null when skipped, with the reason why). */
+export interface BackupResult {
+  id: string | null;
+  skipped: string | null;
+  file_count: number;
+}
+
+/** Result of restoring a snapshot over the live saves. */
+export interface RestoreResult {
+  restored: string[];
+  pre_restore_backup: string | null;
+}
+
 /** `verify-progress` / `manifest-progress` event payload. */
 export interface HashProgress {
   done: number;
