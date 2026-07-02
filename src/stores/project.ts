@@ -1,6 +1,8 @@
 import { defineStore } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type {
   AsiMod,
   BuildResult,
@@ -90,6 +92,12 @@ function findCatalogForLib(
 
 /** Repository whose releases drive modkit's own self-update check. */
 const MODKIT_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-modkit";
+
+/**
+ * Pending in-place update from the Tauri updater. Kept outside Pinia state:
+ * it's a live handle with methods, not serializable data.
+ */
+let pendingUpdate: Update | null = null;
 /** Repos publishing the core components modkit installs (release-checked too). */
 const PMC_BB_REPO = "https://github.com/Mercenaries-Fan-Build/pmc-blackbox";
 const CRACK_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-securom-bypass";
@@ -113,6 +121,10 @@ interface ProjectState {
   customSources: RepoSource[];
   // modkit self-update (vs its GitHub releases)
   modkitUpdate: ModkitUpdate | null;
+  /** In-place update download/install in progress. */
+  updateInstalling: boolean;
+  /** Download progress 0-100, or null when the size is unknown. */
+  updateProgress: number | null;
   // Versions of the core components modkit last installed (null = unknown).
   pmcBbVersion: string | null;
   crackVersion: string | null;
@@ -145,6 +157,8 @@ export const useProjectStore = defineStore("project", {
     catalogSource: null,
     customSources: [],
     modkitUpdate: null,
+    updateInstalling: false,
+    updateProgress: null,
     pmcBbVersion: null,
     crackVersion: null,
     componentUpdates: {},
@@ -582,7 +596,12 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /** Check modkit's own GitHub releases for a newer version. */
+    /**
+     * Check for a newer modkit release. Prefers the Tauri updater (signed
+     * manifest, in-place install); falls back to the GitHub release lookup for
+     * install forms the updater can't replace (portable exe, deb/rpm/flatpak)
+     * or when no update manifest is published yet.
+     */
     async checkModkitUpdate() {
       let current = "";
       try {
@@ -593,9 +612,30 @@ export const useProjectStore = defineStore("project", {
           latest: current,
           url: `${MODKIT_REPO}/releases`,
           available: false,
+          canInstall: false,
         };
       } catch {
         /* version unavailable (non-Tauri context) */
+      }
+      try {
+        if (await invoke<boolean>("updater_supported")) {
+          const upd = await checkUpdate();
+          if (upd) {
+            pendingUpdate = upd;
+            this.modkitUpdate = {
+              current,
+              latest: upd.version,
+              url: `${MODKIT_REPO}/releases`,
+              available: true,
+              canInstall: true,
+            };
+            return;
+          }
+          // Updater reachable and reports up to date — trust it.
+          return;
+        }
+      } catch {
+        /* no manifest yet / offline / dev build — fall back to the API check */
       }
       try {
         const rel = await invoke<ReleaseInfo>("latest_release", {
@@ -606,9 +646,47 @@ export const useProjectStore = defineStore("project", {
           latest: rel.tag,
           url: rel.url,
           available: !!current && semverGt(rel.tag, current),
+          canInstall: false,
         };
       } catch {
         /* offline or no releases yet — keep the current-version-only state */
+      }
+    },
+
+    /**
+     * Download and install the update found by {@link checkModkitUpdate},
+     * then relaunch into the new version. Only valid when
+     * `modkitUpdate.canInstall` is true.
+     */
+    async installModkitUpdate() {
+      if (!pendingUpdate || this.updateInstalling) return;
+      this.updateInstalling = true;
+      this.updateProgress = null;
+      this.error = null;
+      let total = 0;
+      let received = 0;
+      try {
+        await pendingUpdate.downloadAndInstall((ev) => {
+          if (ev.event === "Started") {
+            total = ev.data.contentLength ?? 0;
+            this.updateProgress = total ? 0 : null;
+          } else if (ev.event === "Progress") {
+            received += ev.data.chunkLength;
+            if (total) {
+              this.updateProgress = Math.min(
+                100,
+                Math.round((received / total) * 100)
+              );
+            }
+          } else if (ev.event === "Finished") {
+            this.updateProgress = 100;
+          }
+        });
+        await relaunch();
+      } catch (e) {
+        this.error = `Update failed: ${e}`;
+        this.updateInstalling = false;
+        this.updateProgress = null;
       }
     },
 

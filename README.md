@@ -51,6 +51,28 @@ cargo build --manifest-path src-tauri/Cargo.toml   # build the backend
 The validator either downloads the `wad_simulator` release binary on first use
 or finds one on `PATH` (`cargo install wad_simulator`).
 
+## Releasing & auto-update
+
+Tagged builds (`v*`) publish installers plus a Tauri-updater manifest
+(`latest.json`), which installed copies poll so they can update in-place
+(Windows NSIS installs and Linux AppImages; the portable exe and
+deb/rpm/flatpak link to the release page instead). Update artifacts are
+signed; the app rejects any update whose signature doesn't match the public
+key in `src-tauri/tauri.conf.json`.
+
+One-time setup for a new signing key:
+
+```bash
+npm run tauri signer generate -- -w ~/.tauri/mercs2-modkit.key
+```
+
+Paste the printed public key into `plugins.updater.pubkey` in
+`src-tauri/tauri.conf.json`, and add the private key file's contents and its
+password as the `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` GitHub Actions secrets. Keep the private
+key out of the repo and backed up — losing it means shipping a release users
+must reinstall manually; leaking it lets anyone sign updates.
+
 ## Architecture
 
 - `src-tauri/src/models/` — manifest, project, and conflict types (serde).

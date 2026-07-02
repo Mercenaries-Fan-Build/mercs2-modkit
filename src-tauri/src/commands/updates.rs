@@ -16,6 +16,33 @@ pub struct ReleaseInfo {
     pub body: String,
 }
 
+/// Whether this binary was installed in a form the Tauri updater can replace
+/// in-place. Windows NSIS installs and Linux AppImages qualify; the portable
+/// Windows exe and deb/rpm/flatpak installs update out-of-band, so the UI
+/// should link to the release page instead of offering an in-app install.
+#[tauri::command]
+pub fn updater_supported() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // The NSIS bundle writes uninstall.exe next to the app binary; the
+        // portable zip is a loose exe the updater cannot replace.
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("uninstall.exe").exists()))
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // AppImage runtimes export APPIMAGE; deb/rpm/flatpak go through the
+        // system package manager.
+        std::env::var_os("APPIMAGE").is_some()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        true
+    }
+}
+
 /// `owner/repo` for a GitHub URL, or `None` for other hosts.
 fn github_owner_repo(url: &str) -> Option<String> {
     let s = url.trim().trim_end_matches('/');

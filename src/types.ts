@@ -167,6 +167,12 @@ export interface ModkitUpdate {
   latest: string;
   url: string;
   available: boolean;
+  /**
+   * True when the Tauri updater can install this update in-place (NSIS install
+   * or AppImage with a signed update manifest). False falls back to linking to
+   * the release page (portable exe, deb/rpm/flatpak, dev builds).
+   */
+  canInstall: boolean;
 }
 
 /**

@@ -19,7 +19,7 @@ use commands::mod_loader::{load_mod, validate_manifest};
 use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
 use commands::setup::{crack_game, install_pmc_bb};
-use commands::updates::latest_release;
+use commands::updates::{latest_release, updater_supported};
 use commands::validator::{fetch_wad_simulator, validate_wad};
 use commands::vcredist::{check_vcredist, install_vcredist};
 use commands::verify::{generate_manifest, verify_game};
@@ -30,6 +30,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // The updater only exists on desktop targets.
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            Ok(())
+        })
         .manage(GameProcess::default())
         .invoke_handler(tauri::generate_handler![
             load_mod,
@@ -56,6 +64,7 @@ pub fn run() {
             analyze_log,
             locate_log,
             latest_release,
+            updater_supported,
             check_vcredist,
             install_vcredist,
             generate_manifest,

@@ -146,8 +146,29 @@ onMounted(() => {
       </div>
 
       <div class="space-y-1.5 px-5 py-3 text-xs border-t border-zinc-800">
+        <!-- Downloading/installing an in-place update -->
+        <span
+          v-if="store.updateInstalling"
+          class="flex items-center gap-1.5 font-medium text-emerald-400"
+        >
+          <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+          Updating…{{
+            store.updateProgress != null ? ` ${store.updateProgress}%` : ""
+          }}
+        </span>
+        <!-- In-place update: download, install, and relaunch from here -->
         <button
-          v-if="modkitUpdate?.available"
+          v-else-if="modkitUpdate?.available && modkitUpdate.canInstall"
+          class="flex items-center gap-1.5 font-medium text-emerald-400 hover:underline"
+          :title="`You have v${modkitUpdate.current}. Install ${modkitUpdate.latest} and restart modkit.`"
+          @click="store.installModkitUpdate()"
+        >
+          <span class="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          Update to {{ modkitUpdate.latest }} — install &amp; restart
+        </button>
+        <!-- Install form the updater can't replace — link to the release page -->
+        <button
+          v-else-if="modkitUpdate?.available"
           class="flex items-center gap-1.5 font-medium text-emerald-400 hover:underline"
           :title="`You have v${modkitUpdate.current}. Open the ${modkitUpdate.latest} release page.`"
           @click="openUrl(modkitUpdate.url)"
