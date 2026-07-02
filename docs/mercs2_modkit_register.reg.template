@@ -1,0 +1,32 @@
+Windows Registry Editor Version 5.00
+
+; Mercenaries 2 — modkit "Normalize Region" template.
+; Writes the EA Games install key the game expects, with a SINGLE fixed Region so
+; every modkit user computes the same mercs2-pc_ver_<N> and can matchmake together.
+;
+; Modkit MUST substitute before writing:
+;   __INSTALL_DIR__  -> the user's real game dir, with trailing backslash, backslashes
+;                       doubled for .reg (e.g.  C:\\Games\\Mercenaries 2 World in Flames\\)
+; Writing under HKLM\...\WOW6432Node requires elevation.
+;
+; Region policy: ALL users in a pool must share ONE value. Pick one and keep it fixed.
+;   mercenaries2_na    (North America)            <-- recommended default for the modkit pool
+;   mercenaries2_enru  (EU: UK / France / Russia)
+;   mercenaries2_esit  (EU: Spain / Italy)
+; (Do NOT let it vary per user — that is exactly what segregates matchmaking.)
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames]
+"Region"="mercenaries2_na"
+"Install Dir"="__INSTALL_DIR__"
+"Locale"="en_US"
+"Language"="English (US)"
+"DisplayName"="Mercenaries 2: World in Flames(tm)"
+"ProductName"="Mercenaries 2: World in Flames(tm)"
+"Product GUID"="{26FDF89A-FA65-4FA2-8522-37CC84DFDCEE}"
+"Registration"="Software\\Electronic Arts\\EA Games\\Mercenaries 2 World in Flames\\ergc"
+"Patch URL"="http://www.mercs2.com/patch"
+"Suppression Exe"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames\1.0]
+"DisplayName"="Mercenaries 2 World in Flames"
+"ProgramGroup"="C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\EA Games\\"

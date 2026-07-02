@@ -29,6 +29,10 @@ import type {
   VerifyReport,
   GenerateManifestResult,
   DebugZipResult,
+  RegionStatus,
+  NormalizeRegionResult,
+  LanguageStatus,
+  SetLanguageResult,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
@@ -116,6 +120,8 @@ interface ProjectState {
   componentUpdates: Record<string, ComponentUpdate>;
   // Host's 32-bit VC++ 2008 runtime status (null = not yet checked).
   vcRedist: VcRedistStatus | null;
+  // Matchmaking region registry status (null = not yet checked / N/A).
+  region: RegionStatus | null;
   // Settings
   asiTarget: string; // ".", "scripts", "plugins", "update"
   // Conflicts & build
@@ -143,6 +149,7 @@ export const useProjectStore = defineStore("project", {
     crackVersion: null,
     componentUpdates: {},
     vcRedist: null,
+    region: null,
     asiTarget: "scripts",
     conflictGraph: null,
     resolutions: {},
@@ -175,6 +182,11 @@ export const useProjectStore = defineStore("project", {
     vcRedistMissing(state): boolean {
       const v = state.vcRedist;
       return !!v && v.applicable && !v.installed;
+    },
+    /** Region applies here but isn't the pool value — matchmaking is segregated. */
+    regionNeedsNormalize(state): boolean {
+      const r = state.region;
+      return !!r && r.applicable && !r.normalized;
     },
     /** Fully prepared for modding: v1.1, cracked, with the ASI loader installed. */
     gameFullySetUp(state): boolean {
@@ -661,8 +673,10 @@ export const useProjectStore = defineStore("project", {
         this.error = String(e);
         throw e;
       }
-      // Probe the host runtime alongside detection (non-fatal if it fails).
+      // Probe the host runtime + matchmaking region alongside detection
+      // (non-fatal if either fails).
       void this.checkVcRedist();
+      void this.checkRegion();
     },
 
     /** Check whether the host has the 32-bit VC++ 2008 runtime the game needs. */
@@ -681,6 +695,71 @@ export const useProjectStore = defineStore("project", {
       try {
         const res = await invoke<InstallVcRedistResult>("install_vcredist");
         await this.checkVcRedist();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Read the matchmaking-relevant EA Games registry key for this install. */
+    async checkRegion() {
+      if (!this.gameInfo) return;
+      try {
+        this.region = await invoke<RegionStatus>("read_region", {
+          gameRoot: this.gameInfo.root,
+        });
+      } catch {
+        /* leave any prior result in place */
+      }
+    },
+
+    /**
+     * Write the EA Games install key with the pool's single `Region` so this
+     * install matchmakes with the rest of the pool. Elevated (UAC prompt).
+     * Pass `region` only to deliberately override the pool default.
+     */
+    async normalizeRegion(region?: string): Promise<NormalizeRegionResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<NormalizeRegionResult>("normalize_region", {
+          gameRoot: this.gameInfo.root,
+          region: region ?? null,
+        });
+        await this.checkRegion();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** List which languages' content (`.wad`/`.pws`) the install carries. */
+    async scanLanguages(): Promise<LanguageStatus> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      return await invoke<LanguageStatus>("scan_languages", {
+        gameRoot: this.gameInfo.root,
+      });
+    },
+
+    /** Keep one language and move the others' files to the recoverable trash. */
+    async setLanguage(language: string): Promise<SetLanguageResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<SetLanguageResult>("set_language", {
+          gameRoot: this.gameInfo.root,
+          language,
+        });
+        await this.refreshGame().catch(() => {});
         return res;
       } catch (e) {
         this.error = String(e);
@@ -725,6 +804,7 @@ export const useProjectStore = defineStore("project", {
         crackVersion: this.crackVersion,
         componentUpdates: this.componentUpdates,
         vcRedist: this.vcRedist,
+        region: this.region,
         catalogSource: this.catalogSource,
         wadMods: this.mods.map((m) => ({
           id: m.id,

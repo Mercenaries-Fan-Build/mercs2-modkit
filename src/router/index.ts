@@ -21,6 +21,11 @@ export const router = createRouter({
       component: () => import("../views/SetupView.vue"),
     },
     {
+      path: "/language",
+      name: "language",
+      component: () => import("../views/LanguageView.vue"),
+    },
+    {
       path: "/diagnostics",
       name: "diagnostics",
       component: () => import("../views/DiagnosticsView.vue"),
