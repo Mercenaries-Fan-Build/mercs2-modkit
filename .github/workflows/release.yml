@@ -61,6 +61,10 @@ jobs:
 
       - name: Build Tauri app (Linux x64)
         run: npm run tauri build -- --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage
+        env:
+          # Signs the AppImage updater artifact (required by createUpdaterArtifacts).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -71,6 +75,7 @@ jobs:
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error
 
       - name: Attach to GitHub release (on tag)
@@ -172,6 +177,10 @@ jobs:
 
       - name: Build Tauri app (Windows x64)
         run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+        env:
+          # Signs the NSIS updater artifact (required by createUpdaterArtifacts).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Package portable zip (exe + manifest)
         shell: pwsh
@@ -191,6 +200,7 @@ jobs:
           path: |
             ${{ env.PORTABLE_ZIP }}
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
           if-no-files-found: error
 
       - name: Attach to GitHub release (on tag)
@@ -200,3 +210,55 @@ jobs:
           files: |
             ${{ env.PORTABLE_ZIP }}
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+
+  # Builds the Tauri-updater manifest (latest.json) that installed copies of
+  # modkit poll via releases/latest/download/latest.json, pointing at this
+  # release's signed NSIS installer and AppImage.
+  updater-manifest:
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mercs2-modkit-*-x86_64
+          path: artifacts
+
+      - name: Assemble latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+
+          exe=$(find artifacts -name '*-setup.exe' | head -n1)
+          appimage=$(find artifacts -name '*.AppImage' | head -n1)
+          test -n "$exe" || { echo "No NSIS installer in artifacts"; exit 1; }
+          test -n "$appimage" || { echo "No AppImage in artifacts"; exit 1; }
+          test -f "$exe.sig" || { echo "Missing $exe.sig — was TAURI_SIGNING_PRIVATE_KEY set?"; exit 1; }
+          test -f "$appimage.sig" || { echo "Missing $appimage.sig — was TAURI_SIGNING_PRIVATE_KEY set?"; exit 1; }
+
+          jq -n \
+            --arg version "$version" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes "See ${base%download/*}tag/${GITHUB_REF_NAME} for release notes." \
+            --arg win_url "$base/$(basename "$exe")" \
+            --arg win_sig "$(cat "$exe.sig")" \
+            --arg linux_url "$base/$(basename "$appimage")" \
+            --arg linux_sig "$(cat "$appimage.sig")" \
+            '{
+              version: $version,
+              pub_date: $pub_date,
+              notes: $notes,
+              platforms: {
+                "windows-x86_64": { url: $win_url, signature: $win_sig },
+                "linux-x86_64": { url: $linux_url, signature: $linux_sig }
+              }
+            }' > latest.json
+          cat latest.json
+
+      - name: Attach latest.json to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.json
