@@ -86,6 +86,13 @@ onMounted(() => {
         >
           Build &amp; Deploy
         </RouterLink>
+        <RouterLink
+          to="/language"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Language
+        </RouterLink>
         <div class="uppercase monospace text-xs text-gray-400 px-4 py-2 -mx-3 tracking-widest bg-zinc-950 rounded-lg">debugging</div>
         <RouterLink
           to="/diagnostics"
