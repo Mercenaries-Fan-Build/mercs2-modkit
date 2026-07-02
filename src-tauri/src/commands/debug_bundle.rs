@@ -367,7 +367,7 @@ fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog
                 &mut o,
                 "Matchmaking region",
                 &format!(
-                    "{} (pool expects {})",
+                    "{} (selected: {})",
                     s_or(region, "currentRegion", "unset"),
                     s_or(region, "expectedRegion", "?")
                 ),
@@ -736,7 +736,7 @@ mod tests {
         // VC++ missing surfaces the detail
         assert!(r.contains("VC++ 2008 runtime: MISSING — not found in WinSxS"));
         // Region present
-        assert!(r.contains("Matchmaking region: us (pool expects global)"));
+        assert!(r.contains("Matchmaking region: us (selected: global)"));
         // Mods
         assert!(r.contains("WAD-asset mods (1):"));
         assert!(r.contains("Cool Skins 1.2.0  [enabled, 12 assets]"));

@@ -217,15 +217,17 @@ export interface InstallVcRedistResult {
 
 /**
  * Matchmaking-relevant registry state. The game keys its multiplayer version off
- * the `Region` value under the EA Games install key; every pool member must
- * share ONE `Region` (`expectedRegion`) to see each other in lobbies.
+ * the `Region` value under the EA Games install key; players must share ONE
+ * `Region` to see each other in lobbies. The user picks which region's pool
+ * they're in (defaulting to the community pool value).
  */
 export interface RegionStatus {
   applicable: boolean; // false on non-Windows hosts (key lives in the Wine prefix)
   keyPresent: boolean;
   currentRegion: string | null;
   currentInstallDir: string | null;
-  expectedRegion: string; // the pool's canonical Region — what "Normalize" writes
+  expectedRegion: string; // the user's selected Region (pool default if unset)
+  knownRegions: string[]; // all Region values the game recognizes
   installDir: string; // the Install Dir value normalizing would write
   normalized: boolean; // currentRegion already equals expectedRegion
   detail: string;

@@ -1,14 +1,16 @@
-//! "Normalize Region" — write the EA Games install registry key with a single,
-//! pool-wide `Region` so every modkit user computes the same multiplayer version
+//! Matchmaking region — write the EA Games install registry key with a chosen
+//! `Region` so a group of modkit users computes the same multiplayer version
 //! string (`mercs2-pc_ver_<N>`) and can see each other in matchmaking.
 //!
 //! Mercenaries 2's online version is keyed off the installer-written `Region`
 //! value under
 //! `HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames`. A loose
 //! copy with no key falls back to one version; a key written by a regional
-//! installer yields another — which is exactly what segregates lobbies. Writing
-//! ONE fixed `Region` for everyone in the pool is the fix (see
-//! `docs/mercs2_install_registry_contract.md` §1–2).
+//! installer yields another — which is exactly what segregates lobbies. Every
+//! player who wants to matchmake together must share ONE `Region` value (see
+//! `docs/mercs2_install_registry_contract.md` §1–2). The modkit defaults to the
+//! community pool value but lets the user pick any region the game recognizes,
+//! e.g. to join a group that standardized on an EU value.
 //!
 //! Reads use `reg query` (no elevation). Writing under HKLM needs admin, so we
 //! generate a `.reg` file and `reg import` it elevated via a UAC prompt — the
@@ -16,9 +18,10 @@
 
 use serde::Serialize;
 
-/// The single `Region` value the whole modkit pool shares. Everyone who runs
-/// "Normalize Region" gets this, so everyone computes the same matchmaking
-/// version and can play together. **Do not let this vary per user.**
+/// The default `Region` for the community pool — what you get without picking
+/// one. Matchmaking only works between installs that share a value, so the UI
+/// must make clear that choosing a different region moves you to that region's
+/// pool.
 pub const POOL_REGION: &str = "mercenaries2_na";
 
 /// Registry path of the EA Games install key (32-bit app → WOW6432Node on x64).
@@ -50,12 +53,15 @@ pub struct RegionStatus {
     pub current_region: Option<String>,
     /// Current `Install Dir` value, if present.
     pub current_install_dir: Option<String>,
-    /// The pool's canonical `Region` — what "Normalize" writes.
+    /// The `Region` the user selected (the pool default if they never picked
+    /// one) — what applying writes.
     pub expected_region: String,
+    /// All `Region` values the game recognizes, for the UI's picker.
+    pub known_regions: Vec<String>,
     /// The `Install Dir` value normalizing would write (the real game folder,
     /// with a trailing separator).
     pub install_dir: String,
-    /// `Region` already matches the pool value — matchmaking is aligned.
+    /// `Region` already matches the selected value — matchmaking is aligned.
     pub normalized: bool,
     /// Human-readable detail (what was found, or why the check doesn't apply).
     pub detail: String,
@@ -83,13 +89,29 @@ fn install_dir_value(game_root: &str) -> String {
     format!("{trimmed}{sep}")
 }
 
-/// Report the matchmaking-relevant registry state for `game_root`.
+/// The region status should be judged against: the user's pick if it's one the
+/// game recognizes, else the pool default. Unknown picks (e.g. a stale stored
+/// preference) fall back silently — `normalize_region` is the strict gate.
+fn resolve_region(preferred: Option<&str>) -> &str {
+    match preferred {
+        Some(r) if KNOWN_REGIONS.contains(&r) => r,
+        _ => POOL_REGION,
+    }
+}
+
+fn known_regions_vec() -> Vec<String> {
+    KNOWN_REGIONS.iter().map(|r| r.to_string()).collect()
+}
+
+/// Report the matchmaking-relevant registry state for `game_root`, judged
+/// against `preferred_region` (or the pool default when unset/unknown).
 #[tauri::command]
-pub fn read_region(game_root: String) -> RegionStatus {
+pub fn read_region(game_root: String, preferred_region: Option<String>) -> RegionStatus {
     let install_dir = install_dir_value(&game_root);
+    let expected = resolve_region(preferred_region.as_deref());
     #[cfg(target_os = "windows")]
     {
-        read_region_windows(install_dir)
+        read_region_windows(install_dir, expected)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -98,7 +120,8 @@ pub fn read_region(game_root: String) -> RegionStatus {
             key_present: false,
             current_region: None,
             current_install_dir: None,
-            expected_region: POOL_REGION.to_string(),
+            expected_region: expected.to_string(),
+            known_regions: known_regions_vec(),
             install_dir,
             normalized: false,
             detail: "Not applicable: the EA Games install key is a Windows registry value. \
@@ -109,8 +132,8 @@ pub fn read_region(game_root: String) -> RegionStatus {
     }
 }
 
-/// Write the install key with the pool `Region` (or `region`, if a known
-/// override is given) and the real `Install Dir`. Elevated; raises a UAC prompt.
+/// Write the install key with the given `Region` (the pool default when unset)
+/// and the real `Install Dir`. Elevated; raises a UAC prompt.
 #[tauri::command]
 pub async fn normalize_region(
     game_root: String,
@@ -142,27 +165,32 @@ pub async fn normalize_region(
 // ----------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn read_region_windows(install_dir: String) -> RegionStatus {
+fn read_region_windows(install_dir: String, expected: &str) -> RegionStatus {
     let current_region = reg_query_value(KEY_PATH, "Region");
     let current_install_dir = reg_query_value(KEY_PATH, "Install Dir");
     let key_present = current_region.is_some() || current_install_dir.is_some();
-    let normalized = current_region.as_deref() == Some(POOL_REGION);
+    let normalized = current_region.as_deref() == Some(expected);
 
     let detail = if !key_present {
         "No EA Games install key found — this loose copy falls back to the default \
-         version and is segregated from installs that have a Region set. Normalize to fix."
+         version and is segregated from installs that have a Region set. Apply a \
+         region to fix."
             .to_string()
     } else if normalized {
-        format!("Region is already the pool value '{POOL_REGION}' — matchmaking is aligned.")
+        format!(
+            "Region is '{expected}' — matchmaking is aligned with everyone else \
+             using this region."
+        )
     } else {
         match &current_region {
             Some(r) => format!(
-                "Region is '{r}', not the pool value '{POOL_REGION}'. This computes a \
-                 different multiplayer version, so you can't see pool players. Normalize to fix."
+                "Region is '{r}', not your selected '{expected}'. Different regions \
+                 compute different multiplayer versions and can't see each other. \
+                 Apply to fix."
             ),
             None => format!(
                 "The key exists but has no Region value — it falls back to the default \
-                 version. Normalize to write the pool value '{POOL_REGION}'."
+                 version. Apply to write '{expected}'."
             ),
         }
     };
@@ -172,7 +200,8 @@ fn read_region_windows(install_dir: String) -> RegionStatus {
         key_present,
         current_region,
         current_install_dir,
-        expected_region: POOL_REGION.to_string(),
+        expected_region: expected.to_string(),
+        known_regions: known_regions_vec(),
         install_dir,
         normalized,
         detail,
@@ -200,8 +229,8 @@ fn normalize_region_windows(game_root: &str, region: &str) -> Result<NormalizeRe
             ok: true,
             region: region.to_string(),
             message: format!(
-                "Region set to '{region}'. All pool installs now compute the same \
-                 matchmaking version."
+                "Region set to '{region}'. You'll matchmake with everyone whose \
+                 install shares this region."
             ),
         }),
         Some(other) => Err(format!(
@@ -327,6 +356,15 @@ mod tests {
     #[test]
     fn pool_region_is_a_known_region() {
         assert!(KNOWN_REGIONS.contains(&POOL_REGION));
+    }
+
+    #[test]
+    fn resolve_region_honors_known_picks_and_falls_back() {
+        assert_eq!(resolve_region(None), POOL_REGION);
+        assert_eq!(resolve_region(Some("mercenaries2_esit")), "mercenaries2_esit");
+        // A stale/garbage stored preference must not poison the status check.
+        assert_eq!(resolve_region(Some("mercenaries2_xx")), POOL_REGION);
+        assert_eq!(resolve_region(Some("")), POOL_REGION);
     }
 
     #[cfg(target_os = "windows")]
