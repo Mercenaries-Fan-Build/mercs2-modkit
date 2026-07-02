@@ -18,6 +18,10 @@ use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
+use commands::save_backup::{
+    backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
+    set_saves_dir,
+};
 use commands::setup::{crack_game, install_pmc_bb};
 use commands::updates::{latest_release, updater_supported};
 use commands::validator::{fetch_wad_simulator, validate_wad};
@@ -74,6 +78,12 @@ pub fn run() {
             scan_languages,
             set_language,
             build_debug_zip,
+            list_saves,
+            backup_saves,
+            list_save_backups,
+            restore_save_backup,
+            delete_save_backup,
+            set_saves_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

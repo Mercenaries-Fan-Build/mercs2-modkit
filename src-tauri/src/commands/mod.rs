@@ -13,6 +13,7 @@ pub mod mod_loader;
 pub mod paths;
 pub mod region;
 pub mod registry;
+pub mod save_backup;
 pub mod setup;
 pub mod updates;
 pub mod validator;

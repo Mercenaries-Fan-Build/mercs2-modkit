@@ -80,11 +80,11 @@ onMounted(() => {
           </span>
         </RouterLink>
         <RouterLink
-          to="/export"
+          to="/saves"
           class="nav-link"
           active-class="nav-link-active"
         >
-          Build &amp; Deploy
+          Save backups
         </RouterLink>
         <RouterLink
           to="/language"

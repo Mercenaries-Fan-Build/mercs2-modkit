@@ -24,6 +24,10 @@ import type {
   Resolution,
   RuntimeInfo,
   RuntimeOverrides,
+  SaveBackupInfo,
+  SavesInfo,
+  BackupResult,
+  RestoreResult,
   TrashResult,
   ValidationResult,
   VcRedistStatus,
@@ -134,6 +138,10 @@ interface ProjectState {
   vcRedist: VcRedistStatus | null;
   // Matchmaking region registry status (null = not yet checked / N/A).
   region: RegionStatus | null;
+  // Player saves + stored snapshots (Save backups view).
+  savesInfo: SavesInfo | null;
+  saveBackups: SaveBackupInfo[];
+  savesBusy: boolean;
   // Settings
   asiTarget: string; // ".", "scripts", "plugins", "update"
   // Conflicts & build
@@ -164,6 +172,9 @@ export const useProjectStore = defineStore("project", {
     componentUpdates: {},
     vcRedist: null,
     region: null,
+    savesInfo: null,
+    saveBackups: [],
+    savesBusy: false,
     asiTarget: "scripts",
     conflictGraph: null,
     resolutions: {},
@@ -730,6 +741,80 @@ export const useProjectStore = defineStore("project", {
         } catch {
           /* offline or no releases yet — keep any prior result */
         }
+      }
+    },
+
+    /** Refresh the live saves listing and the stored snapshot list. */
+    async refreshSaves() {
+      this.savesInfo = await invoke<SavesInfo>("list_saves", { prefix: null });
+      this.saveBackups = await invoke<SaveBackupInfo[]>("list_save_backups");
+    },
+
+    /** Set (or clear, with null) where modkit looks for the SaveGames folder. */
+    async setSavesDir(dir: string | null) {
+      this.error = null;
+      try {
+        await invoke("set_saves_dir", { dir });
+        await this.refreshSaves();
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      }
+    },
+
+    /** Snapshot the current saves now. Returns what happened (may be a skip). */
+    async backupSavesNow(): Promise<BackupResult> {
+      this.savesBusy = true;
+      this.error = null;
+      try {
+        const res = await invoke<BackupResult>("backup_saves", {
+          prefix: null,
+          reason: "manual",
+        });
+        await this.refreshSaves();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.savesBusy = false;
+      }
+    },
+
+    /**
+     * Copy a snapshot's saves back over the live SaveGames folder. The backend
+     * snapshots the current state first, so a restore is always undoable.
+     */
+    async restoreSaveBackup(id: string): Promise<RestoreResult> {
+      this.savesBusy = true;
+      this.error = null;
+      try {
+        const res = await invoke<RestoreResult>("restore_save_backup", {
+          id,
+          prefix: null,
+        });
+        await this.refreshSaves();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.savesBusy = false;
+      }
+    },
+
+    /** Permanently delete one stored snapshot. */
+    async deleteSaveBackup(id: string) {
+      this.savesBusy = true;
+      this.error = null;
+      try {
+        await invoke("delete_save_backup", { id });
+        await this.refreshSaves();
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.savesBusy = false;
       }
     },
 
