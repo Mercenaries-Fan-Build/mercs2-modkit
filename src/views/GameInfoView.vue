@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
 
 const store = useProjectStore();
-const { gameInfo, busy, error, pmcBbVersion, componentUpdates, vcRedist } =
+const { gameInfo, busy, error, pmcBbVersion, componentUpdates, vcRedist, region } =
   storeToRefs(store);
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
@@ -13,6 +13,7 @@ const checking = ref(false);
 const stage = ref("");
 const pmcMsg = ref<string | null>(null);
 const vcMsg = ref<string | null>(null);
+const regionMsg = ref<string | null>(null);
 
 function versionTone(v: string): string {
   if (v === "v1.1") return "bg-emerald-500/15 text-emerald-300";
@@ -58,6 +59,19 @@ async function installVcRedist() {
   try {
     const res = await store.installVcRedist();
     vcMsg.value = res.message;
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    stage.value = "";
+  }
+}
+
+async function normalizeRegion() {
+  stage.value = "Writing the matchmaking region… (approve the UAC prompt)";
+  regionMsg.value = null;
+  try {
+    const res = await store.normalizeRegion();
+    regionMsg.value = res.message;
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -140,6 +154,13 @@ async function installVcRedist() {
         >
           ⚠ The 32-bit Visual C++ 2008 runtime is missing — the game won't launch
           (“binkw32.dll was not found”) until it's installed below.
+        </p>
+        <p
+          v-if="store.regionNeedsNormalize"
+          class="mt-2 text-sm font-medium text-amber-300"
+        >
+          ⚠ Matchmaking region isn't normalized — you won't see pool players in
+          multiplayer until you set it below.
         </p>
       </div>
 
@@ -299,6 +320,86 @@ async function installVcRedist() {
                   ? "Reinstall"
                   : "Install"
             }}
+          </button>
+        </div>
+      </section>
+
+      <!-- Matchmaking region (registry) -->
+      <section
+        v-if="region?.applicable"
+        class="mt-4 rounded-xl border p-5"
+        :class="
+          region.normalized
+            ? 'border-zinc-800'
+            : 'border-amber-500/40 bg-amber-500/5'
+        "
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <h3 class="font-medium text-zinc-100">Matchmaking region</h3>
+            <p class="mt-1 text-sm text-zinc-400">
+              The game keys its multiplayer version off the
+              <code class="text-zinc-300">Region</code> registry value. Everyone
+              in the pool must share one fixed region to see each other in
+              lobbies — “Normalize” writes it (and your install path).
+            </p>
+
+            <dl class="mt-3 space-y-2 text-sm">
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Status</dt>
+                <dd>
+                  <span
+                    class="rounded-full px-2 py-0.5 text-xs font-medium"
+                    :class="
+                      region.normalized
+                        ? 'bg-emerald-500/15 text-emerald-300'
+                        : 'bg-amber-500/15 text-amber-300'
+                    "
+                    >{{ region.normalized ? "Normalized ✓" : "Not normalized" }}</span
+                  >
+                </dd>
+              </div>
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Current region</dt>
+                <dd class="font-mono text-xs text-zinc-300">
+                  {{ region.currentRegion ?? "— (no key)" }}
+                </dd>
+              </div>
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Pool region</dt>
+                <dd class="font-mono text-xs text-zinc-300">
+                  {{ region.expectedRegion }}
+                </dd>
+              </div>
+            </dl>
+
+            <p class="mt-3 text-sm text-zinc-400">{{ region.detail }}</p>
+            <p
+              v-if="!region.normalized"
+              class="mt-2 text-xs text-amber-300/90"
+            >
+              Writing under HKLM needs admin — you'll see a Windows UAC prompt.
+            </p>
+
+            <p
+              v-if="regionMsg"
+              class="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300"
+            >
+              {{ regionMsg }}
+            </p>
+          </div>
+
+          <button
+            class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium disabled:opacity-50"
+            :class="
+              region.normalized
+                ? 'border border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+                : 'bg-amber-500 text-zinc-900 hover:bg-amber-400'
+            "
+            :disabled="busy"
+            @click="normalizeRegion"
+          >
+            {{ region.normalized ? "Re-write" : "Normalize region" }}
           </button>
         </div>
       </section>

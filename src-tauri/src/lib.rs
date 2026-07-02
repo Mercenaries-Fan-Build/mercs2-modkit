@@ -12,9 +12,11 @@ use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
 use commands::game::detect_game;
 use commands::installer::{import_local_asi, install_catalog_mod};
+use commands::language::{scan_languages, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
+use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
 use commands::setup::{crack_game, install_pmc_bb};
 use commands::updates::{latest_release, updater_supported};
@@ -67,6 +69,10 @@ pub fn run() {
             install_vcredist,
             generate_manifest,
             verify_game,
+            read_region,
+            normalize_region,
+            scan_languages,
+            set_language,
             build_debug_zip,
         ])
         .run(tauri::generate_context!())

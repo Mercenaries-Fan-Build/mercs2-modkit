@@ -215,6 +215,56 @@ export interface InstallVcRedistResult {
   message: string;
 }
 
+/**
+ * Matchmaking-relevant registry state. The game keys its multiplayer version off
+ * the `Region` value under the EA Games install key; every pool member must
+ * share ONE `Region` (`expectedRegion`) to see each other in lobbies.
+ */
+export interface RegionStatus {
+  applicable: boolean; // false on non-Windows hosts (key lives in the Wine prefix)
+  keyPresent: boolean;
+  currentRegion: string | null;
+  currentInstallDir: string | null;
+  expectedRegion: string; // the pool's canonical Region — what "Normalize" writes
+  installDir: string; // the Install Dir value normalizing would write
+  normalized: boolean; // currentRegion already equals expectedRegion
+  detail: string;
+}
+
+export interface NormalizeRegionResult {
+  ok: boolean;
+  region: string;
+  message: string;
+}
+
+/** Presence/size of one language's content (`<Lang>.wad` + `vo_stream.<lang>.pws`). */
+export interface LanguagePresence {
+  language: string;
+  locales: string[];
+  wadName: string;
+  wadPresent: boolean;
+  wadSize: number;
+  pwsName: string;
+  pwsPresent: boolean;
+  pwsSize: number;
+}
+
+/** Which languages the install currently carries. */
+export interface LanguageStatus {
+  dataDir: string | null;
+  audioDir: string | null;
+  languages: LanguagePresence[];
+  presentCount: number;
+}
+
+/** Result of keeping one language and trashing the others. */
+export interface SetLanguageResult {
+  kept: string;
+  removed: string[]; // basenames moved to the recoverable trash
+  freedBytes: number;
+  trashDir: string | null;
+}
+
 /** A vanilla file that exists but no longer matches its manifest fingerprint. */
 export interface FileDiff {
   path: string;
