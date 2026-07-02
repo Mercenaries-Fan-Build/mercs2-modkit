@@ -48,6 +48,7 @@ const LIBRARY_KEY = "mercs2-modkit:library";
 // release of either can be flagged as an available update.
 const PMC_BB_VERSION_KEY = "mercs2-modkit:pmcBbVersion";
 const CRACK_VERSION_KEY = "mercs2-modkit:crackVersion";
+const REGION_KEY = "mercs2-modkit:preferredRegion";
 
 function slugify(name: string): string {
   return name
@@ -138,6 +139,8 @@ interface ProjectState {
   vcRedist: VcRedistStatus | null;
   // Matchmaking region registry status (null = not yet checked / N/A).
   region: RegionStatus | null;
+  // The Region the user picked (persisted; null = the community pool default).
+  preferredRegion: string | null;
   // Player saves + stored snapshots (Save backups view).
   savesInfo: SavesInfo | null;
   saveBackups: SaveBackupInfo[];
@@ -172,6 +175,7 @@ export const useProjectStore = defineStore("project", {
     componentUpdates: {},
     vcRedist: null,
     region: null,
+    preferredRegion: null,
     savesInfo: null,
     saveBackups: [],
     savesBusy: false,
@@ -208,7 +212,7 @@ export const useProjectStore = defineStore("project", {
       const v = state.vcRedist;
       return !!v && v.applicable && !v.installed;
     },
-    /** Region applies here but isn't the pool value — matchmaking is segregated. */
+    /** Region applies here but isn't the selected value — matchmaking is segregated. */
     regionNeedsNormalize(state): boolean {
       const r = state.region;
       return !!r && r.applicable && !r.normalized;
@@ -336,6 +340,7 @@ export const useProjectStore = defineStore("project", {
       this.asiTarget = localStorage.getItem(ASI_TARGET_KEY) ?? "scripts";
       this.pmcBbVersion = localStorage.getItem(PMC_BB_VERSION_KEY);
       this.crackVersion = localStorage.getItem(CRACK_VERSION_KEY);
+      this.preferredRegion = localStorage.getItem(REGION_KEY);
 
       // Restore the library (WAD mods, ASI plugins, enable flags).
       try {
@@ -873,6 +878,7 @@ export const useProjectStore = defineStore("project", {
       try {
         this.region = await invoke<RegionStatus>("read_region", {
           gameRoot: this.gameInfo.root,
+          preferredRegion: this.preferredRegion,
         });
       } catch {
         /* leave any prior result in place */
@@ -880,9 +886,20 @@ export const useProjectStore = defineStore("project", {
     },
 
     /**
-     * Write the EA Games install key with the pool's single `Region` so this
-     * install matchmakes with the rest of the pool. Elevated (UAC prompt).
-     * Pass `region` only to deliberately override the pool default.
+     * Remember which region's matchmaking pool the user wants (persisted) and
+     * re-judge the registry against it. Doesn't write the registry — that's
+     * `normalizeRegion`.
+     */
+    setPreferredRegion(region: string) {
+      this.preferredRegion = region;
+      localStorage.setItem(REGION_KEY, region);
+      void this.checkRegion();
+    },
+
+    /**
+     * Write the EA Games install key with the user's selected `Region` (the
+     * pool default if they never picked one) so this install matchmakes with
+     * everyone sharing that region. Elevated (UAC prompt).
      */
     async normalizeRegion(region?: string): Promise<NormalizeRegionResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
@@ -891,7 +908,7 @@ export const useProjectStore = defineStore("project", {
       try {
         const res = await invoke<NormalizeRegionResult>("normalize_region", {
           gameRoot: this.gameInfo.root,
-          region: region ?? null,
+          region: region ?? this.preferredRegion,
         });
         await this.checkRegion();
         return res;

@@ -15,6 +15,23 @@ const pmcMsg = ref<string | null>(null);
 const vcMsg = ref<string | null>(null);
 const regionMsg = ref<string | null>(null);
 
+// Friendly names for the Region values the game recognizes (see
+// docs/mercs2_install_registry_contract.md §1).
+const REGION_LABELS: Record<string, string> = {
+  mercenaries2_na: "North America",
+  mercenaries2_enru: "EU — UK, France, Russia",
+  mercenaries2_esit: "EU — Spain, Italy",
+};
+
+function regionLabel(r: string): string {
+  return REGION_LABELS[r] ?? r;
+}
+
+function onRegionSelect(event: Event) {
+  regionMsg.value = null;
+  store.setPreferredRegion((event.target as HTMLSelectElement).value);
+}
+
 function versionTone(v: string): string {
   if (v === "v1.1") return "bg-emerald-500/15 text-emerald-300";
   if (v === "v1.0") return "bg-sky-500/15 text-sky-300";
@@ -159,8 +176,8 @@ async function normalizeRegion() {
           v-if="store.regionNeedsNormalize"
           class="mt-2 text-sm font-medium text-amber-300"
         >
-          ⚠ Matchmaking region isn't normalized — you won't see pool players in
-          multiplayer until you set it below.
+          ⚠ Matchmaking region doesn't match your selection — you won't see
+          other players in multiplayer until you apply it below.
         </p>
       </div>
 
@@ -339,9 +356,10 @@ async function normalizeRegion() {
             <h3 class="font-medium text-zinc-100">Matchmaking region</h3>
             <p class="mt-1 text-sm text-zinc-400">
               The game keys its multiplayer version off the
-              <code class="text-zinc-300">Region</code> registry value. Everyone
-              in the pool must share one fixed region to see each other in
-              lobbies — “Normalize” writes it (and your install path).
+              <code class="text-zinc-300">Region</code> registry value, so you
+              only see players whose installs share yours. Pick the region your
+              group uses — the community default is North America — and apply
+              it (this also writes your install path).
             </p>
 
             <dl class="mt-3 space-y-2 text-sm">
@@ -355,7 +373,7 @@ async function normalizeRegion() {
                         ? 'bg-emerald-500/15 text-emerald-300'
                         : 'bg-amber-500/15 text-amber-300'
                     "
-                    >{{ region.normalized ? "Normalized ✓" : "Not normalized" }}</span
+                    >{{ region.normalized ? "Applied ✓" : "Not applied" }}</span
                   >
                 </dd>
               </div>
@@ -366,9 +384,22 @@ async function normalizeRegion() {
                 </dd>
               </div>
               <div class="flex items-center gap-3">
-                <dt class="w-32 shrink-0 text-zinc-500">Pool region</dt>
-                <dd class="font-mono text-xs text-zinc-300">
-                  {{ region.expectedRegion }}
+                <dt class="w-32 shrink-0 text-zinc-500">Your region</dt>
+                <dd>
+                  <select
+                    class="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+                    :value="region.expectedRegion"
+                    :disabled="busy"
+                    @change="onRegionSelect"
+                  >
+                    <option
+                      v-for="r in region.knownRegions"
+                      :key="r"
+                      :value="r"
+                    >
+                      {{ regionLabel(r) }} ({{ r }})
+                    </option>
+                  </select>
                 </dd>
               </div>
             </dl>
@@ -399,7 +430,7 @@ async function normalizeRegion() {
             :disabled="busy"
             @click="normalizeRegion"
           >
-            {{ region.normalized ? "Re-write" : "Normalize region" }}
+            {{ region.normalized ? "Re-write" : "Apply region" }}
           </button>
         </div>
       </section>
