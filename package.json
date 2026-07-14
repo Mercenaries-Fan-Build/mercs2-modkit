@@ -18,12 +18,14 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "pinia": "^3.0.4",
+    "three": "^0.185.1",
     "vue": "^3.5.13",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.1",
     "@tauri-apps/cli": "^2",
+    "@types/three": "^0.185.1",
     "@vitejs/plugin-vue": "^5.2.1",
     "tailwindcss": "^4.3.1",
     "typescript": "~5.6.2",

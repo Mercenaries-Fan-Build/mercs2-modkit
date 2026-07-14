@@ -14,22 +14,36 @@ import type {
   CrackResult,
   DeployedAsi,
   DeployResult,
+  DeployWadResult,
   GameInfo,
   InstallDllResult,
   InstallResult,
   LoadedMod,
   LogReport,
+  ModelGeometry,
+  ModelVariant,
   ModkitUpdate,
+  PrebuiltWad,
   ReleaseInfo,
   Resolution,
   RuntimeInfo,
   RuntimeOverrides,
   SaveBackupInfo,
   SavesInfo,
+  TextureDetails,
+  TextureEntry,
+  TextureExport,
+  TexturePart,
+  TexturePreview,
+  TextureSwap,
+  TextureTarget,
   BackupResult,
   RestoreResult,
   TrashResult,
   ValidationResult,
+  WadBackup,
+  WardrobeModel,
+  WardrobeOutfit,
   VcRedistStatus,
   InstallVcRedistResult,
   VerifyReport,
@@ -151,6 +165,18 @@ interface ProjectState {
   conflictGraph: ConflictGraph | null;
   resolutions: Record<string, Resolution>;
   buildResult: BuildResult | null;
+  /** Snapshots of every vz-patch.wad a deploy has displaced — the undo list. */
+  wadBackups: WadBackup[];
+  /** Wearable models verified present in THIS install. */
+  wardrobeModels: WardrobeModel[];
+  /** Outfits the user has queued for the next build. */
+  wardrobe: WardrobeOutfit[];
+  /** Imported community patch WADs, in load order (later wins). */
+  prebuilt: PrebuiltWad[];
+  /** Texture replacements queued for the next build. */
+  textures: TextureSwap[];
+  /** Every nameable texture in this install (browsable). Not persisted — cheap to rebuild. */
+  textureCatalog: TextureEntry[];
   validation: ValidationResult | null;
   busy: boolean;
   error: string | null;
@@ -183,6 +209,12 @@ export const useProjectStore = defineStore("project", {
     conflictGraph: null,
     resolutions: {},
     buildResult: null,
+    wadBackups: [],
+    wardrobeModels: [],
+    wardrobe: [],
+    prebuilt: [],
+    textures: [],
+    textureCatalog: [],
     validation: null,
     busy: false,
     error: null,
@@ -342,7 +374,7 @@ export const useProjectStore = defineStore("project", {
       this.crackVersion = localStorage.getItem(CRACK_VERSION_KEY);
       this.preferredRegion = localStorage.getItem(REGION_KEY);
 
-      // Restore the library (WAD mods, ASI plugins, enable flags).
+      // Restore the library (WAD mods, ASI plugins, enable flags, wardrobe picks).
       try {
         const raw = localStorage.getItem(LIBRARY_KEY);
         if (raw) {
@@ -350,6 +382,9 @@ export const useProjectStore = defineStore("project", {
           this.mods = lib.mods ?? [];
           this.asiMods = lib.asiMods ?? [];
           this.enabled = lib.enabled ?? {};
+          this.wardrobe = lib.wardrobe ?? [];
+          this.prebuilt = lib.prebuilt ?? [];
+          this.textures = lib.textures ?? [];
         }
       } catch {
         /* ignore corrupt cache */
@@ -363,6 +398,9 @@ export const useProjectStore = defineStore("project", {
             mods: state.mods,
             asiMods: state.asiMods,
             enabled: state.enabled,
+            wardrobe: state.wardrobe,
+            prebuilt: state.prebuilt,
+            textures: state.textures,
           })
         );
       });
@@ -1059,7 +1097,14 @@ export const useProjectStore = defineStore("project", {
       this.enabled[id] = value;
     },
 
-    /** Move a mod up (higher priority) or down in the load order. */
+    /**
+     * Move a mod earlier ("up") or later ("down") in the load order.
+     *
+     * Later = wins. The engine mounts vz.wad then vz-patch.wad and takes the LAST
+     * match for an asset, so the mod at the bottom of the list overrides the ones
+     * above it. Don't call this "priority" in the UI — say "later mods override
+     * earlier ones", which is the same convention MO2/Vortex users already know.
+     */
     moveMod(id: string, dir: "up" | "down") {
       const i = this.mods.findIndex((m) => m.id === id);
       if (i < 0) return;
@@ -1081,9 +1126,11 @@ export const useProjectStore = defineStore("project", {
     },
 
     /**
-     * Apply conflict resolutions over the enabled mods (in load order). The
-     * backend keeps the first occurrence of each hash, so top-of-list wins
-     * unresolved conflicts; explicit resolutions override that.
+     * Apply explicit conflict resolutions over the enabled mods, in load order.
+     *
+     * Unresolved overlaps are decided by the backend, which is LAST-wins (the mod
+     * lowest in the list overrides those above it — the engine's own rule). Explicit
+     * `priority` / `exclude` resolutions override that per asset.
      */
     resolvedMods(): LoadedMod[] {
       return this.enabledMods.map((m) => {
@@ -1098,25 +1145,263 @@ export const useProjectStore = defineStore("project", {
       });
     },
 
-    async assemble(opts: {
-      outputDir: string;
-      splitByPatch: boolean;
-      mergeInto: string | null;
-    }) {
+    /**
+     * Build `vz-patch.wad` from the load order into a staging directory.
+     *
+     * This does NOT touch the game — `deployPatchWad` installs it. Keeping build and
+     * install separate is deliberate: the old flow defaulted its output straight into
+     * the game's data dir and overwrote the live `vz-patch.wad` with no backup.
+     */
+    async assemble(opts: { outputDir?: string } = {}) {
       this.busy = true;
       this.error = null;
       this.buildResult = null;
       try {
         this.buildResult = await invoke<BuildResult>("assemble_patch_wad", {
-          options: {
-            mods: this.resolvedMods(),
-            excluded_assets: [],
-            output_dir: opts.outputDir,
-            split_by_patch: opts.splitByPatch,
-            merge_into: opts.mergeInto,
-          },
+          options: this.buildOptions(opts.outputDir ?? null),
         });
         return this.buildResult;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Everything that goes into a build, in load order. Shared by build and preview so
+     *  the dry-run can never disagree with what actually gets assembled. */
+    buildOptions(outputDir: string | null = null) {
+      return {
+        mods: this.resolvedMods(),
+        output_dir: outputDir,
+        game_path: this.gamePath,
+        wardrobe: this.wardrobe,
+        prebuilt: this.prebuilt,
+        textures: this.textures,
+      };
+    },
+
+    /** Look a texture up in the user's own vz.wad (size, format, whether we can swap it). */
+    async inspectTexture(name: string): Promise<TextureTarget> {
+      if (!this.gamePath) throw new Error("Set the game folder first");
+      return await invoke<TextureTarget>("inspect_texture", {
+        gamePath: this.gamePath,
+        name,
+      });
+    },
+
+    /**
+     * Full detail for one texture, including which models use it.
+     *
+     * The "used by" relation isn't stored anywhere in the game — it's inverted out of every
+     * model's material slots. The FIRST call on an install builds that index and takes
+     * ~10 seconds; every call after reads it from cache. Show a spinner on the first one.
+     */
+    async textureDetails(name: string): Promise<TextureDetails> {
+      if (!this.gamePath) throw new Error("Set the game folder first");
+      return await invoke<TextureDetails>("texture_details", {
+        gamePath: this.gamePath,
+        name,
+      });
+    },
+
+    /**
+     * Geometry for one model, with every draw group flagged if its material samples
+     * `texture` — that flag is what the 3D viewer lights up.
+     */
+    async modelGeometry(
+      model: string,
+      texture: string,
+      tier: number | null = null,
+    ): Promise<ModelGeometry> {
+      if (!this.gamePath) throw new Error("Set the game folder first");
+      return await invoke<ModelGeometry>("model_geometry", {
+        gamePath: this.gamePath,
+        model,
+        texture,
+        tier,
+      });
+    },
+
+    /**
+     * Every state/LOD variant of a model, flagged with whether the texture appears in it.
+     *
+     * This is what turns "this texture isn't visible" from a dead end into an answer: it
+     * says which states DO show it, so the user can switch to one.
+     */
+    async modelVariants(model: string, texture: string): Promise<ModelVariant[]> {
+      if (!this.gamePath) throw new Error("Set the game folder first");
+      return await invoke<ModelVariant[]>("model_variants", {
+        gamePath: this.gamePath,
+        model,
+        texture,
+      });
+    },
+
+    /** Every part, in every model, that paints this texture. */
+    async textureParts(texture: string): Promise<TexturePart[]> {
+      if (!this.gamePath) throw new Error("Set the game folder first");
+      return await invoke<TexturePart[]>("texture_parts", {
+        gamePath: this.gamePath,
+        texture,
+      });
+    },
+
+    /** Write a texture out as a PNG the user can edit. */
+    async exportTexture(name: string, dest: string): Promise<TextureExport> {
+      if (!this.gamePath) throw new Error("Set the game folder first");
+      return await invoke<TextureExport>("export_texture", {
+        gamePath: this.gamePath,
+        name,
+        dest,
+      });
+    },
+
+    /** Every nameable texture in this install. Reads only the ASET table, so it's fast. */
+    async loadTextureCatalog() {
+      if (!this.gamePath) return;
+      if (this.textureCatalog.length) return; // already built for this install
+      this.textureCatalog = await invoke<TextureEntry[]>("list_textures", {
+        gamePath: this.gamePath,
+      });
+    },
+
+    /**
+     * Decode thumbnails for the rows about to be shown.
+     *
+     * Batched on purpose: each one costs a block decompression, so the view asks for the
+     * page it needs rather than all ~13,000.
+     */
+    async loadTexturePreviews(names: string[]): Promise<TexturePreview[]> {
+      if (!this.gamePath || !names.length) return [];
+      return await invoke<TexturePreview[]>("texture_previews", {
+        gamePath: this.gamePath,
+        names,
+        maxSize: 128,
+      });
+    },
+
+    addTextureSwap(t: TextureSwap) {
+      this.textures = [...this.textures.filter((x) => x.name !== t.name), t];
+    },
+
+    removeTextureSwap(name: string) {
+      this.textures = this.textures.filter((t) => t.name !== name);
+    },
+
+    /**
+     * Dry-run the load order: what applies, what gets overridden, what can't be
+     * resolved. Throws the structured conflict list if two mods overlap partially.
+     */
+    async previewConflicts(): Promise<BuildResult> {
+      return await invoke<BuildResult>("preview_conflicts", {
+        options: this.buildOptions(),
+      });
+    },
+
+    /** Install a built WAD into the game, snapshotting whatever it replaces. */
+    async deployPatchWad(wadPath: string): Promise<DeployWadResult> {
+      if (!this.gameInfo?.data_dir) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<DeployWadResult>("deploy_patch_wad", {
+          args: { wad_path: wadPath, data_dir: this.gameInfo.data_dir },
+        });
+        await this.refreshGame();
+        await this.loadWadBackups();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    async loadWadBackups() {
+      this.wadBackups = await invoke<WadBackup[]>("list_patch_wad_backups");
+    },
+
+    /**
+     * Load the wearable models THIS install actually has.
+     *
+     * The backend checks each candidate against the user's own vz.wad ASET table, so the
+     * list can only contain models that will really load. A DLC skin the player doesn't
+     * own simply isn't returned.
+     */
+    async loadWardrobeModels() {
+      if (!this.gamePath) return;
+      this.wardrobeModels = await invoke<WardrobeModel[]>("list_wardrobe_models", {
+        gamePath: this.gamePath,
+      });
+    },
+
+    /**
+     * Import a community-made `vz-patch.wad` into the load order.
+     *
+     * This is what makes two prebuilt mods installable at once — the game itself only ever
+     * loads one patch WAD, so modkit merges them into one.
+     */
+    async importPatchWad(path: string): Promise<PrebuiltWad> {
+      this.busy = true;
+      this.error = null;
+      try {
+        const info = await invoke<PrebuiltWad>("inspect_patch_wad", { path });
+        if (!this.prebuilt.some((p) => p.path === info.path)) {
+          this.prebuilt = [...this.prebuilt, info];
+        }
+        return info;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    removePrebuilt(id: string) {
+      this.prebuilt = this.prebuilt.filter((p) => p.id !== id);
+    },
+
+    /** Move an imported WAD earlier/later. Later = overrides the ones above it. */
+    movePrebuilt(id: string, dir: "up" | "down") {
+      const i = this.prebuilt.findIndex((p) => p.id === id);
+      if (i < 0) return;
+      const j = dir === "up" ? i - 1 : i + 1;
+      if (j < 0 || j >= this.prebuilt.length) return;
+      const next = this.prebuilt.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      this.prebuilt = next;
+    },
+
+    addWardrobeOutfit(o: WardrobeOutfit) {
+      if (this.wardrobe.some((x) => x.hero === o.hero && x.model === o.model)) return;
+      this.wardrobe = [...this.wardrobe, o];
+    },
+
+    removeWardrobeOutfit(hero: string, model: string) {
+      this.wardrobe = this.wardrobe.filter(
+        (o) => !(o.hero === hero && o.model === model),
+      );
+    },
+
+    /**
+     * Restore a previous WAD, or (with no `file`) remove the patch entirely and go
+     * back to the stock game — always a safe state.
+     */
+    async restorePatchWad(file: string | null): Promise<DeployWadResult> {
+      if (!this.gameInfo?.data_dir) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<DeployWadResult>("restore_patch_wad", {
+          args: { file, data_dir: this.gameInfo.data_dir },
+        });
+        await this.refreshGame();
+        await this.loadWadBackups();
+        return res;
       } catch (e) {
         this.error = String(e);
         throw e;

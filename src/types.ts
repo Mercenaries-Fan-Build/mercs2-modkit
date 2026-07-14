@@ -52,15 +52,332 @@ export interface ValidationError {
   message: string;
 }
 
-export interface BuiltWad {
-  path: string;
-  patch_group: string;
-  block_count: number;
-  byte_size: number;
+/**
+ * What happened to one mod's claim group during load-order resolution.
+ *
+ * A "claim group" is everything one mod contributes, won or lost together — a vehicle
+ * reskin is a model plus its textures plus a spawn script, and resolving those
+ * individually would give you mod A's model wearing mod B's textures.
+ */
+export type GroupOutcome =
+  | { outcome: "applied"; mod_id: string; label: string; asset_count: number }
+  | {
+      outcome: "overridden";
+      mod_id: string;
+      label: string;
+      asset_count: number;
+      overridden_by_mod: string;
+      overridden_by_label: string;
+    }
+  | {
+      outcome: "partially_applied";
+      mod_id: string;
+      label: string;
+      applied: number;
+      overridden: number;
+    };
+
+/** Two mods overlap partially — neither contains the other. Unresolvable; user must choose. */
+export interface ClaimConflict {
+  mod_id: string;
+  label: string;
+  other_mod_id: string;
+  other_label: string;
+  shared: number[];
+  only_mine: number[];
+  message: string;
 }
 
 export interface BuildResult {
-  outputs: BuiltWad[];
+  path: string;
+  block_count: number;
+  byte_size: number;
+  /** sha256 of the bytes written — the only trustworthy way to verify a deploy. */
+  sha256: string;
+  outcomes: GroupOutcome[];
+}
+
+/**
+ * A humanoid model this install can actually wear.
+ *
+ * Only models verified present in the user's own vz.wad are ever offered — the same
+ * lookup `Player.SetOutfit` does at runtime — so a pick can't fail in-game, and DLC skins
+ * simply don't appear for someone who doesn't own the DLC.
+ */
+export interface WardrobeModel {
+  model: string;
+  label: string;
+  asset_hash: number;
+  /**
+   * Fraction of the player characters' skeleton this skin has.
+   *
+   * These aren't guessed from names any more — a wearable skin is one *rigged to the same
+   * skeleton the heroes use*, which is exactly what makes the hero's animations play on it.
+   * 1.0 = certain; below that, animation tracks aimed at bones it lacks simply do nothing.
+   */
+  rig_match: number;
+  /** Which of the three heroes it's built most like. */
+  closest_hero: string;
+  triangles: number;
+  /** One of the three player characters, or one of their unlock tiers. */
+  is_hero: boolean;
+}
+
+/** An outfit to add to the PMC wardrobe. */
+export interface WardrobeOutfit {
+  hero: string; // "mattias" | "chris" | "jennifer"
+  model: string;
+  label: string;
+}
+
+/**
+ * One texture in the browsable catalog.
+ *
+ * The WAD stores only hashes, so this list is the subset of textures whose *name* we can
+ * recover — 99.9% of them on a stock install. Cheap to build: no blocks are decompressed.
+ */
+export interface TextureEntry {
+  name: string;
+  asset_hash: number;
+  /** Leading token of the name (`pmc`, `al`, `city`…) — the game's own grouping. */
+  category: string;
+  /** `diffuse` | `normal` | `specular` | `other`. */
+  kind: string;
+}
+
+/** A decoded thumbnail. */
+export interface TexturePreview {
+  name: string;
+  /** `data:image/png;base64,…` */
+  data_url: string;
+  /** The texture's real in-game size. */
+  width: number;
+  height: number;
+  /**
+   * Size of the image we could actually decode. Smaller than width×height for a streamed
+   * texture, which keeps only its lowest mips inline — we don't fake the difference.
+   */
+  preview_width: number;
+  preview_height: number;
+}
+
+/**
+ * A model that samples a texture.
+ *
+ * `name` is null when we can't recover it — but the WAD addresses models **by hash**, so an
+ * unnamed model still loads and renders perfectly. Always pass `reference` (the name, or
+ * `0x…`) to the geometry commands; only use `name` for display.
+ */
+export interface ModelRef {
+  hash: number;
+  name: string | null;
+  reference: string;
+}
+
+/** Result of writing a texture out to disk. */
+export interface TextureExport {
+  path: string;
+  width: number;
+  height: number;
+  full_width: number;
+  full_height: number;
+  /** False when the game streams this texture's detail, so only a smaller version exists inline. */
+  is_full_resolution: boolean;
+}
+
+/**
+ * Everything the details page shows.
+ *
+ * `used_by` doesn't exist anywhere in the game files — it's inverted out of every model's
+ * MTRL texture slots. The first lookup on an install builds that index (~10s); after that
+ * it's cached.
+ */
+export interface TextureDetails {
+  name: string;
+  asset_hash: number;
+  category: string;
+  kind: string;
+  width: number;
+  height: number;
+  format: string;
+  chain_bytes: number;
+  mip_count: number;
+  fully_resident: boolean;
+  preview: TexturePreview | null;
+  /** Models that actually PAINT this texture — the ones the 3D view can show. */
+  used_by: ModelRef[];
+  /**
+   * Models that reference it in a material but never bind it to a drawable part.
+   *
+   * Real cases: the geometry belongs to the model's *wreck* variant, or to a separate
+   * sub-model (a tank declares its tracks' textures, but the tracks are their own model), or
+   * the container is a low-detail variant that merges its parts away.
+   */
+  declared_only_by: ModelRef[];
+  /** More than one model paints it — replacing it changes all of them. */
+  shared: boolean;
+  /** The other maps of the same surface (`X`, `X_nm`, `X_sm`). */
+  siblings: TextureEntry[];
+  /** Other textures those same models use — the rest of that character/vehicle. */
+  seen_with: TextureEntry[];
+}
+
+/**
+ * One state/LOD variant of a model, and whether the texture shows up in it.
+ *
+ * A model's parts are gated by a SEGM state bit. Those bits are not an ordered detail
+ * ladder — they're state masks, and a texture can be painted in one state and absent in
+ * another. So instead of guessing, the backend builds every state the model declares and
+ * reports which ones show the texture; the user can toggle between them.
+ */
+export interface ModelVariant {
+  /** The SEGM state bit (null = every part, unfiltered). */
+  tier: number | null;
+  groups: number;
+  triangles: number;
+  highlighted: number;
+  shows_texture: boolean;
+}
+
+/**
+ * One part, anywhere in the game, that paints a given texture.
+ *
+ * The per-model parts list answers "where is it on *this* model". This answers the broader
+ * question — what, across the whole game, is this texture actually on — which is the one that
+ * matters before you repaint something 34 models share.
+ */
+export interface TexturePart {
+  /** Pass to the geometry commands (name, or `0x…`). */
+  model: string;
+  model_name: string | null;
+  model_hash: number;
+  /**
+   * Part id — **valid only together with `tier`**.
+   *
+   * A part id indexes into the built group list, and that list depends on which state bit was
+   * built (Chris is 40 parts unfiltered but 25 at his default state). Pass both back, or you
+   * isolate a different part.
+   */
+  part: number;
+  /** The state bit this id belongs to (null = the auto-selected one). */
+  tier: number | null;
+  triangles: number;
+  slot: string;
+  lod_mask: number;
+}
+
+/** One texture slot of a part's material. */
+export interface SlotRef {
+  /** `diffuse` | `specular` | `normal` | `map N`. */
+  slot: string;
+  hash: number;
+  name: string | null;
+  /** True when this is the texture the page is about. */
+  is_current: boolean;
+}
+
+/**
+ * One draw call — a "part" of the model.
+ *
+ * A model isn't one mesh: Chris is 25 of these, each binding its own material (eyes, teeth,
+ * head, upper body, the pistol he's holding…). Several parts often share one PRMG group,
+ * because a PRMG concatenates sub-strips with *different* materials.
+ */
+export interface GeoGroup {
+  id: number;
+  index_start: number;
+  index_count: number;
+  triangles: number;
+  uses_texture: boolean;
+  /** Which MTRL slot matched: `diffuse` | `specular` | `normal` | `map N`. */
+  slot: string | null;
+  diffuse: number | null;
+  /** Every texture this part wears, named where we can. */
+  textures: SlotRef[];
+  /** The container's PRMG drawing-group index (several parts can share one). */
+  prmg: number;
+  /** Which state/LOD bits this part is drawn in. */
+  lod_mask: number;
+  /** HIER node it hangs off (negative = none). */
+  node: number;
+}
+
+/**
+ * A model flattened for three.js.
+ *
+ * The highlight is exact, not guessed: the geometry decoder splits the model into draw
+ * groups and each records the texture hashes its material binds, so `uses_texture` is a
+ * direct comparison against the texture we're looking at.
+ */
+export interface ModelGeometry {
+  model: string;
+  model_hash: number;
+  positions: number[];
+  normals: number[];
+  uvs: number[];
+  indices: number[];
+  groups: GeoGroup[];
+  bbox_min: [number, number, number];
+  bbox_max: [number, number, number];
+  highlighted_groups: number;
+  /**
+   * The SEGM state/LOD bit this geometry came from (null = every group, unfiltered).
+   *
+   * Not every model has the engine's default `0x01` — `vz_hum_deathsquad_a` only declares
+   * `0x08` — and the bits are state masks, not an ordered detail ladder, so the backend picks
+   * a tier that actually contains the texture rather than assuming one.
+   */
+  tier: number | null;
+}
+
+/** A texture in the game, and whether we can replace it. */
+export interface TextureTarget {
+  name: string;
+  asset_hash: number;
+  width: number;
+  height: number;
+  format: string; // DXT1 | DXT5
+  swappable: boolean;
+  reason: string | null;
+}
+
+/** Replace `name` with the image at `image_path` (resized to the game's dimensions). */
+export interface TextureSwap {
+  name: string;
+  image_path: string;
+}
+
+/**
+ * A community-made, pre-built `vz-patch.wad` imported into the load order.
+ *
+ * The game only loads one patch WAD, which is why two such mods have never been
+ * installable together. modkit merges them: each WAD's blocks travel with their own ASET
+ * rows, and the writer re-derives every block index on output.
+ */
+export interface PrebuiltWad {
+  id: string;
+  name: string;
+  path: string;
+  block_count: number;
+  asset_count: number;
+  /** Ships a compiled scripts_vz block — cannot be composed with another that does. */
+  has_scripts: boolean;
+  warnings: string[];
+}
+
+/** A snapshot of a `vz-patch.wad` that a deploy displaced. */
+export interface WadBackup {
+  file: string;
+  path: string;
+  byte_size: number;
+  sha256: string;
+}
+
+export interface DeployWadResult {
+  installed_at: string;
+  sha256: string;
+  byte_size: number;
+  backed_up: WadBackup | null;
 }
 
 export interface ValidationResult {

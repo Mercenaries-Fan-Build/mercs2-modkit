@@ -80,6 +80,27 @@ onMounted(() => {
           </span>
         </RouterLink>
         <RouterLink
+          to="/wardrobe"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Wardrobe
+        </RouterLink>
+        <RouterLink
+          to="/textures"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Textures
+        </RouterLink>
+        <RouterLink
+          to="/export"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Build &amp; Deploy
+        </RouterLink>
+        <RouterLink
           to="/saves"
           class="nav-link"
           active-class="nav-link-active"
