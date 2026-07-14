@@ -26,10 +26,27 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Mercenaries 2 format libraries (published to crates.io)
-mercs2_formats = "1.0"
-ucfx_byteswap = "1.0"
+# Mercenaries 2 format libraries (published to crates.io).
+#
+# `mercs2_formats` 2.1 is what the WAD builder needs: `PatchBlock::from_decompressed`
+# (correct `packed_field` — 1.0 hardcoded it to 1, sizing the engine's decompression
+# buffer at a single 32 KB page), `validate_blocks` (one primary ASET row per hash),
+# `sges::compressed_len`, `scripts_block` (Lua editing) and `texture::replace_body`.
+#
+# The `path` is a dev-time convenience so the two repos build side-by-side; the `version`
+# is what a fresh `cargo build` resolves once 2.1.0 is published. Drop the `path` (or keep
+# it — cargo prefers it locally and ignores it when packaging) after publishing.
+mercs2_formats = { version = "2.1", path = "../../notes-on-the-released-game/tools/wad_simulator/crates/mercs2_formats" }
 loadprobe = "1.0"
+
+# Lua 5.1 compiler that emits the game's exact bytecode dialect (float lua_Number, 32-bit
+# size_t). Needed because the wardrobe is pure Lua: modkit recompiles `wifpmcinterior`
+# with each mod's outfits appended. Verified byte-for-byte against the reference luac.exe.
+mercs2_luac = { version = "1.0", path = "../../notes-on-the-released-game/tools/wad_simulator/crates/mercs2_luac" }
+
+# Model container -> indexed triangle geometry, for the 3D texture viewer. Pure decode: it
+# was carved out of `mercs2_engine` precisely so a GUI can use it without linking wgpu/winit.
+mercs2_mesh = { version = "1.0", path = "../../notes-on-the-released-game/tools/wad_simulator/crates/mercs2_mesh" }
 
 # HTTP client for fetching the wad_simulator release binary (rustls to avoid system OpenSSL)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -40,6 +57,16 @@ zip = "2"
 # Game-file integrity verification: MD5 hashing, parallelized across files
 md-5 = "0.10"
 rayon = "1"
+
+# Texture swapping: decode the user's PNG/JPG and resize it to the donor's exact
+# dimensions (`image`), then re-encode to the donor's own BC1/BC3 format (`texpresso`,
+# a pure-Rust squish port — no C toolchain).
+#
+# These deliberately live HERE and not in `mercs2_formats`, whose whole selling point is
+# that its only dependency is `flate2`. The library exposes just the dependency-free byte
+# primitive (`texture::replace_body`); the pixel work is the app's problem.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+texpresso = "2"
 
 [dev-dependencies]
 tempfile = "3"
