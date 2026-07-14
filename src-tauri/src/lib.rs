@@ -4,18 +4,21 @@
 //! conflicts, assembling patch WADs, and validating them with `wad_simulator`.
 
 pub mod commands;
-mod models;
+pub mod models;
 
 use commands::asset_catalog::detect_asset_type;
 use commands::conflict_resolver::build_conflict_graph;
 use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
+use commands::deploy_wad::{deploy_patch_wad, list_patch_wad_backups, restore_patch_wad};
 use commands::game::detect_game;
+use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::language::{scan_languages, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
+use commands::model_view::{model_geometry, model_variants, texture_parts};
 use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
 use commands::save_backup::{
@@ -27,7 +30,12 @@ use commands::updates::{latest_release, updater_supported};
 use commands::validator::{fetch_wad_simulator, validate_wad};
 use commands::vcredist::{check_vcredist, install_vcredist};
 use commands::verify::{generate_manifest, verify_game};
-use commands::wad_builder::assemble_patch_wad;
+use commands::wad_builder::{assemble_patch_wad, preview_conflicts};
+use commands::prebuilt::inspect_patch_wad;
+use commands::texture_swap::{
+    export_texture, inspect_texture, list_textures, texture_details, texture_previews,
+};
+use commands::wardrobe::{list_wardrobe_models, preview_wardrobe_lua};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -49,6 +57,22 @@ pub fn run() {
             detect_asset_type,
             build_conflict_graph,
             assemble_patch_wad,
+            preview_conflicts,
+            deploy_patch_wad,
+            list_patch_wad_backups,
+            restore_patch_wad,
+            list_wardrobe_models,
+            preview_wardrobe_lua,
+            human_skins,
+            inspect_patch_wad,
+            inspect_texture,
+            list_textures,
+            texture_previews,
+            texture_details,
+            export_texture,
+            model_geometry,
+            model_variants,
+            texture_parts,
             fetch_wad_simulator,
             validate_wad,
             detect_game,
