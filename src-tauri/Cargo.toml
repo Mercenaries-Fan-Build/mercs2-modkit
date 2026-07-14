@@ -26,27 +26,28 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Mercenaries 2 format libraries (published to crates.io).
+# Mercenaries 2 format libraries — resolved from crates.io.
 #
-# `mercs2_formats` 2.1 is what the WAD builder needs: `PatchBlock::from_decompressed`
-# (correct `packed_field` — 1.0 hardcoded it to 1, sizing the engine's decompression
-# buffer at a single 32 KB page), `validate_blocks` (one primary ASET row per hash),
-# `sges::compressed_len`, `scripts_block` (Lua editing) and `texture::replace_body`.
-#
-# The `path` is a dev-time convenience so the two repos build side-by-side; the `version`
-# is what a fresh `cargo build` resolves once 2.1.0 is published. Drop the `path` (or keep
-# it — cargo prefers it locally and ignores it when packaging) after publishing.
-mercs2_formats = { version = "2.1", path = "../../notes-on-the-released-game/tools/wad_simulator/crates/mercs2_formats" }
+# NEVER add a `path` here. modkit is an application, not a published crate, so cargo always
+# prefers the path over the registry — including in CI, which has no sibling checkout of the
+# wad_simulator repo. (A `path` alongside a `version` IS ignored when *packaging a library*
+# for publication; that does not apply to a binary, and assuming it did broke the release.)
+# Develop against a local checkout with `[patch.crates-io]` or `cargo add --path`, not here.
+
+# `PatchBlock::from_decompressed` (correct `packed_field` — 1.0 hardcoded it to 1, sizing the
+# engine's decompression buffer at a single 32 KB page), `validate_blocks` (one primary ASET
+# row per hash), `sges::compressed_len`, `scripts_block` (Lua editing), `texture::replace_body`.
+mercs2_formats = "2.1"
 loadprobe = "1.0"
 
-# Lua 5.1 compiler that emits the game's exact bytecode dialect (float lua_Number, 32-bit
-# size_t). Needed because the wardrobe is pure Lua: modkit recompiles `wifpmcinterior`
-# with each mod's outfits appended. Verified byte-for-byte against the reference luac.exe.
-mercs2_luac = { version = "1.0", path = "../../notes-on-the-released-game/tools/wad_simulator/crates/mercs2_luac" }
+# Lua 5.1 compiler emitting the game's exact bytecode dialect (float lua_Number, 32-bit
+# size_t). The wardrobe is pure Lua: modkit recompiles `wifpmcinterior` with each mod's
+# outfits appended. Verified byte-for-byte against the reference luac.exe.
+mercs2_luac = "1.0"
 
 # Model container -> indexed triangle geometry, for the 3D texture viewer. Pure decode: it
 # was carved out of `mercs2_engine` precisely so a GUI can use it without linking wgpu/winit.
-mercs2_mesh = { version = "1.0", path = "../../notes-on-the-released-game/tools/wad_simulator/crates/mercs2_mesh" }
+mercs2_mesh = "1.0"
 
 # HTTP client for fetching the wad_simulator release binary (rustls to avoid system OpenSSL)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

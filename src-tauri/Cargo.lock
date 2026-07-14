@@ -2394,6 +2394,8 @@ dependencies = [
 [[package]]
 name = "mercs2_formats"
 version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d40e50f1224ae8088933d8f3eecc3d91cc84c0d35532264f673eccfa2912c9"
 dependencies = [
  "flate2",
 ]
@@ -2401,6 +2403,8 @@ dependencies = [
 [[package]]
 name = "mercs2_luac"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ed4a5e98f07fa9751d8efa588792ac2e37ea0b37e79e58e6442d25d9b33bacc"
 dependencies = [
  "cc",
 ]
@@ -2408,6 +2412,8 @@ dependencies = [
 [[package]]
 name = "mercs2_mesh"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fae4c0ce19e5a962d03716d029f31a2429c83e68a4e5c4d450f4869e0997373"
 dependencies = [
  "bytemuck",
  "mercs2_formats",
