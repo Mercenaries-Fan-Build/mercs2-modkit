@@ -41,7 +41,6 @@
 //! `wifpmcinterior` bytecode isn't the build our bundled source came from — better to
 //! decline than to replace their script with a different game version's.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use mercs2_formats::ffcs::load_ffcs_archive;
@@ -159,16 +158,27 @@ fn vz_wad(game_path: &str) -> Result<PathBuf, String> {
     Err(format!("Could not find vz.wad under {game_path}"))
 }
 
-/// Every **primary** asset hash in the WAD, mapped to its type id.
-fn aset_index(wad: &Path) -> Result<HashMap<u32, u32>, String> {
+/// The hashes that are **standalone models** — a *primary* MODEL row in the asset table.
+///
+/// This must be the exact same test [`crate::commands::human_skins`] uses to decide what to
+/// offer, or the wardrobe presents skins that then refuse to build. It previously did not:
+/// detection walked every model row (primary AND sub-entry) while validation consulted a
+/// `HashMap<hash, type_id>` of primary rows only, which
+///
+/// * kept whichever row landed last for a hash with several (so `al_hum_boss`, whose primary
+///   row is a type-34 "starter" and whose MODEL row is a sub-entry, came back as
+///   *"exists but is not a model (asset type 34)"*), and
+/// * had no entry at all for a model with no primary row (so `ch_hum_pilot_a` came back as
+///   *"your game has no model called ch_hum_pilot_a"* — about a model that plainly exists).
+fn standalone_models(wad: &Path) -> Result<std::collections::HashSet<u32>, String> {
     let mut f = std::fs::File::open(wad).map_err(|e| format!("open {}: {e}", wad.display()))?;
     let size = f.metadata().map_err(|e| format!("stat: {e}"))?.len();
     let archive = load_ffcs_archive(&mut f, size).map_err(|e| format!("FFCS: {e}"))?;
     Ok(archive
         .aset
         .iter()
-        .filter(|e| e.is_primary())
-        .map(|e| (e.asset_hash, e.type_id))
+        .filter(|e| e.type_id == TYPE_ID_MODEL && e.is_primary())
+        .map(|e| e.asset_hash)
         .collect())
 }
 
@@ -306,24 +316,17 @@ pub fn build_wardrobe_block(
     // Validate every model name against the WAD *before* compiling anything. A typo here
     // is a guaranteed in-game failure (SetOutfit hashes the name and finds nothing), and
     // it is completely invisible until you walk up to the wardrobe.
-    let index = aset_index(&wad_path)?;
+    //
+    // Same predicate the picker uses, so anything it offered is guaranteed to build.
+    let models = standalone_models(&wad_path)?;
     for o in outfits {
         let hash = pandemic_hash_m2(&o.model);
-        match index.get(&hash) {
-            Some(&t) if t == TYPE_ID_MODEL => {}
-            Some(&t) => {
-                return Err(format!(
-                    "\"{}\" exists in your game but is not a model (asset type {t}) — it cannot be worn.",
-                    o.model
-                ))
-            }
-            None => {
-                return Err(format!(
-                    "Your game has no model called \"{}\" (hash 0x{hash:08X}). If it came from DLC, \
-                     make sure that DLC is installed.",
-                    o.model
-                ))
-            }
+        if !models.contains(&hash) {
+            return Err(format!(
+                "\"{}\" isn't a model your game can load on its own (hash 0x{hash:08X}), so it \
+                 can't be worn. If it came from DLC, make sure that DLC is installed.",
+                o.model
+            ));
         }
     }
 

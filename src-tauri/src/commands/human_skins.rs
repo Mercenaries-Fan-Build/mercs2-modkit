@@ -66,8 +66,19 @@ pub struct HumanSkin {
     pub textures: Vec<String>,
     /// Which hero it most resembles, and by how much.
     pub closest_hero: String,
-    /// Wearable: rigged well enough AND we know its name.
+    /// Wearable: rigged well enough, named, AND a standalone model in the game's asset table
+    /// (see [`has_primary_model_row`]).
     pub wearable: bool,
+    /// Whether the game registers this as a **standalone** model — i.e. it has a *primary*
+    /// MODEL row in the ASET table, the shape every skin proven to work in-game has.
+    ///
+    /// The other 34 human-rigged models exist only as **sub-entries** of some other asset's
+    /// block: `al_hum_boss`'s primary row is type 34 (a "starter"), and `ch_hum_pilot_a` has
+    /// no primary row at all. They render fine in a viewer — `extract_model` follows
+    /// sub-entries — but nothing has ever shown the engine will bind one as a player outfit,
+    /// and offering them produced exactly the errors this field exists to prevent:
+    /// *"al_hum_boss exists in your game but is not a model (asset type 34)"*.
+    pub standalone_model: bool,
     /// True for the three heroes themselves and their tiers.
     pub is_hero: bool,
 }
@@ -79,6 +90,10 @@ pub struct SkinIndex {
     /// Bones shared by all three heroes — the reference skeleton.
     pub hero_bone_count: usize,
     pub skins: Vec<HumanSkin>,
+    /// Human-rigged models we deliberately do NOT offer because they aren't standalone
+    /// models — the game stores them inside another asset's block. Reported so the count is
+    /// explainable rather than a silent omission.
+    pub not_standalone: usize,
 }
 
 fn fingerprint(archive: &FfcsArchive) -> u32 {
@@ -104,6 +119,30 @@ fn vz_wad(game_path: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!("Could not find vz.wad under {game_path}"))
+}
+
+/// The hashes that have a **primary MODEL** row in the asset table.
+///
+/// This is THE test for "is it a standalone model", and it must be the only one — the
+/// wardrobe used to detect skins by walking every model row (primary *and* sub-entry) while
+/// *validating* them against a `HashMap<hash, type_id>` of primary rows only. Those two
+/// disagree, and the user saw the disagreement as nonsense errors:
+///
+/// * `al_hum_boss` has TWO rows — a primary type-34 ("starter") and a MODEL row that is only
+///   a sub-entry. The map kept the type-34 and reported *"exists but is not a model"*.
+/// * `ch_hum_pilot_a` has no primary row of any type, so it wasn't in the map at all:
+///   *"your game has no model called ch_hum_pilot_a"* — about a model that plainly exists.
+///
+/// A `HashMap` keyed by hash was wrong regardless: one hash can carry several rows, and
+/// collapsing them to whichever landed last is arbitrary. Collect a set of the hashes that
+/// genuinely have a primary MODEL row instead.
+fn primary_model_hashes(archive: &FfcsArchive) -> HashSet<u32> {
+    archive
+        .aset
+        .iter()
+        .filter(|e| e.type_id == TYPE_ID_MODEL && e.is_primary())
+        .map(|e| e.asset_hash)
+        .collect()
 }
 
 /// Bone name-hashes of a model's skeleton.
@@ -163,6 +202,7 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
         .iter()
         .map(|(_, m)| pandemic_hash_m2(m))
         .collect();
+    let primary_models = primary_model_hashes(&archive);
 
     let models: Vec<u32> = {
         let mut seen = HashSet::new();
@@ -218,11 +258,17 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
         };
 
         let name = names.get(&m).map(|s| s.to_string());
+        let standalone_model = primary_models.contains(&m);
         skins.push(HumanSkin {
             hash: m,
             reference: name.clone().unwrap_or_else(|| format!("0x{m:08X}")),
-            // Only a NAMED skin can be worn: SetOutfit hashes a name string to find the model.
-            wearable: name.is_some() && rig_match >= 0.9,
+            // Three requirements, and all three are load-bearing:
+            //  * NAMED — `Player.SetOutfit` hashes a *name string* to find the model.
+            //  * well RIGGED — it must carry the heroes' skeleton to animate like them.
+            //  * STANDALONE — it must be a model in its own right, not a sub-entry of some
+            //    other asset. Every skin proven to work in-game has that shape.
+            wearable: name.is_some() && rig_match >= 0.9 && standalone_model,
+            standalone_model,
             is_hero: hero_hashes.contains(&m),
             name,
             rig_match,
@@ -243,10 +289,16 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
             .then(a.reference.cmp(&b.reference))
     });
 
+    let not_standalone = skins
+        .iter()
+        .filter(|s| s.name.is_some() && s.rig_match >= 0.9 && !s.standalone_model)
+        .count();
+
     let idx = SkinIndex {
         fingerprint: want,
         hero_bone_count: common.len(),
         skins,
+        not_standalone,
     };
     if let Ok(p) = cache_path() {
         if let Ok(json) = serde_json::to_vec(&idx) {
@@ -260,14 +312,14 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
 mod tests {
     use super::*;
 
-    /// Only a NAMED, well-rigged skin can be worn — `Player.SetOutfit` hashes a name string,
-    /// so a model we can't name is unreachable no matter how good its skeleton is.
+    /// Three independent requirements, each of which produced a real bug when missing.
     #[test]
-    fn wearable_requires_a_name_and_a_good_rig() {
-        let mk = |name: Option<&str>, rig: f32| HumanSkin {
+    fn wearable_requires_a_name_a_good_rig_and_a_standalone_model() {
+        let mk = |name: Option<&str>, rig: f32, standalone: bool| HumanSkin {
             hash: 1,
             reference: name.unwrap_or("0x1").into(),
-            wearable: name.is_some() && rig >= 0.9,
+            wearable: name.is_some() && rig >= 0.9 && standalone,
+            standalone_model: standalone,
             is_hero: false,
             name: name.map(str::to_string),
             rig_match: rig,
@@ -277,8 +329,23 @@ mod tests {
             textures: vec![],
             closest_hero: "chris".into(),
         };
-        assert!(mk(Some("pmc_hum_fiona"), 1.0).wearable);
-        assert!(!mk(None, 1.0).wearable, "a perfect rig we can't name is unusable");
-        assert!(!mk(Some("x"), 0.6).wearable, "a half rig is not offered");
+
+        assert!(mk(Some("pmc_hum_fiona"), 1.0, true).wearable);
+
+        // `Player.SetOutfit` hashes a NAME string, so a model we can't name is unreachable
+        // however good its skeleton is.
+        assert!(!mk(None, 1.0, true).wearable);
+
+        // A half-rig won't animate like a hero.
+        assert!(!mk(Some("x"), 0.6, true).wearable);
+
+        // Not a standalone model — the game keeps it inside another asset's block. This is
+        // `al_hum_boss` (primary row type 34) and `ch_hum_pilot_a` (no primary row): offering
+        // them is what produced "exists but is not a model" and "your game has no model
+        // called ...". 34 of the 71 skins we used to offer were like this.
+        assert!(
+            !mk(Some("al_hum_boss"), 1.0, false).wearable,
+            "a sub-entry-only model must never be offered"
+        );
     }
 }

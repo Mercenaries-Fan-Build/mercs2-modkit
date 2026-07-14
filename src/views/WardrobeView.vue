@@ -5,7 +5,8 @@ import { useProjectStore } from "../stores/project";
 import type { WardrobeModel } from "../types";
 
 const store = useProjectStore();
-const { gameInfo, wardrobeModels, wardrobe, busy, error } = storeToRefs(store);
+const { gameInfo, wardrobeModels, wardrobe, notStandalone, busy, error } =
+  storeToRefs(store);
 
 const HEROES = [
   { key: "mattias", label: "Mattias" },
@@ -83,6 +84,10 @@ function add(m: WardrobeModel) {
         They're not a hand-written list: modkit checks which models are built on the
         <em>same skeleton</em> as the three player characters, which is what lets them play
         the same animations.
+        <span v-if="notStandalone" class="text-zinc-500">
+          ({{ notStandalone }} more look like people but the game keeps them bundled inside
+          other objects rather than as models of their own, so they can't be worn.)
+        </span>
       </p>
 
       <!-- Hero -->

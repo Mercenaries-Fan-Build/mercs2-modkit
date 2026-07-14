@@ -169,6 +169,8 @@ interface ProjectState {
   wadBackups: WadBackup[];
   /** Wearable models verified present in THIS install. */
   wardrobeModels: WardrobeModel[];
+  /** Human-rigged models we deliberately don't offer (not standalone models). */
+  notStandalone: number;
   /** Outfits the user has queued for the next build. */
   wardrobe: WardrobeOutfit[];
   /** Imported community patch WADs, in load order (later wins). */
@@ -211,6 +213,7 @@ export const useProjectStore = defineStore("project", {
     buildResult: null,
     wadBackups: [],
     wardrobeModels: [],
+    notStandalone: 0,
     wardrobe: [],
     prebuilt: [],
     textures: [],
@@ -1336,6 +1339,12 @@ export const useProjectStore = defineStore("project", {
       this.wardrobeModels = await invoke<WardrobeModel[]>("list_wardrobe_models", {
         gamePath: this.gamePath,
       });
+      // How many human-rigged models we deliberately don't offer, so the count is
+      // explainable rather than a silent omission. (Cached backend-side; cheap.)
+      const idx = await invoke<{ not_standalone: number }>("human_skins", {
+        gamePath: this.gamePath,
+      });
+      this.notStandalone = idx.not_standalone;
     },
 
     /**
