@@ -1,69 +1,85 @@
 <script setup lang="ts">
-import { ref, watchEffect } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { storeToRefs } from "pinia";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import ProgressBar from "../components/ProgressBar.vue";
+import type { ClaimConflict, GroupOutcome } from "../types";
 
 const store = useProjectStore();
-const { busy, error, buildResult, validation, unresolvedCount, gameInfo } =
-  storeToRefs(store);
+const {
+  busy,
+  error,
+  buildResult,
+  validation,
+  gameInfo,
+  wadBackups,
+  wardrobe,
+  prebuilt,
+  textures,
+} = storeToRefs(store);
 
-const outputDir = ref("");
-
-// Default the output folder to the detected game's data dir, once known.
-watchEffect(() => {
-  if (!outputDir.value && gameInfo.value?.data_dir) {
-    outputDir.value = gameInfo.value.data_dir;
-  }
-});
-const splitByPatch = ref(false);
-const mergeInto = ref<string | null>(null);
-const simulatorPath = ref<string | null>(null);
-const stage = ref<string>("");
-
-async function pickOutputDir() {
-  const dir = await open({ directory: true, title: "Select output folder" });
-  if (typeof dir === "string") outputDir.value = dir;
-}
-
-async function pickMergeWad() {
+async function importWad() {
   const f = await open({
-    title: "Select existing vz-patch.wad to merge into",
-    filters: [{ name: "WAD", extensions: ["wad"] }],
+    title: "Select a mod's vz-patch.wad",
+    filters: [{ name: "Patch WAD", extensions: ["wad"] }],
   });
-  if (typeof f === "string") mergeInto.value = f;
+  if (typeof f === "string") await store.importPatchWad(f).catch(() => {});
 }
 
+const nothingToBuild = computed(
+  () =>
+    store.enabledMods.length === 0 &&
+    wardrobe.value.length === 0 &&
+    prebuilt.value.length === 0 &&
+    textures.value.length === 0,
+);
+
+const simulatorPath = ref<string | null>(null);
+const stage = ref("");
+// Partial overlaps between mods: unresolvable automatically, so we show them and stop.
+const conflicts = ref<ClaimConflict[]>([]);
+const deployed = ref<string | null>(null);
+
+onMounted(() => void store.loadWadBackups().catch(() => {}));
+
+/** Build into the managed staging dir, then validate with wad_simulator. */
 async function buildAndValidate() {
-  if (!outputDir.value) {
-    store.error = "Choose an output folder first.";
-    return;
-  }
   store.error = null;
-  stage.value = "Assembling patch WAD…";
-  const result = await store
-    .assemble({
-      outputDir: outputDir.value,
-      splitByPatch: splitByPatch.value,
-      mergeInto: mergeInto.value,
-    })
-    .catch(() => null);
-  if (!result || result.outputs.length === 0) {
+  conflicts.value = [];
+  deployed.value = null;
+
+  stage.value = "Resolving load order…";
+  try {
+    await store.previewConflicts();
+  } catch (e: unknown) {
+    // The backend rejects a partial overlap rather than shipping a half-applied mod.
+    const payload = e as { conflicts?: ClaimConflict[] };
+    if (payload?.conflicts?.length) {
+      conflicts.value = payload.conflicts;
+      stage.value = "";
+      return;
+    }
+    store.error = String(e);
     stage.value = "";
     return;
   }
 
-  // Validate the first produced WAD with wad_simulator.
+  stage.value = "Assembling patch WAD…";
+  const result = await store.assemble({}).catch(() => null);
+  if (!result) {
+    stage.value = "";
+    return;
+  }
+
   stage.value = "Validating with wad_simulator…";
   try {
     let sim = simulatorPath.value;
     if (!sim) {
-      // Try to fetch the release binary; fall back to PATH if it fails.
       sim = await store.fetchSimulator().catch(() => null);
       if (sim) simulatorPath.value = sim;
     }
-    await store.validate(result.outputs[0].path, sim);
+    await store.validate(result.path, sim);
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -71,10 +87,33 @@ async function buildAndValidate() {
   }
 }
 
+/** Install the built WAD. The previous one is snapshotted first — this is undoable. */
+async function deploy() {
+  if (!buildResult.value) return;
+  const res = await store.deployPatchWad(buildResult.value.path).catch(() => null);
+  if (res) deployed.value = res.installed_at;
+}
+
+async function restore(file: string | null) {
+  await store.restorePatchWad(file).catch(() => {});
+  deployed.value = null;
+}
+
 function fmtBytes(n: number): string {
   if (n > 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
   if (n > 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
   return `${n} B`;
+}
+
+function outcomeText(o: GroupOutcome): string {
+  switch (o.outcome) {
+    case "applied":
+      return `${o.asset_count} asset${o.asset_count === 1 ? "" : "s"} applied`;
+    case "overridden":
+      return `fully overridden by “${o.overridden_by_label}”`;
+    case "partially_applied":
+      return `${o.applied} applied, ${o.overridden} overridden by a later mod`;
+  }
 }
 </script>
 
@@ -83,69 +122,145 @@ function fmtBytes(n: number): string {
     <header>
       <h2 class="text-xl font-semibold">Build &amp; Deploy</h2>
       <p class="text-sm text-zinc-500">
-        Assemble loaded mods into a patch WAD, then validate before deploying.
+        Assemble your mods into one <code>vz-patch.wad</code>, check it, then install it.
       </p>
     </header>
 
     <div
-      v-if="store.enabledMods.length === 0"
+      v-if="nothingToBuild"
       class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
     >
-      Enable at least one mod to build.
+      Nothing to build yet. Enable a mod, add a
+      <RouterLink to="/wardrobe" class="text-emerald-400 underline">wardrobe outfit</RouterLink>
+      or a
+      <RouterLink to="/textures" class="text-emerald-400 underline">texture</RouterLink>,
+      or add an existing mod WAD below.
+      <div class="mt-4">
+        <button class="btn-secondary" @click="importWad">Add a WAD…</button>
+      </div>
     </div>
 
     <template v-else>
+      <!-- Wardrobe outfits and texture swaps build into the same WAD as the mods. -->
       <div
-        v-if="unresolvedCount > 0"
-        class="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300"
+        v-if="wardrobe.length || textures.length"
+        class="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm text-zinc-400"
       >
-        {{ unresolvedCount }} unresolved conflict{{
-          unresolvedCount === 1 ? "" : "s"
-        }}
-        — unresolved assets default to load order (first mod wins).
+        <span v-if="wardrobe.length">
+          {{ wardrobe.length }} wardrobe outfit{{ wardrobe.length === 1 ? "" : "s" }}
+        </span>
+        <span v-if="wardrobe.length && textures.length"> and </span>
+        <span v-if="textures.length">
+          {{ textures.length }} texture{{ textures.length === 1 ? "" : "s" }}
+        </span>
+        will be included.
       </div>
-
-      <!-- Settings -->
-      <section class="mt-6 space-y-4 rounded-xl border border-zinc-800 p-5">
-        <div>
-          <label class="mb-1 block text-sm text-zinc-400">Output folder</label>
-          <div class="flex gap-2">
-            <input
-              v-model="outputDir"
-              readonly
-              placeholder="Choose a folder…"
-              class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
-            />
-            <button class="btn-secondary" @click="pickOutputDir">Browse</button>
+      <!-- Imported community WADs. The game loads only one patch WAD, so installing two
+           prebuilt mods has never been possible — modkit merges them into one. -->
+      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-medium text-zinc-300">Mod WADs</h3>
+            <p class="mt-1 text-xs text-zinc-500">
+              Add existing <code>vz-patch.wad</code> mods. Normally you could only use one at
+              a time — these get merged together.
+            </p>
           </div>
+          <button class="btn-secondary shrink-0" @click="importWad">Add a WAD…</button>
         </div>
 
-        <label class="flex items-center gap-2 text-sm text-zinc-300">
-          <input v-model="splitByPatch" type="checkbox" class="accent-emerald-500" />
-          Split into one WAD per patch group
-        </label>
-
-        <div>
-          <label class="mb-1 block text-sm text-zinc-400">
-            Merge into existing WAD (optional)
-          </label>
-          <div class="flex gap-2">
-            <input
-              :value="mergeInto ?? ''"
-              readonly
-              placeholder="None — build fresh"
-              class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
-            />
-            <button class="btn-secondary" @click="pickMergeWad">Browse</button>
-            <button
-              v-if="mergeInto"
-              class="btn-secondary"
-              @click="mergeInto = null"
+        <ul v-if="prebuilt.length" class="mt-4 space-y-2">
+          <li
+            v-for="(p, i) in prebuilt"
+            :key="p.id"
+            class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+          >
+            <div class="flex items-center gap-3">
+              <span class="w-6 text-right text-xs text-zinc-600">{{ i + 1 }}</span>
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm text-zinc-200">{{ p.name }}</p>
+                <p class="text-xs text-zinc-500">
+                  {{ p.asset_count }} asset{{ p.asset_count === 1 ? "" : "s" }} ·
+                  {{ p.block_count }} block{{ p.block_count === 1 ? "" : "s" }}
+                </p>
+              </div>
+              <button
+                class="btn-secondary px-2 py-1"
+                :disabled="i === 0"
+                @click="store.movePrebuilt(p.id, 'up')"
+              >
+                ↑
+              </button>
+              <button
+                class="btn-secondary px-2 py-1"
+                :disabled="i === prebuilt.length - 1"
+                @click="store.movePrebuilt(p.id, 'down')"
+              >
+                ↓
+              </button>
+              <button class="btn-secondary px-2 py-1" @click="store.removePrebuilt(p.id)">
+                ✕
+              </button>
+            </div>
+            <p
+              v-for="(w, wi) in p.warnings"
+              :key="wi"
+              class="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-300"
             >
-              Clear
+              {{ w }}
+            </p>
+          </li>
+        </ul>
+        <p v-else class="mt-3 text-xs text-zinc-600">None added.</p>
+      </section>
+
+      <!-- Load order. Later mods override earlier ones — same rule as the engine. -->
+      <section
+        v-if="store.enabledMods.length"
+        class="mt-6 rounded-xl border border-zinc-800 p-5"
+      >
+        <h3 class="text-sm font-medium text-zinc-300">Load order</h3>
+        <p class="mt-1 text-xs text-zinc-500">
+          Later mods override earlier ones. If two mods change the same thing, the one
+          lower in this list wins.
+        </p>
+
+        <ul class="mt-4 space-y-2">
+          <li
+            v-for="(m, i) in store.enabledMods"
+            :key="m.id"
+            class="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+          >
+            <span class="w-6 text-right text-xs text-zinc-600">{{ i + 1 }}</span>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm text-zinc-200">{{ m.manifest.name }}</p>
+              <p class="text-xs text-zinc-500">
+                {{ m.assets.length }} asset{{ m.assets.length === 1 ? "" : "s" }}
+              </p>
+            </div>
+            <!-- Buttons, not drag-and-drop: the whole UI is gamepad-navigable and
+                 HTML5 drag targets are unreachable with a controller. -->
+            <button
+              class="btn-secondary px-2 py-1"
+              :disabled="i === 0"
+              title="Load earlier (overridden by more mods)"
+              @click="store.moveMod(m.id, 'up')"
+            >
+              ↑
             </button>
-          </div>
-        </div>
+            <button
+              class="btn-secondary px-2 py-1"
+              :disabled="i === store.enabledMods.length - 1"
+              title="Load later (overrides more mods)"
+              @click="store.moveMod(m.id, 'down')"
+            >
+              ↓
+            </button>
+          </li>
+        </ul>
+        <p class="mt-3 text-xs text-zinc-600">
+          ↑ loads earlier · ↓ loads later (wins)
+        </p>
       </section>
 
       <button
@@ -153,10 +268,23 @@ function fmtBytes(n: number): string {
         :disabled="busy"
         @click="buildAndValidate"
       >
-        Build &amp; Validate
+        Build &amp; Check
       </button>
 
       <ProgressBar v-if="busy" indeterminate :label="stage" class="mt-4" />
+
+      <!-- Unresolvable overlap: two mods change an overlapping-but-different set of
+           assets. Picking per-asset would produce a mod nobody authored, so we stop. -->
+      <section v-if="conflicts.length" class="mt-6 space-y-3">
+        <div
+          v-for="(c, i) in conflicts"
+          :key="i"
+          class="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+        >
+          <p class="font-medium">Can’t combine these two mods automatically</p>
+          <p class="mt-1 text-red-300/90">{{ c.message }}</p>
+        </div>
+      </section>
 
       <div
         v-if="error"
@@ -165,27 +293,43 @@ function fmtBytes(n: number): string {
         {{ error }}
       </div>
 
-      <!-- Build result -->
+      <!-- What the load order actually did. -->
       <section v-if="buildResult" class="mt-6">
-        <h3 class="mb-2 text-sm font-medium text-zinc-300">Output</h3>
-        <div class="space-y-2">
-          <div
-            v-for="o in buildResult.outputs"
-            :key="o.path"
-            class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm"
-          >
-            <p class="font-mono text-zinc-200">{{ o.path }}</p>
-            <p class="text-xs text-zinc-500">
-              group “{{ o.patch_group }}” · {{ o.block_count }} block{{
-                o.block_count === 1 ? "" : "s"
-              }}
-              · {{ fmtBytes(o.byte_size) }}
-            </p>
-          </div>
+        <h3 class="mb-2 text-sm font-medium text-zinc-300">Result</h3>
+        <div class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm">
+          <p class="font-mono text-xs break-all text-zinc-200">{{ buildResult.path }}</p>
+          <p class="mt-1 text-xs text-zinc-500">
+            {{ buildResult.block_count }} block{{ buildResult.block_count === 1 ? "" : "s" }}
+            · {{ fmtBytes(buildResult.byte_size) }}
+          </p>
+          <p class="mt-1 font-mono text-[11px] text-zinc-600">
+            sha256 {{ buildResult.sha256.slice(0, 32) }}…
+          </p>
         </div>
+
+        <ul class="mt-3 space-y-1">
+          <li
+            v-for="(o, i) in buildResult.outcomes"
+            :key="i"
+            class="flex items-center gap-2 text-xs"
+          >
+            <span
+              class="rounded-full px-2 py-0.5"
+              :class="
+                o.outcome === 'applied'
+                  ? 'bg-emerald-500/15 text-emerald-300'
+                  : 'bg-amber-500/15 text-amber-300'
+              "
+            >
+              {{ o.outcome === "applied" ? "applied" : "overridden" }}
+            </span>
+            <span class="text-zinc-300">{{ o.label }}</span>
+            <span class="text-zinc-600">— {{ outcomeText(o) }}</span>
+          </li>
+        </ul>
       </section>
 
-      <!-- Validation result -->
+      <!-- Validation -->
       <section v-if="validation" class="mt-6">
         <h3 class="mb-2 flex items-center gap-2 text-sm font-medium text-zinc-300">
           Validation
@@ -202,8 +346,70 @@ function fmtBytes(n: number): string {
           </span>
         </h3>
         <pre
-          class="max-h-72 overflow-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-400"
+          class="max-h-60 overflow-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-400"
         >{{ validation.stdout || validation.stderr || "(no output)" }}</pre>
+      </section>
+
+      <!-- Install. Close the game first: it holds the WAD open. -->
+      <section v-if="buildResult" class="mt-6 rounded-xl border border-zinc-800 p-5">
+        <h3 class="text-sm font-medium text-zinc-300">Install</h3>
+        <p class="mt-1 text-xs text-zinc-500">
+          Copies the WAD into
+          <code>{{ gameInfo?.data_dir ?? "the game's data folder" }}</code
+          >. Your current <code>vz-patch.wad</code> is backed up first, so you can undo
+          this. <strong class="text-zinc-400">Close the game before installing.</strong>
+        </p>
+        <button
+          class="mt-3 w-full rounded-lg bg-emerald-600 px-4 py-2.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          :disabled="busy || !gameInfo?.data_dir"
+          @click="deploy"
+        >
+          Install into the game
+        </button>
+        <p
+          v-if="deployed"
+          class="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300"
+        >
+          Installed to <span class="font-mono">{{ deployed }}</span
+          >. Launch the game, then check Diagnostics if anything looks wrong.
+        </p>
+      </section>
+
+      <!-- Undo. Every hazard a bad WAD can cause is recoverable from here. -->
+      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+        <h3 class="text-sm font-medium text-zinc-300">Undo</h3>
+        <p class="mt-1 text-xs text-zinc-500">
+          Restore a previous patch, or remove it entirely to go back to the unmodded game.
+        </p>
+        <button
+          class="mt-3 w-full rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          :disabled="busy || !gameInfo?.data_dir"
+          @click="restore(null)"
+        >
+          Remove the patch (back to stock game)
+        </button>
+
+        <ul v-if="wadBackups.length" class="mt-3 space-y-2">
+          <li
+            v-for="b in wadBackups"
+            :key="b.file"
+            class="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+          >
+            <div class="min-w-0 flex-1">
+              <p class="truncate font-mono text-xs text-zinc-300">
+                {{ b.sha256.slice(0, 16) }}…
+              </p>
+              <p class="text-xs text-zinc-500">{{ fmtBytes(b.byte_size) }}</p>
+            </div>
+            <button
+              class="btn-secondary"
+              :disabled="busy || !gameInfo?.data_dir"
+              @click="restore(b.file)"
+            >
+              Restore
+            </button>
+          </li>
+        </ul>
       </section>
     </template>
   </div>
@@ -217,7 +423,10 @@ function fmtBytes(n: number): string {
   font-size: 0.875rem;
   color: rgb(212 212 216);
 }
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background-color: rgb(39 39 42);
+}
+.btn-secondary:disabled {
+  opacity: 0.4;
 }
 </style>

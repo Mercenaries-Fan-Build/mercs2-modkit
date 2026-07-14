@@ -46,8 +46,24 @@ export const router = createRouter({
       name: "saves",
       component: () => import("../views/SavesView.vue"),
     },
-    // Kept reachable by URL, but no longer in the sidebar (the "Build & Deploy"
-    // tab became "Save backups").
+    {
+      path: "/wardrobe",
+      name: "wardrobe",
+      component: () => import("../views/WardrobeView.vue"),
+    },
+    {
+      path: "/textures",
+      name: "textures",
+      component: () => import("../views/TextureView.vue"),
+    },
+    {
+      // Its own page, not a modal: deep-linkable, and Back/Forward work while you follow
+      // "used alongside" links from one texture to the next.
+      path: "/texture/:name",
+      name: "texture",
+      component: () => import("../views/TextureDetailView.vue"),
+      props: true,
+    },
     {
       path: "/export",
       name: "export",

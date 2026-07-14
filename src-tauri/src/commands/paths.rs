@@ -35,8 +35,8 @@ pub fn staging_dir() -> Result<PathBuf, String> {
     stage("staging")
 }
 
-/// Built/deployed outputs are tracked here.
-#[allow(dead_code)]
+/// Built/deployed outputs are tracked here (including `wad-backups/`, the snapshots of
+/// every `vz-patch.wad` a deploy has displaced).
 pub fn deployed_dir() -> Result<PathBuf, String> {
     stage("deployed")
 }
