@@ -7,7 +7,7 @@
 //! LOD/state bit is active. So a texture can be genuinely referenced by a model and still be
 //! on no visible surface. This measures how often that happens, and whether ANY tier shows it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;

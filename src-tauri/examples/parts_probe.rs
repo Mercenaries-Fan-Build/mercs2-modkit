@@ -11,7 +11,7 @@ fn main() {
 
     let parts = texture_parts(game, tex.clone()).expect("parts");
     println!("{tex}: painted by {} part(s)\n", parts.len());
-    println!("  {:<30} {:>5} {:>6} {:>8}  {}", "model", "part", "tier", "tris", "slot");
+    println!("  {:<30} {:>5} {:>6} {:>8}  slot", "model", "part", "tier", "tris");
     for p in parts.iter().take(20) {
         println!(
             "  {:<30} {:>5} {:>6} {:>8}  {}",

@@ -338,7 +338,7 @@ pub fn texture_parts(game_path: String, texture: String) -> Result<Vec<TexturePa
     }
 
     // Biggest parts first — that's where a reskin actually shows.
-    out.sort_by(|a, b| b.triangles.cmp(&a.triangles));
+    out.sort_by_key(|p| std::cmp::Reverse(p.triangles));
     Ok(out)
 }
 

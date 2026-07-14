@@ -31,7 +31,7 @@ fn main() {
     // `al_veh_truck_mtv_expandabl(e_va)n`, which is noise).
     let toks: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
     let score_token = |words: &[&str], name: &str, tok: &str| -> i64 {
-        if words.iter().any(|w| *w == tok) {
+        if words.contains(&tok) {
             4
         } else if words.iter().any(|w| w.starts_with(tok)) {
             3

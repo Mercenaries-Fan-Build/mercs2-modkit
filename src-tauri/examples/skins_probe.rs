@@ -17,8 +17,8 @@ fn main() {
 
     let wearable: Vec<_> = idx.skins.iter().filter(|s| s.wearable).collect();
     println!(
-        "  {:<32} {:>5} {:>6} {:>9}  {}",
-        "wearable skin", "rig", "bones", "tris", "closest hero"
+        "  {:<32} {:>5} {:>6} {:>9}  closest hero",
+        "wearable skin", "rig", "bones", "tris"
     );
     for s in &wearable {
         println!(

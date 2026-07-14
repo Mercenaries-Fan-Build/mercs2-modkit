@@ -17,7 +17,7 @@ fn main() {
     let vs = model_variants(game, model.clone(), texture.clone()).expect("variants");
 
     println!("{model}  <-  {texture}\n");
-    println!("  {:<12} {:>7} {:>8}  {}", "condition", "groups", "tris", "shows the texture?");
+    println!("  {:<12} {:>7} {:>8}  shows the texture?", "condition", "groups", "tris");
     for v in &vs {
         println!(
             "  {:<12} {:>7} {:>8}  {}",

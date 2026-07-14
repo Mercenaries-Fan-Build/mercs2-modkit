@@ -127,8 +127,20 @@ fn vz_wad(game_path: &str) -> Result<PathBuf, String> {
     Err(format!("Could not find vz.wad under {game_path}"))
 }
 
+/// The shipped texture we're about to replace, and the fields that constrain the swap: a
+/// replacement must match the donor's dimensions and format exactly, or the engine over-reads.
+struct Donor {
+    container: Vec<u8>,
+    hash: u32,
+    width: u32,
+    height: u32,
+    format: TexFormat,
+    /// False => the game streams this texture's detail from other blocks.
+    resident: bool,
+}
+
 /// Pull the donor container and read the fields that constrain the swap.
-fn donor(game_path: &str, name: &str) -> Result<(Vec<u8>, u32, u32, u32, TexFormat, bool), String> {
+fn donor(game_path: &str, name: &str) -> Result<Donor, String> {
     let wad = vz_wad(game_path)?;
     let mut f = std::fs::File::open(&wad).map_err(|e| format!("open vz.wad: {e}"))?;
     let size = f.metadata().map_err(|e| format!("stat: {e}"))?.len();
@@ -159,7 +171,14 @@ fn donor(game_path: &str, name: &str) -> Result<(Vec<u8>, u32, u32, u32, TexForm
     })?;
 
     let resident = info_is_fully_resident(&info);
-    Ok((container, hash, width, height, format, resident))
+    Ok(Donor {
+        container,
+        hash,
+        width,
+        height,
+        format,
+        resident,
+    })
 }
 
 /// Raw INFO leaf bytes of a texture container.
@@ -504,7 +523,7 @@ fn base_name(name: &str) -> &str {
 #[tauri::command]
 pub fn texture_details(game_path: String, name: String) -> Result<TextureDetails, String> {
     let wad = vz_wad(&game_path)?;
-    let (container, hash, width, height, format, resident) = donor(&game_path, &name)?;
+    let Donor { container, hash, width, height, format, resident } = donor(&game_path, &name)?;
 
     let t = parse_texture_container(&container)
         .map_err(|e| format!("{name}: {e}"))?;
@@ -602,7 +621,7 @@ pub fn export_texture(
     name: String,
     dest: String,
 ) -> Result<TextureExport, String> {
-    let (container, _hash, width, height, _fmt, _resident) = donor(&game_path, &name)?;
+    let Donor { container, width, height, .. } = donor(&game_path, &name)?;
 
     // `u32::MAX` cap = never downscale; we want the real pixels here, not a thumbnail.
     // `decode_any`, so a non-DXT texture (the uncompressed `cloud_noise`) still exports.
@@ -663,7 +682,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 /// Describe what swapping `name` would do — and whether we'll allow it.
 #[tauri::command]
 pub fn inspect_texture(game_path: String, name: String) -> Result<TextureTarget, String> {
-    let (_c, hash, width, height, format, resident) = donor(&game_path, &name)?;
+    let Donor { hash, width, height, format, resident, .. } = donor(&game_path, &name)?;
 
     // A replacement is published as a fully-resident container regardless of how the
     // original was stored, so a streamed donor is fine — that is the normal case, and the
@@ -689,7 +708,7 @@ pub fn inspect_texture(game_path: String, name: String) -> Result<TextureTarget,
 
 /// Build the override block for one texture swap.
 pub fn swap_block(game_path: &str, swap: &TextureSwap) -> Result<PatchBlock, String> {
-    let (_container, hash, width, height, format, _resident) = donor(game_path, &swap.name)?;
+    let Donor { hash, width, height, format, .. } = donor(game_path, &swap.name)?;
 
     // Decode the user's image and force it to the donor's exact dimensions. Resizing is not
     // a limitation we could avoid by trying harder — the body length is what keeps the
