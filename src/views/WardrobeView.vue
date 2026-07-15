@@ -5,8 +5,7 @@ import { useProjectStore } from "../stores/project";
 import type { WardrobeModel } from "../types";
 
 const store = useProjectStore();
-const { gameInfo, wardrobeModels, wardrobe, notStandalone, busy, error } =
-  storeToRefs(store);
+const { gameInfo, wardrobeModels, wardrobe, busy, error } = storeToRefs(store);
 
 const HEROES = [
   { key: "mattias", label: "Mattias" },
@@ -26,13 +25,16 @@ watch(gameInfo, (g) => {
 
 /** Show only skins built like the currently-selected hero. */
 const matchHero = ref(false);
-/** Hide the heroes' own looks (you probably want someone else). */
-const hideHeroes = ref(false);
+/**
+ * Hide skins already in the base wardrobe. On by default: adding one does nothing (it's
+ * deduped out), so what you actually want are the skins the game doesn't already give you.
+ */
+const hideExisting = ref(true);
 
 const filtered = computed<WardrobeModel[]>(() => {
   const q = search.value.trim().toLowerCase();
   return wardrobeModels.value
-    .filter((m) => !hideHeroes.value || !m.is_hero)
+    .filter((m) => !hideExisting.value || !m.in_base_wardrobe)
     .filter((m) => !matchHero.value || m.closest_hero === hero.value)
     .filter(
       (m) =>
@@ -84,10 +86,6 @@ function add(m: WardrobeModel) {
         They're not a hand-written list: modkit checks which models are built on the
         <em>same skeleton</em> as the three player characters, which is what lets them play
         the same animations.
-        <span v-if="notStandalone" class="text-zinc-500">
-          ({{ notStandalone }} more look like people but the game keeps them bundled inside
-          other objects rather than as models of their own, so they can't be worn.)
-        </span>
       </p>
 
       <!-- Hero -->
@@ -146,8 +144,8 @@ function add(m: WardrobeModel) {
 
         <div class="mt-2 flex flex-wrap gap-3 text-xs text-zinc-400">
           <label class="flex items-center gap-1.5">
-            <input v-model="hideHeroes" type="checkbox" class="accent-emerald-500" />
-            Hide the heroes' own looks
+            <input v-model="hideExisting" type="checkbox" class="accent-emerald-500" />
+            Hide outfits you already have
           </label>
           <label class="flex items-center gap-1.5">
             <input v-model="matchHero" type="checkbox" class="accent-emerald-500" />
@@ -167,10 +165,11 @@ function add(m: WardrobeModel) {
               <p class="truncate text-sm text-zinc-200">
                 {{ m.label }}
                 <span
-                  v-if="m.is_hero"
-                  class="ml-1 rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                  v-if="m.in_base_wardrobe"
+                  class="ml-1 rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500"
+                  title="Already in your wardrobe — adding it changes nothing."
                 >
-                  hero
+                  already available
                 </span>
               </p>
               <p class="truncate font-mono text-xs text-zinc-600">{{ m.model }}</p>

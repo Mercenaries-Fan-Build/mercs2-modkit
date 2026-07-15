@@ -121,6 +121,8 @@ export interface WardrobeModel {
   triangles: number;
   /** One of the three player characters, or one of their unlock tiers. */
   is_hero: boolean;
+  /** Already in the base game's wardrobe — adding it changes nothing (it's deduped out). */
+  in_base_wardrobe: boolean;
 }
 
 /** An outfit to add to the PMC wardrobe. */

@@ -1,43 +1,35 @@
-//! The invariant: anything the wardrobe OFFERS must build; anything it refuses must be
-//! refused for a reason the user can act on.
+//! The invariant: every skin the wardrobe OFFERS must build. A typo (something not in the
+//! game) must be refused with an actionable message.
 //!
 //! `cargo run --release --example wardrobe_guard_probe -- "<game root>"`
 
-use mercs2_modkit_lib::commands::human_skins::human_skins;
 use mercs2_modkit_lib::commands::wardrobe::{list_wardrobe_models, wardrobe_block, WardrobeOutfit};
 
 fn main() {
     let game = std::env::args().nth(1).expect("usage: <game root>");
 
-    let idx = human_skins(game.clone()).expect("skins");
     let offered = list_wardrobe_models(game.clone()).expect("wardrobe");
+    let base = offered.iter().filter(|m| m.in_base_wardrobe).count();
     println!(
-        "offered: {}   excluded (rigged but not standalone models): {}\n",
-        offered.len(),
-        idx.not_standalone
+        "offered: {}   ({base} already in the base wardrobe, badged)\n",
+        offered.len()
     );
 
-    // 1. The two the user hit must now be refused BEFORE anything is compiled.
-    for bad in ["al_hum_boss", "ch_hum_pilot_a"] {
-        assert!(
-            !offered.iter().any(|m| m.model == bad),
-            "{bad} must no longer be offered"
-        );
-        let err = wardrobe_block(
-            &game,
-            &[WardrobeOutfit {
-                hero: "mattias".into(),
-                model: bad.into(),
-                label: bad.into(),
-            }],
-        )
-        .unwrap_err();
-        println!("refused {bad}\n  -> {err}");
-    }
+    // A genuine typo must be refused before anything is compiled.
+    let err = wardrobe_block(
+        &game,
+        &[WardrobeOutfit {
+            hero: "mattias".into(),
+            model: "pmc_hum_notarealskin".into(),
+            label: "nope".into(),
+        }],
+    )
+    .unwrap_err();
+    println!("refused a typo -> {err}\n");
 
-    // 2. Every skin the picker DOES offer must actually build. This is the invariant that
-    //    was broken: detection walked all model rows, validation only primary ones.
-    println!("\nbuilding every offered skin...");
+    // Every skin the picker offers must actually build — the invariant that broke before
+    // (detection and validation asked different questions).
+    println!("building every offered skin...");
     for (i, m) in offered.iter().enumerate() {
         wardrobe_block(
             &game,
@@ -48,10 +40,10 @@ fn main() {
             }],
         )
         .unwrap_or_else(|e| panic!("OFFERED BUT FAILED TO BUILD: {} -> {e}", m.model));
-        if i % 10 == 0 {
+        if i % 15 == 0 {
             println!("  ok {}/{}", i + 1, offered.len());
         }
     }
 
-    println!("\nOK — all {} offered skins build; the two bad ones are refused up front.", offered.len());
+    println!("\nOK — all {} offered skins build; a typo is refused up front.", offered.len());
 }

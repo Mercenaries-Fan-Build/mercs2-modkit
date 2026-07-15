@@ -48,7 +48,7 @@ use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::patch_wad::{AsetEntry, PatchBlock};
 use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::sges::{decompress_block, decompress_sges};
-use mercs2_formats::types::TYPE_ID_MODEL;
+use mercs2_formats::texture::extract_model;
 use serde::{Deserialize, Serialize};
 
 /// The script that owns the wardrobe menu.
@@ -67,54 +67,99 @@ const INTERIOR_SOURCE: &str = include_str!("../../lua/wifpmcinterior.lua");
 /// `jennifer` while the model names use `jen`.
 pub const HEROES: [&str; 3] = ["mattias", "chris", "jennifer"];
 
-/// Candidate wearable models.
+/// Friendly labels for known models.
 ///
-/// This is only a *candidate* list: every entry is checked against the player's own
-/// `vz.wad` before it is offered, so a name that isn't in their install (a DLC skin they
-/// don't own, say) simply never appears. That means we can be generous here without ever
-/// offering something that would fail in-game.
+/// This is *only* a label table now — the picker finds wearable skins by rig match against
+/// the heroes (see [`crate::commands::human_skins`]), then looks a nicer label up here,
+/// falling back to [`pretty`] for anything not listed. Names come from the community's
+/// `WardrobeUnlocker`, whose skin list is verified-working in-game, plus the heroes' own
+/// tiers. Anything not present in the player's install simply isn't offered.
 const CANDIDATES: &[(&str, &str)] = &[
     // Heroes and their unlockable tiers.
     ("pmc_hum_mattias", "Mattias"),
-    ("pmc_hum_mattias_v2", "Mattias — Vacation"),
+    ("pmc_hum_mattias_v2", "Mattias — Suit"),
     ("pmc_hum_mattias_v3", "Mattias — MetalHead"),
-    ("pmc_hum_mattias_v4", "Mattias — Commando"),
-    ("pmc_hum_mattias_v5", "Mattias — Grandpa"),
+    ("pmc_hum_mattias_v4", "Mattias — Jacket"),
     ("pmc_hum_mattias_chickensuit", "Mattias — Chicken Suit"),
     ("pmc_hum_chris", "Chris"),
-    ("pmc_hum_chris_v2", "Chris — Vacation"),
+    ("pmc_hum_chris_v2", "Chris — Suit"),
     ("pmc_hum_chris_v3", "Chris — Commando"),
     ("pmc_hum_chris_v4", "Chris — Tier 4"),
     ("pmc_hum_chris_chickensuit", "Chris — Chicken Suit"),
     ("pmc_hum_jen", "Jennifer"),
-    ("pmc_hum_jen_v2", "Jennifer — Vacation"),
+    ("pmc_hum_jen_v2", "Jennifer — Suit"),
     ("pmc_hum_jen_v3", "Jennifer — Commando"),
     ("pmc_hum_jen_v4", "Jennifer — Tier 4"),
     ("pmc_hum_jen_v5", "Jennifer — Tier 5"),
     ("pmc_hum_jen_chickensuit", "Jennifer — Chicken Suit"),
-    // PMC crew — the ones the shipped 6-slot wardrobe proved wearable.
-    ("pmc_hum_mechanic", "Eva (Mechanic)"),
-    ("pmc_hum_fiona_unlockable", "Fiona"),
-    ("pmc_hum_helipilot_unlockable", "Ewan (Heli Pilot)"),
-    ("pmc_hum_proppilot_unlockable", "Misha (Prop Pilot)"),
-    // DLC / bonus characters (only offered if present in the install).
+    // PMC & allies.
+    ("pmc_hum_fiona", "Fiona"),
+    ("pmc_hum_eva", "Eva"),
+    ("pmc_hum_diablo", "Diablo"),
+    ("pmc_hum_hoang", "Hoang"),
+    ("pmc_hum_stealth", "Stealth"),
+    ("pmc_hum_mechanic", "PMC Mechanic"),
+    ("pmc_hum_blanco", "Blanco (PMC)"),
+    ("pmc_hum_helipilot", "Helicopter Pilot"),
+    ("pmc_hum_proppilot", "Prop Pilot"),
+    ("pmc_hum_fire", "MOPP Suit"),
     ("pmc_hum_obama", "Obama"),
-    ("pmc_hum_blanco", "Blanco"),
-    // Faction characters.
-    ("pr_hum_boss", "PR Boss"),
-    ("al_hum_boss", "Allied Boss"),
-    ("al_hum_pilot", "Allied Pilot"),
-    ("al_hum_prisoner", "Allied Prisoner"),
-    ("al_hum_workerb", "Worker"),
-    ("ch_hum_prisoner", "Chinese Prisoner"),
-    ("gr_hum_elite", "Guerrilla Elite"),
-    ("gr_hum_starter_1", "Guerrilla"),
-    ("police_hum_officer_a", "Police Officer"),
-    ("police_hum_officer_b", "Police Officer B"),
-    ("oc_hum_mercenary_a", "Mercenary"),
-    ("oc_hum_mercenaryheavy_a", "Heavy Mercenary"),
+    // Venezuela.
     ("vz_hum_solano", "Solano"),
+    ("vz_hum_carmona", "Carmona"),
+    ("vz_hum_blanco", "Blanco (VZ)"),
+    ("vz_hum_captain", "VZ Captain"),
+    ("vz_hum_deathsquad_a", "VZ Deathsquad"),
+    ("vz_hum_soldierelite_a", "VZ Elite"),
+    // Allied Nations.
+    ("al_hum_boss", "Allied Boss"),
+    ("al_hum_officer_a", "Allied Officer"),
+    ("al_hum_pilot", "Allied Pilot"),
+    ("al_hum_starter01", "Allied Recruit 1"),
+    ("al_hum_starter02", "Allied Recruit 2"),
+    // China.
+    ("ch_hum_boss", "Chinese Boss"),
+    ("ch_hum_prisoner", "Chinese Prisoner"),
+    // Guerrillas.
+    ("gr_hum_boss", "Guerrilla Boss"),
+    ("gr_hum_boss_fake", "Guerrilla Boss (Disguise)"),
+    ("gr_hum_advisor", "Guerrilla Advisor"),
+    ("gr_hum_elite", "Guerrilla Elite"),
+    // Pirates.
+    ("pr_hum_boss", "Pirate Boss"),
+    ("pr_hum_worker", "Pirate Worker"),
+    // Universal Petroleum.
+    ("oc_hum_boss", "UP Boss"),
+    ("oc_hum_executive", "UP Executive"),
+    ("oc_hum_boardmember", "UP Board Member"),
+    ("oc_hum_mercenary_a", "UP Mercenary"),
+    ("oc_hum_pilot", "UP Pilot"),
+    ("oc_hum_fireman", "Fireman"),
+    // Civilian / misc.
+    ("civ_hum_doctorfemale", "Doctor"),
+    ("police_hum_officer_b", "Police Officer"),
+    ("civ_hum_beachfemale_a", "Beach Girl A"),
+    ("civ_hum_beachfemale_b", "Beach Girl B"),
+    ("civ_hum_beachfemale_c", "Beach Girl C"),
+    ("civ_hum_beachfemale_d", "Beach Girl D"),
 ];
+
+/// Models already present in the base game's wardrobe (`_tOutfits`).
+///
+/// Parsed once from the bundled `wifpmcinterior` source. Adding one of these does nothing
+/// visible — it's already selectable — so the picker badges them and the generated Lua
+/// dedupes them out. Used to steer the user toward genuinely-new skins.
+fn base_wardrobe_models() -> std::collections::HashSet<String> {
+    INTERIOR_SOURCE
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix("Model")?.trim_start().strip_prefix('=')?.trim();
+            let inner = rest.strip_prefix('"')?;
+            inner.split('"').next().map(|s| s.to_string())
+        })
+        .collect()
+}
 
 /// A model the player can actually wear — verified present in their `vz.wad`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +178,9 @@ pub struct WardrobeModel {
     pub triangles: usize,
     /// One of the three player characters (or one of their unlock tiers).
     pub is_hero: bool,
+    /// Already in the base game's wardrobe. Adding it changes nothing (it's deduped out), so
+    /// the UI badges it "already available" and steers you to genuinely-new skins.
+    pub in_base_wardrobe: bool,
 }
 
 /// One outfit a user wants added to the wardrobe.
@@ -158,30 +206,6 @@ fn vz_wad(game_path: &str) -> Result<PathBuf, String> {
     Err(format!("Could not find vz.wad under {game_path}"))
 }
 
-/// The hashes that are **standalone models** — a *primary* MODEL row in the asset table.
-///
-/// This must be the exact same test [`crate::commands::human_skins`] uses to decide what to
-/// offer, or the wardrobe presents skins that then refuse to build. It previously did not:
-/// detection walked every model row (primary AND sub-entry) while validation consulted a
-/// `HashMap<hash, type_id>` of primary rows only, which
-///
-/// * kept whichever row landed last for a hash with several (so `al_hum_boss`, whose primary
-///   row is a type-34 "starter" and whose MODEL row is a sub-entry, came back as
-///   *"exists but is not a model (asset type 34)"*), and
-/// * had no entry at all for a model with no primary row (so `ch_hum_pilot_a` came back as
-///   *"your game has no model called ch_hum_pilot_a"* — about a model that plainly exists).
-fn standalone_models(wad: &Path) -> Result<std::collections::HashSet<u32>, String> {
-    let mut f = std::fs::File::open(wad).map_err(|e| format!("open {}: {e}", wad.display()))?;
-    let size = f.metadata().map_err(|e| format!("stat: {e}"))?.len();
-    let archive = load_ffcs_archive(&mut f, size).map_err(|e| format!("FFCS: {e}"))?;
-    Ok(archive
-        .aset
-        .iter()
-        .filter(|e| e.type_id == TYPE_ID_MODEL && e.is_primary())
-        .map(|e| e.asset_hash)
-        .collect())
-}
-
 /// List the models this install can actually wear.
 ///
 /// ## Detected, not guessed
@@ -200,6 +224,7 @@ fn standalone_models(wad: &Path) -> Result<std::collections::HashSet<u32>, Strin
 #[tauri::command]
 pub fn list_wardrobe_models(game_path: String) -> Result<Vec<WardrobeModel>, String> {
     let labels: std::collections::HashMap<&str, &str> = CANDIDATES.iter().copied().collect();
+    let base = base_wardrobe_models();
 
     let index = crate::commands::human_skins::human_skins(game_path)?;
 
@@ -215,6 +240,7 @@ pub fn list_wardrobe_models(game_path: String) -> Result<Vec<WardrobeModel>, Str
                     .map(|l| l.to_string())
                     .unwrap_or_else(|| pretty(&model)),
                 asset_hash: s.hash,
+                in_base_wardrobe: base.contains(&model),
                 model,
                 rig_match: s.rig_match,
                 closest_hero: s.closest_hero.clone(),
@@ -249,27 +275,48 @@ fn pretty(model: &str) -> String {
     }
 }
 
-/// The Lua we append after the base script. Both `_tOutfits` and `GetAvailableCostumes`
-/// are globals, so appending is enough — no AST surgery, and N mods concatenate cleanly.
+/// The Lua we append after the base script.
+///
+/// Both `_tOutfits` and `GetAvailableCostumes` are globals in `wifpmcinterior`, so appending
+/// text is enough — no AST surgery, and it composes with any other mod that does the same.
+///
+/// The shape follows the community's `WardrobeUnlocker`, which is the recipe proven to work
+/// in-game:
+///
+/// * **Dedupe by model.** A `_deferOutfit` helper skips a model already present in the
+///   hero's list. Without it, picking a base-game tier (`pmc_hum_mattias_v3`, already there
+///   as "MetalHead") appended a duplicate — which is why an earlier build appeared to change
+///   nothing: the outfits were already in the wardrobe. It also means re-running the mod
+///   can't stack duplicates.
+/// * **Override `GetAvailableCostumes`.** The base version caps the visible slot count;
+///   returning the longest list unlocks every entry, base and added alike.
 fn wardrobe_lua(outfits: &[WardrobeOutfit]) -> String {
-    let mut src = String::from("\n-- ===== modkit: wardrobe additions =====\n");
+    // Escape for a Lua double-quoted string; the roster is fixed but a user label is free text.
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+
+    let mut src = String::from(
+        "\n-- ===== modkit: wardrobe additions =====\n\
+         -- Add an outfit to a hero's list, but only if that model isn't already there\n\
+         -- (so base-game outfits aren't duplicated and a re-run can't stack entries).\n\
+         local function _modkitAddOutfit(sHero, tOutfit)\n  \
+           _tOutfits[sHero] = _tOutfits[sHero] or {}\n  \
+           for _, o in ipairs(_tOutfits[sHero]) do\n    \
+             if o.Model == tOutfit.Model then return end\n  \
+           end\n  \
+           table.insert(_tOutfits[sHero], tOutfit)\n\
+         end\n",
+    );
 
     for o in outfits {
-        // Lua long-bracket-free escaping: these strings come from a fixed model roster and
-        // a user label, so escape quotes/backslashes rather than trusting them.
-        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         src.push_str(&format!(
-            "_tOutfits.{hero} = _tOutfits.{hero} or {{}}\n\
-             table.insert(_tOutfits.{hero}, {{ Name = \"{name}\", Model = \"{model}\", PlayerVisibleName = \"{label}\" }})\n",
-            hero = o.hero,
+            "_modkitAddOutfit(\"{hero}\", {{ Name = \"{name}\", Model = \"{model}\", PlayerVisibleName = \"{label}\" }})\n",
+            hero = esc(&o.hero),
             name = esc(&o.label),
             model = esc(&o.model),
             label = esc(&o.label),
         ));
     }
 
-    // Lift the menu gate. The base script defines this as a global function, so a later
-    // definition wins — the menu then shows every slot in the table.
     src.push_str(
         "\n-- Unlock every wardrobe slot (the base definition caps the visible count).\n\
          function GetAvailableCostumes()\n  \
@@ -312,29 +359,28 @@ pub fn build_wardrobe_block(
     }
 
     let wad_path = vz_wad(game_path)?;
-
-    // Validate every model name against the WAD *before* compiling anything. A typo here
-    // is a guaranteed in-game failure (SetOutfit hashes the name and finds nothing), and
-    // it is completely invisible until you walk up to the wardrobe.
-    //
-    // Same predicate the picker uses, so anything it offered is guaranteed to build.
-    let models = standalone_models(&wad_path)?;
-    for o in outfits {
-        let hash = pandemic_hash_m2(&o.model);
-        if !models.contains(&hash) {
-            return Err(format!(
-                "\"{}\" isn't a model your game can load on its own (hash 0x{hash:08X}), so it \
-                 can't be worn. If it came from DLC, make sure that DLC is installed.",
-                o.model
-            ));
-        }
-    }
-
-    // Locate and decompress the scripts block out of the player's WAD.
     let mut f =
         std::fs::File::open(&wad_path).map_err(|e| format!("open {}: {e}", wad_path.display()))?;
     let size = f.metadata().map_err(|e| format!("stat: {e}"))?.len();
     let archive = load_ffcs_archive(&mut f, size).map_err(|e| format!("FFCS: {e}"))?;
+
+    // Validate every model name against the WAD *before* compiling anything, using the exact
+    // resolution `Player.SetOutfit` performs at runtime: hash the name and resolve the model
+    // by that hash, following ASET sub-entries. `extract_model` is that resolution. Checking
+    // anything else (e.g. the primary ASET row's type) is how an earlier build wrongly
+    // rejected `al_hum_boss` as "not a model (asset type 34)" — a model that SetOutfit loads
+    // fine. A typo, by contrast, resolves to nothing and is caught here rather than at the
+    // wardrobe mirror.
+    for o in outfits {
+        let hash = pandemic_hash_m2(&o.model);
+        if extract_model(&mut f, &archive, hash).is_err() {
+            return Err(format!(
+                "Your game has no wearable model called \"{}\" (hash 0x{hash:08X}). If it came \
+                 from DLC, make sure that DLC is installed.",
+                o.model
+            ));
+        }
+    }
 
     let (idx, path) = archive
         .paths
@@ -409,15 +455,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_lua_appends_and_lifts_the_gate() {
+    fn generated_lua_adds_deduped_and_lifts_the_gate() {
         let src = wardrobe_lua(&[WardrobeOutfit {
             hero: "mattias".into(),
             model: "pmc_hum_mechanic".into(),
             label: "Eva".into(),
         }]);
-        assert!(src.contains("table.insert(_tOutfits.mattias"));
+        // Uses the dedupe helper, not a bare table.insert (which duplicated base outfits).
+        assert!(src.contains("_modkitAddOutfit(\"mattias\""));
+        assert!(src.contains("local function _modkitAddOutfit"));
+        assert!(src.contains("if o.Model == tOutfit.Model then return end"));
         assert!(src.contains("Model = \"pmc_hum_mechanic\""));
         assert!(src.contains("function GetAvailableCostumes()"));
+    }
+
+    /// `base_wardrobe_models` must find the outfits the bundled `wifpmcinterior` already
+    /// ships — those are the ones the picker badges and the generated Lua dedupes out. If it
+    /// found none, every base tier would look "new" and get duplicated again.
+    #[test]
+    fn base_wardrobe_models_are_recovered() {
+        let base = base_wardrobe_models();
+        for m in ["pmc_hum_mattias", "pmc_hum_mattias_v3", "pmc_hum_chris", "pmc_hum_jen"] {
+            assert!(base.contains(m), "{m} should be a known base outfit");
+        }
+        // A skin the base wardrobe does NOT have.
+        assert!(!base.contains("pmc_hum_fiona"));
     }
 
     /// The generated Lua must actually compile — otherwise the whole build dies at the
