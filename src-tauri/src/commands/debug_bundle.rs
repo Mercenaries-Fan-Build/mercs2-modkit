@@ -324,6 +324,20 @@ fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog
         line(&mut o, "Root", s_or(game, "root", "?"));
         let size = game.get("exe_size").and_then(Value::as_u64).unwrap_or(0);
         line(&mut o, "Executable", &format!("{} ({} bytes)", s_or(game, "exe_path", "?"), size));
+        if let Some(cracked) = game.get("cracked_exe").filter(|c| !c.is_null()) {
+            line(
+                &mut o,
+                "Cracked exe",
+                &format!(
+                    "{} ({} bytes, {} {})",
+                    s_or(cracked, "path", "?"),
+                    cracked.get("size").and_then(Value::as_u64).unwrap_or(0),
+                    s_or(cracked, "version", "unknown"),
+                    s_or(cracked, "variant", "unknown"),
+                ),
+            );
+        }
+        line(&mut o, "Launches", s_or(game, "launch_exe_path", "?"));
         line(
             &mut o,
             "Version",

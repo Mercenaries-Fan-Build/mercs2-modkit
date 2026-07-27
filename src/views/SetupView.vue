@@ -80,6 +80,13 @@ async function runCrack() {
         <span class="text-zinc-200">{{ gameInfo.version }}</span>
         <span v-if="gameInfo.variant !== 'unknown'"> ({{ gameInfo.variant }})</span>.
       </p>
+      <p v-if="gameInfo.cracked_exe" class="mt-1 text-sm text-zinc-400">
+        Cracked exe alongside it:
+        <span class="font-mono text-xs text-zinc-300">{{ gameInfo.cracked_exe.name }}</span>
+        <span class="text-zinc-500">
+          — {{ gameInfo.cracked_exe.version }} ({{ gameInfo.cracked_exe.variant }})</span
+        >. This is what the modkit launches; you don't need to rename anything.
+      </p>
 
       <ProgressBar v-if="busy" indeterminate :label="stage" class="mt-4" />
       <div

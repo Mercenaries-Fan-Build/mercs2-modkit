@@ -15,6 +15,7 @@ import type {
   DeployedAsi,
   DeployResult,
   DeployWadResult,
+  ExeCandidate,
   GameInfo,
   InstallDllResult,
   InstallResult,
@@ -249,12 +250,31 @@ export const useProjectStore = defineStore("project", {
       const r = state.region;
       return !!r && r.applicable && !r.normalized;
     },
+    /**
+     * The v1.1 cracked build we'll launch, whether that's the base exe (cracked
+     * in place) or the `Mercenaries2.cracked.exe` setup wrote next to it. The
+     * user does NOT have to overwrite the original for the install to be ready.
+     */
+    crackedBuild(state): ExeCandidate | null {
+      const g = state.gameInfo;
+      if (!g) return null;
+      if (g.cracked_exe?.version === "v1.1" && g.cracked_exe.variant === "cracked") {
+        return g.cracked_exe;
+      }
+      if (g.version === "v1.1" && g.variant === "cracked") {
+        return {
+          path: g.exe_path,
+          name: g.exe_path.split(/[\\/]/).pop() ?? g.exe_path,
+          size: g.exe_size,
+          version: g.version,
+          variant: g.variant,
+        };
+      }
+      return null;
+    },
     /** Fully prepared for modding: v1.1, cracked, with the ASI loader installed. */
     gameFullySetUp(state): boolean {
-      const g = state.gameInfo;
-      return (
-        !!g && g.version === "v1.1" && g.variant === "cracked" && g.has_pmc_bb
-      );
+      return !!state.gameInfo?.has_pmc_bb && !!this.crackedBuild;
     },
     /** Filenames of ASI plugins currently present in the game install. */
     deployedAsiNames(state): Set<string> {

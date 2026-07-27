@@ -394,12 +394,26 @@ export type Resolution =
   | { kind: "priority"; modId: string }
   | { kind: "exclude"; modId: string };
 
+/** One Mercenaries2*.exe found in the install, identified by size. */
+export interface ExeCandidate {
+  path: string;
+  name: string;
+  size: number;
+  version: string; // "v1.0" | "v1.1" | "unknown"
+  variant: string; // "unsigned" | "ea-signed" | "patched" | "cracked" | "unknown"
+}
+
 export interface GameInfo {
   root: string;
+  /** The base exe — apply_crack's input, not necessarily the one we launch. */
   exe_path: string;
   exe_size: number;
   version: string; // "v1.0" | "v1.1" | "unknown"
   variant: string; // "unsigned" | "ea-signed" | "patched" | "cracked" | "unknown"
+  /** The de-DRM'd exe next to the base one (Mercenaries2.cracked.exe), if any. */
+  cracked_exe: ExeCandidate | null;
+  /** The exe launch_game actually runs: the cracked one when present. */
+  launch_exe_path: string;
   has_pmc_bb: boolean;
   asi_loader_proxy: string | null; // e.g. "pmc_bb.dll", or null if none
   data_dir: string | null;

@@ -148,14 +148,15 @@ pub fn discover_runtime(overrides: Option<LaunchOverrides>) -> RuntimeInfo {
     }
 }
 
-/// Pick the executable to actually launch: prefer `Mercenaries2.cracked.exe`
-/// (de-DRM'd, imports the ASI loader) over the detected/stock exe.
+/// Pick the executable to actually launch: prefer the cracked build (de-DRM'd,
+/// imports the ASI loader) over the detected/stock exe. Shares
+/// `game::resolve_exes` with detection so what we launch is exactly what Game
+/// Info reports as `launch_exe_path` — including a crack written to a
+/// non-default filename.
 fn launch_exe(game_dir: &Path, detected: &Path) -> PathBuf {
-    let cracked = game_dir.join("Mercenaries2.cracked.exe");
-    if cracked.is_file() {
-        cracked
-    } else {
-        detected.to_path_buf()
+    match crate::commands::game::resolve_exes(game_dir) {
+        Some((_, Some(cracked))) => PathBuf::from(cracked.path),
+        _ => detected.to_path_buf(),
     }
 }
 

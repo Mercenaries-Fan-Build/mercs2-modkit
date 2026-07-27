@@ -158,7 +158,11 @@ async function normalizeRegion() {
           "
         >
           <template v-if="store.gameFullySetUp">
-            v1.1, cracked, and pmc_bb.dll installed.
+            v1.1, cracked, and pmc_bb.dll installed — launching
+            <span class="font-mono text-xs">{{
+              store.crackedBuild?.name
+            }}</span
+            >.
           </template>
           <template v-else>
             Needs v1.1 + cracked exe + pmc_bb.dll. Finish in
@@ -214,6 +218,23 @@ async function normalizeRegion() {
           <div class="flex gap-3">
             <dt class="w-32 shrink-0 text-zinc-500">Exe size</dt>
             <dd class="text-zinc-300">{{ fmtBytes(gameInfo.exe_size) }}</dd>
+          </div>
+          <div v-if="gameInfo.cracked_exe" class="flex gap-3">
+            <dt class="w-32 shrink-0 text-zinc-500">Cracked exe</dt>
+            <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
+              {{ gameInfo.cracked_exe.path }}
+              <span class="text-zinc-500">
+                — {{ gameInfo.cracked_exe.version }}
+                ({{ gameInfo.cracked_exe.variant }}),
+                {{ fmtBytes(gameInfo.cracked_exe.size) }}</span
+              >
+            </dd>
+          </div>
+          <div class="flex gap-3">
+            <dt class="w-32 shrink-0 text-zinc-500">Launches</dt>
+            <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
+              {{ gameInfo.launch_exe_path }}
+            </dd>
           </div>
           <div v-if="gameInfo.data_dir" class="flex gap-3">
             <dt class="w-32 shrink-0 text-zinc-500">Data dir</dt>
