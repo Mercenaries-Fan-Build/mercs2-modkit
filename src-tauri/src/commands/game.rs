@@ -337,6 +337,66 @@ pub fn detect_game(path: String) -> Result<GameInfo, String> {
     })
 }
 
+/// Trim a uniform dark border, returning the box that actually holds artwork.
+///
+/// Returns `None` when every pixel is below the threshold, i.e. there is nothing to show.
+fn content_box(img: &image::RgbaImage, threshold: u8) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = img.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for (x, y, p) in img.enumerate_pixels() {
+        let [r, g, b, a] = p.0;
+        if a > 8 && r.max(g).max(b) > threshold {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    (x1 >= x0 && y1 >= y0).then(|| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// The game's own icon, as a PNG data URL ready for an `<img src>`.
+///
+/// `mercs2.ico` holds one 64×64 frame, but the art inside it is the wide "MERCENARIES 2"
+/// wordmark letterboxed into that square with a lot of dead black. Rendered as-is in a small
+/// badge it's an illegible smudge — so trim the border and hand back just the artwork, letting
+/// the caller size it to the wordmark's own aspect rather than to the file's.
+///
+/// `Ok(None)` means the install has no icon; that's not an error, the caller just keeps its
+/// text fallback. Nothing is shipped with modkit — this is read from the player's own copy.
+#[tauri::command(async)]
+pub fn game_icon(game_path: String) -> Result<Option<String>, String> {
+    let root = Path::new(&game_path);
+    let Some(path) = ["mercs2.ico", "_mercs2.ico"]
+        .iter()
+        .map(|n| root.join(n))
+        .find(|p| p.is_file())
+    else {
+        return Ok(None);
+    };
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Ico)
+        .map_err(|e| format!("decode {}: {e}", path.display()))?
+        .to_rgba8();
+
+    // 24 keeps the wordmark's darkest antialiased edges while dropping the black surround.
+    let cropped = match content_box(&img, 24) {
+        Some((x, y, w, h)) => image::imageops::crop_imm(&img, x, y, w, h).to_image(),
+        None => return Ok(None),
+    };
+
+    let mut png = Vec::new();
+    cropped
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("encode icon: {e}"))?;
+
+    Ok(Some(format!(
+        "data:image/png;base64,{}",
+        crate::commands::texture_swap::b64(&png)
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
