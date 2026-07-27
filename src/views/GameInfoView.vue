@@ -33,9 +33,9 @@ function onRegionSelect(event: Event) {
 }
 
 function versionTone(v: string): string {
-  if (v === "v1.1") return "bg-emerald-500/15 text-emerald-300";
-  if (v === "v1.0") return "bg-sky-500/15 text-sky-300";
-  return "bg-zinc-700/40 text-zinc-400";
+  if (v === "v1.1") return "text-emerald-300";
+  if (v === "v1.0") return "text-sky-300";
+  return "text-zinc-500";
 }
 
 function fmtBytes(n: number): string {
@@ -101,7 +101,7 @@ async function normalizeRegion() {
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header class="flex items-start justify-between gap-4">
       <div>
-        <h2 class="text-xl font-semibold">Game Info</h2>
+        <h2 class="plate-title text-xl">Game Info</h2>
         <p class="text-sm text-zinc-500">
           What modkit detected about your install and the pmc_bb.dll ASI loader,
           plus any available updates.
@@ -109,7 +109,7 @@ async function normalizeRegion() {
       </div>
       <button
         v-if="gameInfo"
-        class="shrink-0 rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+        class="btn-outline shrink-0"
         :disabled="busy || checking"
         @click="refreshAll"
       >
@@ -119,7 +119,7 @@ async function normalizeRegion() {
 
     <div
       v-if="!gameInfo"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate mt-10"
     >
       Set your game folder in the bar above to see install details.
     </div>
@@ -183,13 +183,13 @@ async function normalizeRegion() {
 
       <!-- Game details -->
       <section class="mt-4 rounded-xl border border-zinc-800 p-5">
-        <h3 class="font-medium text-zinc-100">Game</h3>
+        <h3 class="plate-title text-sm">Game</h3>
         <dl class="mt-3 space-y-2 text-sm">
           <div class="flex items-center gap-3">
             <dt class="w-32 shrink-0 text-zinc-500">Version</dt>
             <dd>
               <span
-                class="rounded-full px-2 py-0.5 text-xs font-medium"
+                class="stamp"
                 :class="versionTone(gameInfo.version)"
                 >{{ gameInfo.version }}</span
               >
@@ -240,7 +240,7 @@ async function normalizeRegion() {
       <section class="mt-4 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <h3 class="font-medium text-zinc-100">pmc_bb.dll (ASI loader)</h3>
+            <h3 class="plate-title text-sm">pmc_bb.dll (ASI loader)</h3>
             <p class="mt-1 text-sm text-zinc-400">
               Our ASI loader + SecuROM spoof — required to inject plugins.
             </p>
@@ -250,11 +250,11 @@ async function normalizeRegion() {
                 <dt class="w-32 shrink-0 text-zinc-500">Status</dt>
                 <dd>
                   <span
-                    class="rounded-full px-2 py-0.5 text-xs font-medium"
+                    class="stamp"
                     :class="
                       gameInfo.has_pmc_bb
-                        ? 'bg-emerald-500/15 text-emerald-300'
-                        : 'bg-zinc-700/40 text-zinc-400'
+                        ? 'text-emerald-300'
+                        : 'text-zinc-500'
                     "
                     >{{ gameInfo.has_pmc_bb ? "Installed ✓" : "Not installed" }}</span
                   >
@@ -353,7 +353,7 @@ async function normalizeRegion() {
       >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <h3 class="font-medium text-zinc-100">Matchmaking region</h3>
+            <h3 class="plate-title text-sm">Matchmaking region</h3>
             <p class="mt-1 text-sm text-zinc-400">
               The game keys its multiplayer version off the
               <code class="text-zinc-300">Region</code> registry value, so you
@@ -367,11 +367,11 @@ async function normalizeRegion() {
                 <dt class="w-32 shrink-0 text-zinc-500">Status</dt>
                 <dd>
                   <span
-                    class="rounded-full px-2 py-0.5 text-xs font-medium"
+                    class="stamp"
                     :class="
                       region.normalized
-                        ? 'bg-emerald-500/15 text-emerald-300'
-                        : 'bg-amber-500/15 text-amber-300'
+                        ? 'text-emerald-300'
+                        : 'text-amber-300'
                     "
                     >{{ region.normalized ? "Applied ✓" : "Not applied" }}</span
                   >
@@ -447,7 +447,7 @@ async function normalizeRegion() {
       >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <h3 class="font-medium text-zinc-100">
+            <h3 class="plate-title text-sm">
               Microsoft Visual C++ 2008 runtime
             </h3>
             <p class="mt-1 text-sm text-zinc-400">
@@ -464,11 +464,11 @@ async function normalizeRegion() {
                 <dt class="w-32 shrink-0 text-zinc-500">Status</dt>
                 <dd>
                   <span
-                    class="rounded-full px-2 py-0.5 text-xs font-medium"
+                    class="stamp"
                     :class="
                       vcRedist.installed
-                        ? 'bg-emerald-500/15 text-emerald-300'
-                        : 'bg-amber-500/15 text-amber-300'
+                        ? 'text-emerald-300'
+                        : 'text-amber-300'
                     "
                     >{{
                       vcRedist.installed ? "Installed ✓" : "Not installed"

@@ -45,7 +45,7 @@ function choose(c: AssetConflict, key: string) {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Conflicts</h2>
+      <h2 class="plate-title text-xl">Conflicts</h2>
       <p class="text-sm text-zinc-500">
         Assets claimed by more than one mod. The engine applies last-write-wins;
         choose which mod owns each asset, or exclude it.
@@ -54,7 +54,7 @@ function choose(c: AssetConflict, key: string) {
 
     <div
       v-if="!conflictGraph || conflictGraph.conflicts.length === 0"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center"
+      class="empty-plate mt-10"
     >
       <p class="text-emerald-400">No conflicts 🎉</p>
       <p class="mt-1 text-sm text-zinc-600">
@@ -76,7 +76,7 @@ function choose(c: AssetConflict, key: string) {
             <p class="font-mono text-xs text-zinc-500">{{ hex(c.asset_hash) }}</p>
           </div>
           <span
-            class="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-300"
+            class="stamp text-amber-300"
           >
             {{ c.mods.length }} mods
           </span>

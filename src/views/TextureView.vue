@@ -143,7 +143,7 @@ function fileName(p: string): string {
 <template>
   <div class="mx-auto max-w-5xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Textures</h2>
+      <h2 class="plate-title text-xl">Textures</h2>
       <p class="text-sm text-zinc-500">
         Browse every texture in your game and swap in your own image.
       </p>
@@ -151,7 +151,7 @@ function fileName(p: string): string {
 
     <div
       v-if="!gameInfo"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate mt-10"
     >
       Choose your game folder first.
     </div>
@@ -159,7 +159,7 @@ function fileName(p: string): string {
     <template v-else>
       <!-- Queued replacements -->
       <section v-if="textures.length" class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">
+        <h3 class="plate-label">
           Your replacements ({{ textures.length }})
         </h3>
         <ul class="mt-2 space-y-2">
@@ -179,7 +179,7 @@ function fileName(p: string): string {
               <p class="truncate text-xs text-emerald-400/60">→ {{ fileName(t.image_path) }}</p>
             </RouterLink>
             <button
-              class="rounded-lg border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              class="btn-outline"
               @click="store.removeTextureSwap(t.name)"
             >
               Remove
@@ -198,7 +198,7 @@ function fileName(p: string): string {
         <input
           v-model="search"
           placeholder="Search — try “chris”, “tank”, or “boss head”…"
-          class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+          class="field w-full"
         />
 
         <div class="mt-3 flex flex-wrap gap-1.5">
@@ -295,7 +295,7 @@ function fileName(p: string): string {
 
         <button
           v-if="hasMore"
-          class="mt-5 w-full rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+          class="btn-outline mt-5 w-full justify-center"
           @click="page++"
         >
           Show more ({{ (matches.length - pageItems.length).toLocaleString() }} left)

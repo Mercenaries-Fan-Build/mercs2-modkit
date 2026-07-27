@@ -61,7 +61,7 @@ async function runCrack() {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Game Setup</h2>
+      <h2 class="plate-title text-xl">Game Setup</h2>
       <p class="text-sm text-zinc-500">
         Prepare the install for modding — no compiler or Python required.
       </p>
@@ -69,7 +69,7 @@ async function runCrack() {
 
     <div
       v-if="!gameInfo"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate mt-10"
     >
       Set your game folder in the bar above to begin.
     </div>
@@ -111,7 +111,7 @@ async function runCrack() {
       <section class="mt-6 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <h3 class="font-medium text-zinc-100">
+            <h3 class="plate-title text-sm">
               1 · Install pmc_bb.dll (ASI loader)
             </h3>
             <p class="mt-1 text-sm text-zinc-400">
@@ -161,7 +161,7 @@ async function runCrack() {
 
       <!-- Step 2: crack / update -->
       <section class="mt-4 rounded-xl border border-zinc-800 p-5">
-        <h3 class="font-medium text-zinc-100">2 · Crack / update the exe</h3>
+        <h3 class="plate-title text-sm">2 · Crack / update the exe</h3>
         <p class="mt-1 text-sm text-zinc-400">
           Applies the SecuROM bypass (and optionally updates v1.0 → v1.1),
           writing a new cracked exe that loads pmc_bb.dll.
@@ -192,10 +192,10 @@ async function runCrack() {
               :value="outputPath ?? ''"
               readonly
               placeholder="Default: Mercenaries2.cracked.exe next to the original"
-              class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+              class="field flex-1"
             />
             <button
-              class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+              class="btn-outline"
               @click="pickOutput"
             >
               Browse
@@ -204,7 +204,7 @@ async function runCrack() {
         </div>
 
         <button
-          class="mt-4 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate mt-4"
           :disabled="busy"
           @click="runCrack"
         >

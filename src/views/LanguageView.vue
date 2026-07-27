@@ -90,7 +90,7 @@ watch(
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header class="flex items-start justify-between gap-4">
       <div>
-        <h2 class="text-xl font-semibold">Language</h2>
+        <h2 class="plate-title text-xl">Language</h2>
         <p class="text-sm text-zinc-500">
           Each language ships its own <code class="text-zinc-400">.wad</code> +
           voice-over <code class="text-zinc-400">.pws</code>. Keep the one you
@@ -99,7 +99,7 @@ watch(
       </div>
       <button
         v-if="gameInfo"
-        class="shrink-0 rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+        class="btn-outline shrink-0"
         :disabled="scanning || busy"
         @click="scan"
       >
@@ -109,7 +109,7 @@ watch(
 
     <div
       v-if="!gameInfo"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate mt-10"
     >
       Set your game folder in the bar above to manage language content.
     </div>
@@ -147,7 +147,7 @@ watch(
       <template v-if="status">
         <div
           v-if="present.length === 0"
-          class="mt-6 rounded-xl border border-dashed border-zinc-800 px-8 py-12 text-center text-zinc-500"
+          class="empty-plate mt-6"
         >
           No recognized language content found in
           <code class="text-zinc-400">{{ status.dataDir ?? "the data folder" }}</code
@@ -189,7 +189,7 @@ watch(
                   {{ fmtBytes(langBytes(l)) }}
                 </span>
                 <button
-                  class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                  class="btn-plate"
                   :disabled="busy || present.length === 1"
                   :title="
                     present.length === 1

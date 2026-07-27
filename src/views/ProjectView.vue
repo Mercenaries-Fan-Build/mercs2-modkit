@@ -17,13 +17,13 @@ const { mods, asiMods, busy, error, activeAssetCount, conflictCount, gameInfo } 
 /** Deploy lifecycle status of a library ASI mod, for the status pill. */
 type AsiStatus = { label: string; cls: string };
 function asiStatus(m: AsiMod): AsiStatus {
-  if (store.isAsiDeployed(m))
-    return { label: "deployed", cls: "bg-emerald-500/15 text-emerald-300" };
-  if (!store.isEnabled(m.id))
-    return { label: "disabled", cls: "bg-zinc-700/40 text-zinc-400" };
+  // Colour only — `.stamp` supplies the outlined-seal shape and takes its
+  // border from currentColor.
+  if (store.isAsiDeployed(m)) return { label: "deployed", cls: "text-emerald-300" };
+  if (!store.isEnabled(m.id)) return { label: "disabled", cls: "text-zinc-500" };
   if (!gameInfo.value)
-    return { label: "enabled · no game set", cls: "bg-amber-500/15 text-amber-300" };
-  return { label: "ready to deploy", cls: "bg-sky-500/15 text-sky-300" };
+    return { label: "enabled · no game set", cls: "text-amber-300" };
+  return { label: "ready to deploy", cls: "text-sky-300" };
 }
 
 async function undeploy(m: AsiMod) {
@@ -129,7 +129,7 @@ async function deployEnabled() {
   <div class="mx-auto max-w-4xl px-8 py-6">
     <header class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold">Mod Library</h2>
+        <h2 class="plate-title text-xl">Mod Library</h2>
         <p class="text-sm text-zinc-500">
           {{ asiMods.length }} ASI · {{ mods.length }} WAD ·
           {{ activeAssetCount }} asset{{ activeAssetCount === 1 ? "" : "s" }}
@@ -139,19 +139,19 @@ async function deployEnabled() {
         <ConflictBadge v-if="mods.length" :count="conflictCount" />
         <RouterLink
           to="/catalog"
-          class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+          class="btn-outline"
         >
           Browse Catalog
         </RouterLink>
         <button
-          class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          class="btn-outline"
           :disabled="busy"
           @click="addPlugin"
         >
           Add Plugin
         </button>
         <button
-          class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate"
           :disabled="busy"
           @click="addMod"
         >
@@ -171,7 +171,7 @@ async function deployEnabled() {
 
     <!-- Deployed in game (detected) -->
     <section v-if="gameInfo && gameInfo.deployed_asi.length" class="mt-6">
-      <h3 class="mb-2 text-sm font-medium text-zinc-300">
+      <h3 class="plate-label mb-2">
         Deployed in game
         <span class="text-zinc-600">· {{ gameInfo.deployed_asi.length }} plugin{{ gameInfo.deployed_asi.length === 1 ? "" : "s" }}</span>
       </h3>
@@ -202,7 +202,7 @@ async function deployEnabled() {
           </div>
           <button
             v-if="!store.isAsiManaged(d.name)"
-            class="shrink-0 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+            class="btn-outline shrink-0"
             :disabled="busy"
             title="Add this deployed plugin to the managed Library"
             @click="adopt(d)"
@@ -229,12 +229,12 @@ async function deployEnabled() {
     <!-- ASI plugins -->
     <section v-if="asiMods.length" class="mt-6">
       <div class="mb-2 flex items-center justify-between">
-        <h3 class="text-sm font-medium text-zinc-300">ASI Plugins</h3>
+        <h3 class="plate-label">ASI Plugins</h3>
         <div class="flex items-center gap-2 text-xs">
           <label class="text-zinc-500">Deploy to</label>
           <select
             :value="store.asiTarget"
-            class="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200"
+            class="field px-2 py-1"
             @change="store.setAsiTarget(($event.target as HTMLSelectElement).value)"
           >
             <option v-for="t in ASI_TARGETS" :key="t.value" :value="t.value">
@@ -242,7 +242,7 @@ async function deployEnabled() {
             </option>
           </select>
           <button
-            class="rounded-md bg-emerald-600 px-2 py-1 font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+            class="btn-plate"
             :disabled="busy || !gameInfo"
             :title="!gameInfo ? 'Set the game folder first' : ''"
             @click="deployEnabled"
@@ -274,10 +274,7 @@ async function deployEnabled() {
           <div class="min-w-0 flex-1" :class="{ 'opacity-50': !store.isEnabled(m.id) }">
             <div class="flex items-center gap-2">
               <span class="font-medium text-zinc-100">{{ m.name }}</span>
-              <span
-                class="rounded-full px-2 py-0.5 text-[11px]"
-                :class="asiStatus(m).cls"
-              >
+              <span class="stamp" :class="asiStatus(m).cls">
                 {{ asiStatus(m).label }}
               </span>
             </div>
@@ -302,7 +299,7 @@ async function deployEnabled() {
           <!-- Deployed: offer redeploy + undeploy. Otherwise: deploy. -->
           <template v-if="store.isAsiDeployed(m)">
             <button
-              class="rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+              class="btn-outline"
               :disabled="busy || !gameInfo || !store.isEnabled(m.id)"
               title="Copy the staged plugin over the deployed one again"
               @click="deploy(m)"
@@ -320,7 +317,7 @@ async function deployEnabled() {
           </template>
           <button
             v-else
-            class="rounded-md bg-emerald-600/90 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+            class="btn-plate"
             :disabled="busy || !gameInfo || !store.isEnabled(m.id)"
             :title="!gameInfo ? 'Set the game folder first' : !store.isEnabled(m.id) ? 'Enable it first' : ''"
             @click="deploy(m)"
@@ -340,7 +337,7 @@ async function deployEnabled() {
 
     <!-- WAD-asset mods -->
     <section v-if="mods.length" class="mt-8">
-      <h3 class="text-sm font-medium text-zinc-300">WAD-Asset Mods</h3>
+      <h3 class="plate-label">WAD-Asset Mods</h3>
       <p v-if="mods.length > 1" class="mt-1 text-xs text-zinc-500">
         Load order — the <span class="text-zinc-300">top</span> mod wins
         conflicts. Reorder with the arrows.
@@ -413,7 +410,7 @@ async function deployEnabled() {
     <!-- Empty -->
     <div
       v-if="!mods.length && !asiMods.length && !(gameInfo && gameInfo.deployed_asi.length)"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center"
+      class="empty-plate mt-10"
     >
       <p class="text-zinc-400">No mods yet.</p>
       <p class="mt-1 text-sm text-zinc-600">

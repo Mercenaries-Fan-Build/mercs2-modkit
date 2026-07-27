@@ -231,7 +231,7 @@ function verdictTone(kind: string): string {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Diagnostics</h2>
+      <h2 class="plate-title text-xl">Diagnostics</h2>
       <p class="text-sm text-zinc-500">
         Check your install is intact and analyze
         <code class="text-zinc-400">pmc_blackbox.log</code> to see how far the
@@ -241,7 +241,7 @@ function verdictTone(kind: string): string {
 
     <!-- Verify game files -->
     <section class="mt-5 rounded-xl border border-zinc-800 p-5">
-      <h3 class="font-medium text-zinc-100">Verify game files</h3>
+      <h3 class="plate-title text-sm">Verify game files</h3>
       <p class="mt-1 text-sm text-zinc-400">
         Hash every file in your install and compare it to a known-good baseline —
         catches a partial extraction or a damaged copy (e.g. a missing
@@ -251,7 +251,7 @@ function verdictTone(kind: string): string {
 
       <div class="mt-4 flex flex-wrap items-center gap-2">
         <button
-          class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate"
           :disabled="!gameInfo || verifying || generating"
           @click="runVerify(false)"
         >
@@ -259,7 +259,7 @@ function verdictTone(kind: string): string {
           {{ verifying ? "Verifying…" : "Verify game files" }}
         </button>
         <button
-          class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          class="btn-outline"
           :disabled="!gameInfo || verifying || generating"
           @click="pickAndVerify"
         >
@@ -306,7 +306,7 @@ function verdictTone(kind: string): string {
         </div>
 
         <div v-if="verifyReport.missing.length" class="mt-3">
-          <h4 class="text-sm font-medium text-red-300">
+          <h4 class="text-xs font-semibold uppercase tracking-[0.22em] text-red-300">
             Missing files ({{ verifyReport.missing.length }})
           </h4>
           <p class="mt-1 text-xs text-zinc-500">
@@ -321,7 +321,7 @@ function verdictTone(kind: string): string {
         </div>
 
         <div v-if="verifyReport.corrupt.length" class="mt-3">
-          <h4 class="text-sm font-medium text-amber-300">
+          <h4 class="text-xs font-semibold uppercase tracking-[0.22em] text-amber-300">
             Corrupt / changed ({{ verifyReport.corrupt.length }})
           </h4>
           <ul
@@ -379,7 +379,7 @@ function verdictTone(kind: string): string {
         </div>
 
         <div v-if="verifyReport.exes.length" class="mt-3">
-          <h4 class="text-sm font-medium text-zinc-300">Executables</h4>
+          <h4 class="plate-label">Executables</h4>
           <ul class="mt-2 space-y-2 text-xs">
             <li v-for="e in verifyReport.exes" :key="e.file">
               <p
@@ -425,7 +425,7 @@ function verdictTone(kind: string): string {
         v-if="isMaintainerBuild"
         class="mt-5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-4"
       >
-        <h4 class="text-sm font-medium text-zinc-300">
+        <h4 class="plate-label">
           Reference manifest (maintainer)
         </h4>
         <p class="mt-1 text-xs text-zinc-500">
@@ -440,7 +440,7 @@ function verdictTone(kind: string): string {
         </p>
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <button
-            class="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            class="btn-outline"
             :disabled="!gameInfo || verifying || generating"
             @click="generate"
           >
@@ -449,7 +449,7 @@ function verdictTone(kind: string): string {
           </button>
           <button
             v-if="localManifest"
-            class="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            class="btn-outline"
             :disabled="verifying || generating"
             @click="runVerify(true)"
           >
@@ -478,7 +478,7 @@ function verdictTone(kind: string): string {
 
     <!-- Build debug bundle -->
     <section class="mt-5 rounded-xl border border-zinc-800 p-5">
-      <h3 class="font-medium text-zinc-100">Build debug bundle</h3>
+      <h3 class="plate-title text-sm">Build debug bundle</h3>
       <p class="mt-1 text-sm text-zinc-400">
         Package everything a maintainer needs to diagnose a problem into one
         dated <code class="text-zinc-300">.zip</code>: your game
@@ -489,7 +489,7 @@ function verdictTone(kind: string): string {
 
       <div class="mt-4 flex flex-wrap items-center gap-2">
         <button
-          class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate"
           :disabled="!gameInfo || building"
           @click="buildDebugBundle"
         >
@@ -539,7 +539,7 @@ function verdictTone(kind: string): string {
 
     <hr class="mt-6 border-zinc-800" />
 
-    <h3 class="mt-6 font-medium text-zinc-100">Crash log analysis</h3>
+    <h3 class="plate-title mt-6 text-sm">Crash log analysis</h3>
     <p class="text-sm text-zinc-500">
       Analyze <code class="text-zinc-400">pmc_blackbox.log</code> to see how far
       the world-load got and classify the end-state.
@@ -553,16 +553,16 @@ function verdictTone(kind: string): string {
         :placeholder="
           gameInfo ? 'No pmc_blackbox.log found — browse for one' : 'Browse for a log…'
         "
-        class="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+        class="field flex-1"
       />
       <button
-        class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+        class="btn-outline"
         @click="pickLog"
       >
         Browse
       </button>
       <button
-        class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+        class="btn-plate"
         :disabled="busy || !logPath"
         @click="analyze"
       >
@@ -609,7 +609,7 @@ function verdictTone(kind: string): string {
         v-if="report.crash"
         class="mt-4 rounded-xl border border-red-500/20 bg-red-500/5 p-4"
       >
-        <h3 class="text-sm font-medium text-red-300">Crash block</h3>
+        <h3 class="text-xs font-semibold uppercase tracking-[0.22em] text-red-300">Crash block</h3>
         <p class="mt-1 text-xs text-zinc-400">
           {{ report.crash.code }} @ {{ hex(report.crash.eip) }}
           <span v-if="report.crash.eip_label"> · {{ report.crash.eip_label }}</span>
@@ -623,7 +623,7 @@ function verdictTone(kind: string): string {
 
       <!-- Last activity / tail -->
       <section class="mt-4 rounded-xl border border-zinc-800 p-4">
-        <h3 class="text-sm font-medium text-zinc-300">Last activity</h3>
+        <h3 class="plate-label">Last activity</h3>
         <p class="mt-1 text-xs text-zinc-500">
           last progress @ {{ report.last_progress_ts }} —
           {{ report.last_progress_msg || "—" }}
@@ -635,7 +635,7 @@ function verdictTone(kind: string): string {
 
       <!-- Build attribution -->
       <section v-if="report.build.length" class="mt-4 rounded-xl border border-zinc-800 p-4">
-        <h3 class="text-sm font-medium text-zinc-300">Build attribution</h3>
+        <h3 class="plate-label">Build attribution</h3>
         <ul class="mt-2 space-y-1 text-xs">
           <li v-for="b in report.build" :key="b.name" class="font-mono text-zinc-400">
             <span class="text-zinc-300">{{ b.kind }}</span> {{ b.name }} ·

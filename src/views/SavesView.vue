@@ -110,7 +110,7 @@ function reasonLabel(reason: string): string {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Save backups</h2>
+      <h2 class="plate-title text-xl">Save backups</h2>
       <p class="text-sm text-zinc-500">
         Mercenaries 2 constantly overwrites its autosave slot, so a crash or a
         misbehaving mod can wipe out a playthrough. Modkit snapshots your saves
@@ -129,11 +129,11 @@ function reasonLabel(reason: string): string {
     <!-- Current saves -->
     <section class="mt-5 rounded-xl border border-zinc-800 p-5">
       <div class="flex items-center justify-between gap-3">
-        <h3 class="font-medium text-zinc-100">Current saves</h3>
+        <h3 class="plate-title text-sm">Current saves</h3>
         <div class="flex items-center gap-2">
           <button
             v-if="savesInfo?.exists"
-            class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800"
+            class="btn-outline"
             @click="savesInfo?.dir && openPath(savesInfo.dir)"
           >
             Open folder
@@ -146,7 +146,7 @@ function reasonLabel(reason: string): string {
             Change folder…
           </button>
           <button
-            class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+            class="btn-plate"
             :disabled="savesBusy || !hasSaves"
             @click="backupNow"
           >
@@ -210,7 +210,7 @@ function reasonLabel(reason: string): string {
               {{ save.character || "—" }}
               <span
                 v-if="save.autosave"
-                class="ml-1.5 rounded-full border border-amber-600/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300"
+                class="stamp ml-1.5 text-amber-300"
                 title="The game's rolling autosave slot — overwritten constantly"
               >
                 autosave
@@ -229,7 +229,7 @@ function reasonLabel(reason: string): string {
 
     <!-- Stored snapshots -->
     <section class="mt-5 rounded-xl border border-zinc-800 p-5">
-      <h3 class="font-medium text-zinc-100">Backups</h3>
+      <h3 class="plate-title text-sm">Backups</h3>
       <p class="mt-1 text-sm text-zinc-400">
         Newest first. Restoring copies a snapshot back over the SaveGames
         folder — the current saves are snapshotted first, so a restore is
@@ -271,7 +271,7 @@ function reasonLabel(reason: string): string {
             </td>
             <td class="py-2 text-right whitespace-nowrap">
               <button
-                class="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                class="btn-outline"
                 :disabled="savesBusy || gameRunning"
                 :title="
                   gameRunning

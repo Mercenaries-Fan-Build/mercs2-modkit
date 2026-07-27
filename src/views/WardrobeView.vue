@@ -60,7 +60,8 @@ function add(m: WardrobeModel) {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Wardrobe</h2>
+      <h2 class="plate-title text-xl">Wardrobe</h2>
+      <hr class="plate-rule my-3" />
       <p class="text-sm text-zinc-500">
         Wear any character the game already has. Pick a hero, pick a look — it shows up in
         the wardrobe in the PMC.
@@ -69,7 +70,7 @@ function add(m: WardrobeModel) {
 
     <div
       v-if="!gameInfo"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate mt-10"
     >
       Choose your game folder first.
     </div>
@@ -82,35 +83,57 @@ function add(m: WardrobeModel) {
       >
         These outfits use models already shipped in your copy of the game — no new files are
         added, so there's nothing to go wrong.
-        <strong class="text-zinc-300">{{ wardrobeModels.length }} skins found.</strong>
+        <strong class="text-zinc-300"
+          ><span class="serial text-emerald-400">{{ wardrobeModels.length }}</span> skins
+          found.</strong
+        >
         They're not a hand-written list: modkit checks which models are built on the
         <em>same skeleton</em> as the three player characters, which is what lets them play
         the same animations.
       </p>
 
-      <!-- Hero -->
+      <!-- Hero. The game's own shell renders these three as engraved portraits
+           in oval cartouches — one .bik each — so the picker borrows that
+           framing. The portraits themselves stay in the user's install: the
+           game files are copyrighted, so nothing is shipped with modkit. -->
       <section class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">Character</h3>
-        <div class="mt-2 flex gap-2">
+        <h3 class="plate-label">Character</h3>
+        <div class="mt-3 flex gap-5">
           <button
             v-for="h in HEROES"
             :key="h.key"
-            class="rounded-lg border px-4 py-2 text-sm"
-            :class="
-              hero === h.key
-                ? 'border-emerald-500 bg-emerald-500/15 text-emerald-300'
-                : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
-            "
+            class="group flex flex-col items-center gap-2"
+            :aria-pressed="hero === h.key"
             @click="hero = h.key"
           >
-            {{ h.label }}
+            <span
+              class="cartouche guilloche flex h-[104px] w-[84px] items-center justify-center bg-zinc-900 transition"
+              :class="
+                hero === h.key
+                  ? 'ring-1 ring-emerald-400/70'
+                  : 'opacity-55 group-hover:opacity-90'
+              "
+            >
+              <span
+                class="text-2xl font-bold italic"
+                :class="hero === h.key ? 'text-emerald-300' : 'text-zinc-500'"
+              >
+                {{ h.label[0] }}
+              </span>
+            </span>
+            <span
+              class="text-[10px] font-semibold uppercase tracking-[0.18em]"
+              :class="hero === h.key ? 'text-brass-400' : 'text-zinc-500'"
+            >
+              {{ h.label }}
+            </span>
           </button>
         </div>
       </section>
 
       <!-- Queued outfits for this hero -->
       <section v-if="forHero.length" class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">
+        <h3 class="plate-label">
           Added for {{ HEROES.find((h) => h.key === hero)?.label }}
         </h3>
         <ul class="mt-2 space-y-2">
@@ -124,7 +147,7 @@ function add(m: WardrobeModel) {
               <p class="truncate font-mono text-xs text-emerald-400/60">{{ o.model }}</p>
             </div>
             <button
-              class="rounded-lg border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              class="btn-outline"
               @click="store.removeWardrobeOutfit(o.hero, o.model)"
             >
               Remove
@@ -135,11 +158,11 @@ function add(m: WardrobeModel) {
 
       <!-- Picker -->
       <section class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">Available looks</h3>
+        <h3 class="plate-label">Available looks</h3>
         <input
           v-model="search"
           placeholder="Search…"
-          class="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm"
+          class="field mt-2 w-full"
         />
 
         <div class="mt-2 flex flex-wrap gap-3 text-xs text-zinc-400">
@@ -152,7 +175,10 @@ function add(m: WardrobeModel) {
             Only skins built like
             {{ HEROES.find((h) => h.key === hero)?.label }}
           </label>
-          <span class="ml-auto text-zinc-600">{{ filtered.length }} shown</span>
+          <span class="ml-auto"
+            ><span class="serial text-emerald-400">{{ filtered.length }}</span>
+            <span class="text-zinc-600"> shown</span></span
+          >
         </div>
 
         <ul class="mt-3 space-y-2">
@@ -166,7 +192,7 @@ function add(m: WardrobeModel) {
                 {{ m.label }}
                 <span
                   v-if="m.in_base_wardrobe"
-                  class="ml-1 rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500"
+                  class="stamp ml-1 text-zinc-600"
                   title="Already in your wardrobe — adding it changes nothing."
                 >
                   already available
@@ -186,21 +212,17 @@ function add(m: WardrobeModel) {
                   {{ Math.round(m.rig_match * 100) }}% skeleton
                 </span>
                 <span class="text-zinc-600">built like {{ m.closest_hero }}</span>
-                <span class="text-zinc-700">{{ m.triangles.toLocaleString() }} tris</span>
+                <span class="serial text-zinc-700">{{ m.triangles.toLocaleString() }} tris</span>
               </p>
             </div>
             <button
-              class="shrink-0 rounded-lg px-3 py-1 text-xs"
-              :class="
-                isAdded(m.model)
-                  ? 'cursor-default border border-zinc-800 text-zinc-600'
-                  : 'bg-emerald-600 text-white hover:bg-emerald-500'
-              "
-              :disabled="isAdded(m.model)"
-              @click="add(m)"
+              v-if="isAdded(m.model)"
+              class="stamp shrink-0 cursor-default text-zinc-600"
+              disabled
             >
-              {{ isAdded(m.model) ? "Added" : "Add" }}
+              Added
             </button>
+            <button v-else class="btn-plate shrink-0" @click="add(m)">Add</button>
           </li>
         </ul>
 
