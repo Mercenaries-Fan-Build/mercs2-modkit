@@ -18,7 +18,8 @@
 //! actionable error: unprivileged user namespaces must be allowed (container), and
 //! the 32-bit NVIDIA driver libs must be installed and match the running module
 //! (else 32-bit DXVK only sees llvmpipe and renders in software). On Windows/macOS
-//! we spawn the exe directly.
+//! we spawn the exe directly — on Windows additionally declining UAC elevation,
+//! which the game never asks for but Windows can impose on it (see `build_command`).
 //!
 //! When the modkit itself runs as a Flatpak (e.g. on a Steam Deck), Proton can't
 //! drive its pressure-vessel/bwrap container from *inside* our sandbox, so the
@@ -173,7 +174,72 @@ fn build_command(
     // Gate pmc_blackbox's verbose log hooks; set explicitly so an inherited
     // value can't silently turn it back on.
     cmd.env("PMC_VERBOSE_LOG", if verbose { "1" } else { "0" });
+    // Every known Mercenaries2 exe — retail, cracked, and apply_crack's output —
+    // carries a manifest that declares only a VC80 CRT dependency, with no
+    // `requestedExecutionLevel`. That is exactly the eligibility condition for UAC
+    // installer detection (32-bit + no declared level + interactive standard user),
+    // so Windows decides about elevation *for* the game: a stray RUNASADMIN compat
+    // layer, a shim-database entry, or an inherited __COMPAT_LAYER can all mark it
+    // as needing admin. `Command::spawn` is CreateProcessW, which never elevates —
+    // it just fails with ERROR_ELEVATION_REQUIRED (os error 740) and the user sees
+    // "Failed to launch game". Pin the layer to RunAsInvoker to decline the
+    // elevation instead of prompting for admin the game doesn't need; it overrides
+    // all three sources, and there is no manifested requireAdministrator that could
+    // outrank it. Set explicitly so an inherited value can't reintroduce the
+    // problem.
+    #[cfg(target_os = "windows")]
+    cmd.env("__COMPAT_LAYER", "RunAsInvoker");
     Ok(cmd)
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    /// Look up a var on a built `Command` (`None` = not set by us).
+    fn env_of<'a>(cmd: &'a Command, key: &str) -> Option<&'a OsStr> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == OsStr::new(key))
+            .and_then(|(_, v)| v)
+    }
+
+    fn build(verbose: bool) -> Command {
+        build_command(
+            Path::new("/games/Mercs2"),
+            Path::new("/games/Mercs2/Mercenaries2.cracked.exe"),
+            &LaunchOverrides::default(),
+            verbose,
+        )
+        .expect("direct launch never fails to build")
+    }
+
+    #[test]
+    fn runs_the_exe_from_the_install_dir() {
+        let cmd = build(false);
+        assert_eq!(
+            cmd.get_program(),
+            OsStr::new("/games/Mercs2/Mercenaries2.cracked.exe")
+        );
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/games/Mercs2")));
+    }
+
+    #[test]
+    fn verbose_log_is_pinned_either_way() {
+        assert_eq!(env_of(&build(false), "PMC_VERBOSE_LOG"), Some(OsStr::new("0")));
+        assert_eq!(env_of(&build(true), "PMC_VERBOSE_LOG"), Some(OsStr::new("1")));
+    }
+
+    /// Regression: without this the game can fail to launch with os error 740 on a
+    /// machine that has a RUNASADMIN compat layer or shim entry for the exe.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn declines_uac_elevation() {
+        assert_eq!(
+            env_of(&build(false), "__COMPAT_LAYER"),
+            Some(OsStr::new("RunAsInvoker"))
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------
