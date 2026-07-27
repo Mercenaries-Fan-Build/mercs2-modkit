@@ -115,7 +115,7 @@ async function runCrack() {
 
       <template v-if="!store.gameFullySetUp || showAnyway">
       <!-- Step 1: pmc_bb.dll -->
-      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
             <h3 class="plate-title text-sm">
@@ -167,7 +167,7 @@ async function runCrack() {
       </section>
 
       <!-- Step 2: crack / update -->
-      <section class="mt-4 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
         <h3 class="plate-title text-sm">2 · Crack / update the exe</h3>
         <p class="mt-1 text-sm text-zinc-400">
           Applies the SecuROM bypass (and optionally updates v1.0 → v1.1),

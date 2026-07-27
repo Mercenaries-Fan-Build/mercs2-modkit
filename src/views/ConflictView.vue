@@ -66,7 +66,7 @@ function choose(c: AssetConflict, key: string) {
       <div
         v-for="c in conflictGraph.conflicts"
         :key="c.asset_hash"
-        class="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
+        class="guilloche rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
       >
         <div class="mb-3 flex items-center justify-between">
           <div>

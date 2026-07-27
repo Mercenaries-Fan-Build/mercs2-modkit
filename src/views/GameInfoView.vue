@@ -186,7 +186,7 @@ async function normalizeRegion() {
       </div>
 
       <!-- Game details -->
-      <section class="mt-4 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
         <h3 class="plate-title text-sm">Game</h3>
         <dl class="mt-3 space-y-2 text-sm">
           <div class="flex items-center gap-3">
@@ -258,7 +258,7 @@ async function normalizeRegion() {
       </section>
 
       <!-- pmc_bb.dll -->
-      <section class="mt-4 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
             <h3 class="plate-title text-sm">pmc_bb.dll (ASI loader)</h3>

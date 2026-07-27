@@ -179,7 +179,7 @@ async function deployEnabled() {
         <li
           v-for="d in gameInfo.deployed_asi"
           :key="d.abs_path"
-          class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-2.5"
+          class="engraved flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-2.5"
         >
           <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400" />
           <div class="min-w-0 flex-1">
@@ -256,7 +256,7 @@ async function deployEnabled() {
         <li
           v-for="m in asiMods"
           :key="m.id"
-          class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
+          class="engraved flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
         >
           <Switch
             :model-value="store.isEnabled(m.id)"
@@ -347,7 +347,7 @@ async function deployEnabled() {
         <li
           v-for="(m, i) in mods"
           :key="m.id"
-          class="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
+          class="engraved flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
         >
           <div class="flex flex-col">
             <button

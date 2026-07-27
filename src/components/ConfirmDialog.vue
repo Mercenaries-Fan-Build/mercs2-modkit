@@ -20,7 +20,7 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>();
     <div class="fixed inset-0 bg-black/60" aria-hidden="true" />
     <div class="fixed inset-0 flex items-center justify-center p-4">
       <DialogPanel
-        class="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl"
+        class="guilloche w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl"
       >
         <DialogTitle class="text-base font-semibold text-zinc-100">
           {{ title }}

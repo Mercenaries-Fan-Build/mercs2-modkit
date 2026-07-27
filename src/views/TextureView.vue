@@ -194,7 +194,7 @@ function fileName(p: string): string {
       </section>
 
       <!-- Search + filters -->
-      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <input
           v-model="search"
           placeholder="Search — try “chris”, “tank”, or “boss head”…"

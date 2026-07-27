@@ -127,7 +127,7 @@ function reasonLabel(reason: string): string {
     </p>
 
     <!-- Current saves -->
-    <section class="mt-5 rounded-xl border border-zinc-800 p-5">
+    <section class="guilloche mt-5 rounded-xl border border-zinc-800 p-5">
       <div class="flex items-center justify-between gap-3">
         <h3 class="plate-title text-sm">Current saves</h3>
         <div class="flex items-center gap-2">
@@ -228,7 +228,7 @@ function reasonLabel(reason: string): string {
     </section>
 
     <!-- Stored snapshots -->
-    <section class="mt-5 rounded-xl border border-zinc-800 p-5">
+    <section class="guilloche mt-5 rounded-xl border border-zinc-800 p-5">
       <h3 class="plate-title text-sm">Backups</h3>
       <p class="mt-1 text-sm text-zinc-400">
         Newest first. Restoring copies a snapshot back over the SaveGames

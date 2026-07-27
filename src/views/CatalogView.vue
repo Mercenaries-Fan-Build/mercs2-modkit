@@ -159,7 +159,7 @@ async function update(item: CatalogMod) {
         <li
           v-for="src in customSources"
           :key="src.repository"
-          class="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
+          class="engraved flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2"
         >
           <div class="min-w-0">
             <p class="truncate text-xs font-medium text-zinc-300">{{ src.name }}</p>
@@ -235,7 +235,7 @@ async function update(item: CatalogMod) {
       <li
         v-for="item in catalog"
         :key="`${item.repository}#${item.slug}`"
-        class="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
+        class="guilloche rounded-xl border border-zinc-800 bg-zinc-900/50 p-4"
       >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">

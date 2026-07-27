@@ -144,7 +144,7 @@ function outcomeText(o: GroupOutcome): string {
       <!-- Wardrobe outfits and texture swaps build into the same WAD as the mods. -->
       <div
         v-if="wardrobe.length || textures.length"
-        class="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm text-zinc-400"
+        class="engraved mt-4 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm text-zinc-400"
       >
         <span v-if="wardrobe.length">
           {{ wardrobe.length }} wardrobe outfit{{ wardrobe.length === 1 ? "" : "s" }}
@@ -157,7 +157,7 @@ function outcomeText(o: GroupOutcome): string {
       </div>
       <!-- Imported community WADs. The game loads only one patch WAD, so installing two
            prebuilt mods has never been possible — modkit merges them into one. -->
-      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-center justify-between">
           <div>
             <h3 class="plate-label">Mod WADs</h3>
@@ -173,7 +173,7 @@ function outcomeText(o: GroupOutcome): string {
           <li
             v-for="(p, i) in prebuilt"
             :key="p.id"
-            class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+            class="engraved rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
           >
             <div class="flex items-center gap-3">
               <span class="w-6 text-right text-xs text-zinc-600">{{ i + 1 }}</span>
@@ -217,7 +217,7 @@ function outcomeText(o: GroupOutcome): string {
       <!-- Load order. Later mods override earlier ones — same rule as the engine. -->
       <section
         v-if="store.enabledMods.length"
-        class="mt-6 rounded-xl border border-zinc-800 p-5"
+        class="guilloche mt-6 rounded-xl border border-zinc-800 p-5"
       >
         <h3 class="plate-label">Load order</h3>
         <p class="mt-1 text-xs text-zinc-500">
@@ -229,7 +229,7 @@ function outcomeText(o: GroupOutcome): string {
           <li
             v-for="(m, i) in store.enabledMods"
             :key="m.id"
-            class="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+            class="engraved flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
           >
             <span class="w-6 text-right text-xs text-zinc-600">{{ i + 1 }}</span>
             <div class="min-w-0 flex-1">
@@ -296,7 +296,7 @@ function outcomeText(o: GroupOutcome): string {
       <!-- What the load order actually did. -->
       <section v-if="buildResult" class="mt-6">
         <h3 class="plate-label mb-2">Result</h3>
-        <div class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm">
+        <div class="engraved rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm">
           <p class="font-mono text-xs break-all text-zinc-200">{{ buildResult.path }}</p>
           <p class="mt-1 text-xs text-zinc-500">
             {{ buildResult.block_count }} block{{ buildResult.block_count === 1 ? "" : "s" }}
@@ -351,7 +351,7 @@ function outcomeText(o: GroupOutcome): string {
       </section>
 
       <!-- Install. Close the game first: it holds the WAD open. -->
-      <section v-if="buildResult" class="mt-6 rounded-xl border border-zinc-800 p-5">
+      <section v-if="buildResult" class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <h3 class="plate-label">Install</h3>
         <p class="mt-1 text-xs text-zinc-500">
           Copies the WAD into
@@ -376,7 +376,7 @@ function outcomeText(o: GroupOutcome): string {
       </section>
 
       <!-- Undo. Every hazard a bad WAD can cause is recoverable from here. -->
-      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <h3 class="plate-label">Undo</h3>
         <p class="mt-1 text-xs text-zinc-500">
           Restore a previous patch, or remove it entirely to go back to the unmodded game.
@@ -393,7 +393,7 @@ function outcomeText(o: GroupOutcome): string {
           <li
             v-for="b in wadBackups"
             :key="b.file"
-            class="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+            class="engraved flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
           >
             <div class="min-w-0 flex-1">
               <p class="truncate font-mono text-xs text-zinc-300">

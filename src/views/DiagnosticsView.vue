@@ -240,7 +240,7 @@ function verdictTone(kind: string): string {
     </header>
 
     <!-- Verify game files -->
-    <section class="mt-5 rounded-xl border border-zinc-800 p-5">
+    <section class="guilloche mt-5 rounded-xl border border-zinc-800 p-5">
       <h3 class="plate-title text-sm">Verify game files</h3>
       <p class="mt-1 text-sm text-zinc-400">
         Hash every file in your install and compare it to a known-good baseline —
@@ -423,7 +423,7 @@ function verdictTone(kind: string): string {
       <!-- Maintainer: generate a reference manifest (local/dev builds only) -->
       <div
         v-if="isMaintainerBuild"
-        class="mt-5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-4"
+        class="engraved mt-5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-4"
       >
         <h4 class="plate-label">
           Reference manifest (maintainer)
@@ -477,7 +477,7 @@ function verdictTone(kind: string): string {
     </section>
 
     <!-- Build debug bundle -->
-    <section class="mt-5 rounded-xl border border-zinc-800 p-5">
+    <section class="guilloche mt-5 rounded-xl border border-zinc-800 p-5">
       <h3 class="plate-title text-sm">Build debug bundle</h3>
       <p class="mt-1 text-sm text-zinc-400">
         Package everything a maintainer needs to diagnose a problem into one
@@ -622,7 +622,7 @@ function verdictTone(kind: string): string {
       </section>
 
       <!-- Last activity / tail -->
-      <section class="mt-4 rounded-xl border border-zinc-800 p-4">
+      <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-4">
         <h3 class="plate-label">Last activity</h3>
         <p class="mt-1 text-xs text-zinc-500">
           last progress @ {{ report.last_progress_ts }} —
@@ -634,7 +634,7 @@ function verdictTone(kind: string): string {
       </section>
 
       <!-- Build attribution -->
-      <section v-if="report.build.length" class="mt-4 rounded-xl border border-zinc-800 p-4">
+      <section v-if="report.build.length" class="guilloche mt-4 rounded-xl border border-zinc-800 p-4">
         <h3 class="plate-label">Build attribution</h3>
         <ul class="mt-2 space-y-1 text-xs">
           <li v-for="b in report.build" :key="b.name" class="font-mono text-zinc-400">

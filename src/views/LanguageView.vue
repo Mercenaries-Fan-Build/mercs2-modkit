@@ -164,7 +164,7 @@ watch(
             <li
               v-for="l in present"
               :key="l.language"
-              class="flex items-center justify-between gap-4 rounded-xl border border-zinc-800 p-4"
+              class="guilloche flex items-center justify-between gap-4 rounded-xl border border-zinc-800 p-4"
             >
               <div class="min-w-0">
                 <p class="font-medium text-zinc-100">

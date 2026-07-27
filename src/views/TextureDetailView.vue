@@ -333,7 +333,7 @@ function fileName(p: string): string {
       </header>
 
       <!-- Replace -->
-      <section class="mt-6 rounded-xl border border-zinc-800 p-5">
+      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <div
           v-if="queued"
           class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300"
