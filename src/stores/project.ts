@@ -126,6 +126,8 @@ interface ProjectState {
   // Base game
   gamePath: string | null;
   gameInfo: GameInfo | null;
+  /** The install's own `mercs2.ico`, trimmed, as a PNG data URL. */
+  gameIcon: string | null;
   /** Whether the game instance modkit launched is currently running. */
   gameRunning: boolean;
   // WAD-asset mods — array order is the load order (top wins conflicts).
@@ -187,6 +189,7 @@ export const useProjectStore = defineStore("project", {
   state: (): ProjectState => ({
     gamePath: null,
     gameInfo: null,
+    gameIcon: null,
     gameRunning: false,
     mods: [],
     asiMods: [],
@@ -887,6 +890,25 @@ export const useProjectStore = defineStore("project", {
       await this.refreshGame();
     },
 
+    /**
+     * The game's own icon, for the header badge. Read from the player's install
+     * rather than shipped — the game files are copyrighted. A missing icon is
+     * not an error; the badge just keeps its text.
+     */
+    async loadGameIcon() {
+      if (!this.gamePath) {
+        this.gameIcon = null;
+        return;
+      }
+      try {
+        this.gameIcon = await invoke<string | null>("game_icon", {
+          gamePath: this.gamePath,
+        });
+      } catch {
+        this.gameIcon = null;
+      }
+    },
+
     async refreshGame() {
       if (!this.gamePath) return;
       this.error = null;
@@ -903,6 +925,7 @@ export const useProjectStore = defineStore("project", {
       // (non-fatal if either fails).
       void this.checkVcRedist();
       void this.checkRegion();
+      void this.loadGameIcon();
     },
 
     /** Check whether the host has the 32-bit VC++ 2008 runtime the game needs. */
