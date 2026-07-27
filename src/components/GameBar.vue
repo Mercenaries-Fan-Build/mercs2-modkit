@@ -70,7 +70,7 @@ function versionTone(v: string): string {
 
 <template>
   <header
-    class="engraved flex items-center gap-4 border-b border-zinc-800 bg-zinc-900/80 px-6 py-3 backdrop-blur"
+    class="shell-header engraved flex items-center gap-4 border-b border-zinc-800 bg-zinc-900/80 px-6 py-3 backdrop-blur"
   >
     <!-- No game set -->
     <template v-if="!gameInfo">

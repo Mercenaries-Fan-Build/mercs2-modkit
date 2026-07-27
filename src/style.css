@@ -268,6 +268,21 @@ body {
    restating a dozen utilities each time.
 --------------------------------------------------------------------------- */
 
+/* The sidebar's branding block and the game bar are the app's two top-left
+   panels, and their bottom borders read as one continuous rule across the
+   window — but they live in different flex columns, so nothing makes their
+   heights agree on its own. Left to their content they don't: branding is
+   73px, the game bar 81px with an install loaded and ~56px without, so the
+   rule visibly steps at the sidebar edge.
+   Both opt into this one min-height instead. It clears the tallest normal
+   state, so the two rules line up in every state rather than only by luck.
+   Kept as min- rather than a fixed height so a wrapped chip row grows the bar
+   instead of clipping it. */
+.shell-header {
+  min-height: 5.25rem;
+  box-sizing: border-box;
+}
+
 /* A view's main heading. Engraved caption lettering, with the hairline rule
    that runs under a denomination. */
 .plate-title {

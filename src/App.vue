@@ -42,7 +42,9 @@ onMounted(() => {
       <!-- The spade-and-skull is drawn (see ModkitMark), not lifted from the
            install: the shipped art is either 60x18 of real pixels or locked
            inside a Bink video, and neither enlarges cleanly here. -->
-      <div class="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+      <div
+        class="shell-header flex items-center gap-3 px-5 py-4 border-b border-zinc-800"
+      >
         <ModkitMark class="h-10 w-10 shrink-0 text-brass-400" />
         <h1>
           <span
