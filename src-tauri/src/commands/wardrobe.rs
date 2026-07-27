@@ -221,7 +221,10 @@ fn vz_wad(game_path: &str) -> Result<PathBuf, String> {
 /// user's own WAD, so a bad pick stays unrepresentable — and DLC skins appear automatically.
 ///
 /// The curated names below are used only to give a nicer label than the raw model name.
-#[tauri::command]
+/// `(async)` as with [`crate::commands::model_view::model_geometry`] — a sync
+/// `#[tauri::command]` runs on the UI thread, and rig-matching every candidate skin against
+/// the three heroes walks a lot of the WAD.
+#[tauri::command(async)]
 pub fn list_wardrobe_models(game_path: String) -> Result<Vec<WardrobeModel>, String> {
     let labels: std::collections::HashMap<&str, &str> = CANDIDATES.iter().copied().collect();
     let base = base_wardrobe_models();

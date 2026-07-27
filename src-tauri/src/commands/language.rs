@@ -139,7 +139,7 @@ fn locate(dir: Option<&Path>, name: &str) -> (Option<PathBuf>, u64) {
 }
 
 /// Scan the install and report which languages' content is present.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_languages(game_root: String) -> Result<LanguageStatus, String> {
     let root = PathBuf::from(&game_root);
     if !root.is_dir() {

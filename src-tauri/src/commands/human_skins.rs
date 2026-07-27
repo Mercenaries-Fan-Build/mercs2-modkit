@@ -130,7 +130,7 @@ fn bones_of(f: &mut std::fs::File, archive: &FfcsArchive, hash: u32) -> HashSet<
 /// shows the exact percentage and lets the user judge. A partial rig isn't fatal: the engine
 /// plays the hero's animation tracks, and tracks addressed to a bone the model lacks simply
 /// do nothing. It's the ones at 100% that are certain.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
     let wad = vz_wad(&game_path)?;
     let mut f = std::fs::File::open(&wad).map_err(|e| format!("open vz.wad: {e}"))?;

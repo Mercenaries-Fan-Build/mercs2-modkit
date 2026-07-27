@@ -201,7 +201,7 @@ pub struct ModelVariant {
 ///
 /// Cheap enough to call on page load: it decompresses the container once and rebuilds the
 /// index/group tables per bit (a few ms), with no texture decode.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_variants(
     game_path: String,
     model: String,
@@ -288,7 +288,7 @@ pub struct TexturePart {
 ///
 /// Uses the cached usage index to know which models to open, so it only decodes the handful
 /// that genuinely paint it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn texture_parts(game_path: String, texture: String) -> Result<Vec<TexturePart>, String> {
     let wad = vz_wad(&game_path)?;
     let mut f = std::fs::File::open(&wad).map_err(|e| format!("open vz.wad: {e}"))?;
@@ -349,7 +349,11 @@ pub fn texture_parts(game_path: String, texture: String) -> Result<Vec<TexturePa
 ///
 /// `tier` forces a specific `SEGM` state bit (from [`model_variants`]); omit it to let
 /// [`build_best_tier`] choose one that shows the texture.
-#[tauri::command]
+/// `(async)` matters here: a plain `#[tauri::command]` on a sync fn runs on the main
+/// thread, which is the UI thread. This opens and indexes vz.wad — 2.5 GB — then
+/// decompresses a model container, so on the main thread it visibly freezes the window.
+/// The attribute moves it to a worker without changing the signature.
+#[tauri::command(async)]
 pub fn model_geometry(
     game_path: String,
     model: String,

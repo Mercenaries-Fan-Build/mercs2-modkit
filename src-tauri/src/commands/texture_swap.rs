@@ -246,7 +246,7 @@ fn category(name: &str) -> String {
 /// though it returns thousands of rows. Both primary and sub-entry rows are considered,
 /// because `extract_container` resolves either (a shared texture may only exist as a
 /// sub-entry of another asset's block).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_textures(game_path: String) -> Result<Vec<TextureEntry>, String> {
     let wad = vz_wad(&game_path)?;
     let mut f = std::fs::File::open(&wad).map_err(|e| format!("open vz.wad: {e}"))?;
@@ -292,7 +292,7 @@ pub fn list_textures(game_path: String) -> Result<Vec<TextureEntry>, String> {
 /// down). The big mips live in separate streaming blocks we don't read here. So the preview
 /// is the largest mip that is genuinely present, and `preview_width`/`preview_height` say
 /// how big that was — we never upscale a 32×32 stub and pretend it is the 512×512 texture.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn texture_previews(
     game_path: String,
     names: Vec<String>,
@@ -520,7 +520,9 @@ fn base_name(name: &str) -> &str {
 /// The "used by" relation does not exist in the WAD — it is inverted out of every model's
 /// MTRL slots (see [`crate::commands::texture_usage`]). The first call on an install builds
 /// that index (~10s in release); later calls read it from cache.
-#[tauri::command]
+/// `(async)` for the same reason as [`crate::commands::model_view::model_geometry`]: a sync
+/// `#[tauri::command]` runs on the UI thread, and this walks the WAD and decodes a texture.
+#[tauri::command(async)]
 pub fn texture_details(game_path: String, name: String) -> Result<TextureDetails, String> {
     let wad = vz_wad(&game_path)?;
     let Donor { container, hash, width, height, format, resident } = donor(&game_path, &name)?;
