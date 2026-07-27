@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "./stores/project";
 import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
+import ModkitMark from "./components/ModkitMark.vue";
 
 const store = useProjectStore();
 const { mods, asiMods, conflictCount, modkitUpdate, componentUpdates } =
@@ -38,9 +39,23 @@ onMounted(() => {
     <aside
       class="guilloche flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/60"
     >
-      <div class="px-5 py-4 border-b border-zinc-800">
-        <h1 class="plate-title text-base text-brass-400">mercs2 modkit</h1>
-        <p class="text-xs text-zinc-500">Mercenaries 2 mod manager</p>
+      <!-- The spade-and-skull is drawn (see ModkitMark), not lifted from the
+           install: the shipped art is either 60x18 of real pixels or locked
+           inside a Bink video, and neither enlarges cleanly here. -->
+      <div class="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+        <ModkitMark class="h-10 w-10 shrink-0 text-brass-400" />
+        <h1>
+          <span
+            class="block text-[9px] font-semibold uppercase tracking-[0.28em] text-brass-500"
+          >
+            Mercenaries 2
+          </span>
+          <span
+            class="mt-0.5 block text-[24px] font-extrabold leading-none tracking-[-0.02em] text-zinc-100"
+          >
+            MODKIT
+          </span>
+        </h1>
       </div>
 
       <nav class="flex-1 space-y-1 px-3 py-2 text-sm">
