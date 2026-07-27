@@ -88,73 +88,65 @@ function versionTone(v: string): string {
 
     <!-- Game detected -->
     <template v-else>
-      <div class="flex items-start gap-3">
-        <div
-          class="guilloche flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-brass-900 bg-zinc-950 text-[11px] font-bold tracking-widest text-brass-400"
-          title="Mercenaries 2"
-        >
-          M2
-        </div>
-        <div class="min-w-0">
-          <p class="plate-title text-xs text-zinc-100">Mercenaries 2</p>
-          <p class="font-mono text-[11px] text-zinc-500" :title="gamePath ?? ''">
-            {{ tail(gameInfo.root) }}
-          </p>
-          <!-- Status badges live under the folder path so they don't crowd the
-               launch controls; compact 10px chips that wrap as needed. -->
-          <div class="mt-1 flex flex-wrap items-center gap-1.5">
-            <span
-              class="stamp serial"
-              :class="versionTone(gameInfo.version)"
-            >
-              {{ gameInfo.version }}
-            </span>
-            <span
-              v-if="gameInfo.variant !== 'unknown'"
-              class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
-            >
-              {{ gameInfo.variant }}
-            </span>
-            <span
-              class="chip"
-              :class="gameInfo.has_pmc_bb ? 'chip-ok' : 'chip-off'"
-              title="pmc_bb.dll — our ASI loader + SecuROM spoof"
-            >
-              {{
-                gameInfo.has_pmc_bb
-                  ? "pmc_bb.dll ✓ (ASI loader)"
-                  : "pmc_bb.dll ✗ (ASI loader)"
-              }}
-            </span>
-            <span
-              v-if="
-                gameInfo.asi_loader_proxy &&
-                gameInfo.asi_loader_proxy !== 'pmc_bb.dll'
-              "
-              class="chip chip-off"
-              :title="`Alternate ASI loader proxy: ${gameInfo.asi_loader_proxy}`"
-            >
-              alt loader: {{ gameInfo.asi_loader_proxy }}
-            </span>
-            <span
-              v-if="gameInfo.deployed_asi.length"
-              class="rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300"
-              :title="gameInfo.deployed_asi.map((a) => a.rel_path).join('\n')"
-            >
-              {{ gameInfo.deployed_asi.length }} ASI plugin{{
-                gameInfo.deployed_asi.length === 1 ? "" : "s"
-              }}
-            </span>
-            <span
-              v-if="gameInfo.deployed_patches.length"
-              class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[10px] text-indigo-300"
-              :title="gameInfo.deployed_patches.join('\n')"
-            >
-              {{ gameInfo.deployed_patches.length }} patch WAD{{
-                gameInfo.deployed_patches.length === 1 ? "" : "s"
-              }} deployed
-            </span>
-          </div>
+      <div class="min-w-0">
+        <p class="plate-title text-xs text-zinc-100">Mercenaries 2</p>
+        <p class="font-mono text-[11px] text-zinc-500" :title="gamePath ?? ''">
+          {{ tail(gameInfo.root) }}
+        </p>
+        <!-- Status badges live under the folder path so they don't crowd the
+             launch controls; compact 10px chips that wrap as needed. -->
+        <div class="mt-1 flex flex-wrap items-center gap-1.5">
+          <span
+            class="stamp serial"
+            :class="versionTone(gameInfo.version)"
+          >
+            {{ gameInfo.version }}
+          </span>
+          <span
+            v-if="gameInfo.variant !== 'unknown'"
+            class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+          >
+            {{ gameInfo.variant }}
+          </span>
+          <span
+            class="chip"
+            :class="gameInfo.has_pmc_bb ? 'chip-ok' : 'chip-off'"
+            title="pmc_bb.dll — our ASI loader + SecuROM spoof"
+          >
+            {{
+              gameInfo.has_pmc_bb
+                ? "pmc_bb.dll ✓ (ASI loader)"
+                : "pmc_bb.dll ✗ (ASI loader)"
+            }}
+          </span>
+          <span
+            v-if="
+              gameInfo.asi_loader_proxy &&
+              gameInfo.asi_loader_proxy !== 'pmc_bb.dll'
+            "
+            class="chip chip-off"
+            :title="`Alternate ASI loader proxy: ${gameInfo.asi_loader_proxy}`"
+          >
+            alt loader: {{ gameInfo.asi_loader_proxy }}
+          </span>
+          <span
+            v-if="gameInfo.deployed_asi.length"
+            class="rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300"
+            :title="gameInfo.deployed_asi.map((a) => a.rel_path).join('\n')"
+          >
+            {{ gameInfo.deployed_asi.length }} ASI plugin{{
+              gameInfo.deployed_asi.length === 1 ? "" : "s"
+            }}
+          </span>
+          <span
+            v-if="gameInfo.deployed_patches.length"
+            class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[10px] text-indigo-300"
+            :title="gameInfo.deployed_patches.join('\n')"
+          >
+            {{ gameInfo.deployed_patches.length }} patch WAD{{
+              gameInfo.deployed_patches.length === 1 ? "" : "s"
+            }} deployed
+          </span>
         </div>
       </div>
 
