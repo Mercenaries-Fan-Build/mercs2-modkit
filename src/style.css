@@ -1,5 +1,131 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Mercenaries 2 theme — "legal tender"
+   ---------------------------------------------------------------------------
+   The game's shell art is a banknote. `data/Movies/shell_mattias.bik` (and the
+   Jennifer/Chris siblings) render each playable character as an engraved
+   portrait bust inside an oval cartouche, over guilloche lathe-work — the
+   concentric interference pattern on currency. The joke is that Mercenaries is
+   a game about getting paid, so the mercs are the presidents.
+
+   Two ramps below are measured out of the shipped files; the rest is chosen to
+   match 2000s-era US currency, and is marked as such. Keeping that line honest
+   matters — only the first two can claim the game as their source.
+
+   MEASURED
+     - `paper/ink` (overrides zinc): quantised from the three portrait loops.
+       Every step lands on R ~= G > B at under 22% saturation — a duotone of
+       black intaglio ink on aged cream paper. Tailwind's stock `zinc` is
+       blue-dominant, the opposite bias, which is why the app currently reads
+       as a generic dark dashboard.
+     - `brass` (new): from `data/Movies/title_logo.bik`, the distressed gold of
+       the "MERCENARIES 2 WORLD IN FLAMES" wordmark.
+
+   CHOSEN
+     - `emerald` is retinted to Treasury-seal green. The portrait footage is
+       duotone, so this green is not in the videos — it's the seal-and-serial
+       green of the note the portrait sits on.
+     - `amber` / `red` / `sky` follow the rest of the bill: the 2003+ background
+       tints, the red seal carried by United States Notes, and the blue
+       security fibre.
+
+   Overriding Tailwind's built-in palette rather than renaming utilities means
+   the existing markup across the views re-tints in place.
+--------------------------------------------------------------------------- */
+@theme {
+  /* Paper & ink — MEASURED from the portrait loops. */
+  --color-zinc-50: #f8f6f0;
+  --color-zinc-100: #ebe9e4;
+  --color-zinc-200: #dcdad2;
+  --color-zinc-300: #bab8a5;
+  --color-zinc-400: #9b9a80;
+  --color-zinc-500: #79775f;
+  --color-zinc-600: #605f4b;
+  --color-zinc-700: #474638;
+  --color-zinc-800: #2b2922;
+  --color-zinc-900: #181712;
+  --color-zinc-950: #0c0b07;
+
+  /* Brass — MEASURED from the title wordmark. Also stands in for the
+     colour-shifting ink on 2000s notes, which flips green to copper. */
+  --color-brass-50: #fdf6e3;
+  --color-brass-100: #f7e8bd;
+  --color-brass-200: #edd68f;
+  --color-brass-300: #ddbe5c;
+  --color-brass-400: #cbb042;
+  --color-brass-500: #bf9526;
+  --color-brass-600: #a1791a;
+  --color-brass-700: #85621b;
+  --color-brass-800: #5e4514;
+  --color-brass-900: #3a2a0d;
+  --color-brass-950: #200f03;
+
+  /* Treasury-seal green — CHOSEN. Carries both the accent and "success",
+     which is the right conflation here: in a mod manager for a game about
+     money, deployed and paid are the same signal. -600 is the button ground
+     and clears 5.9:1 against white. */
+  --color-emerald-50: #eaf8f1;
+  --color-emerald-100: #cdefdf;
+  --color-emerald-200: #a5e0c3;
+  --color-emerald-300: #74cca4;
+  --color-emerald-400: #4bb586;
+  --color-emerald-500: #2f9c6c;
+  --color-emerald-600: #1b7048;
+  --color-emerald-700: #14532f;
+  --color-emerald-800: #0f3325;
+  --color-emerald-900: #0a1f16;
+  --color-emerald-950: #06120d;
+
+  /* Background tint — CHOSEN, the peach/orange wash of the 2003 $20 and
+     2006 $10, pushed until it works as a warning. */
+  --color-amber-300: #f3c089;
+  --color-amber-400: #e8a05c;
+  --color-amber-500: #dc8434;
+  --color-amber-600: #b56621;
+  --color-amber-700: #8c4d18;
+
+  /* Red seal — CHOSEN, the seal colour on United States Notes. */
+  --color-red-300: #ef9c8d;
+  --color-red-400: #e57462;
+  --color-red-500: #cf4530;
+  --color-red-600: #a83322;
+  --color-red-700: #82261a;
+
+  /* Security fibre — CHOSEN. The one cool hue, kept desaturated so it sits
+     inside the paper field rather than on top of it. */
+  --color-sky-300: #a8c8de;
+  --color-sky-400: #7aa9c8;
+  --color-sky-500: #5288ac;
+  --color-sky-600: #3d6a89;
+
+  /* Category markers — CHOSEN. These tag an asset's *kind* (ASI plugin vs
+     patch WAD), not its state, so they stay out of the status set above.
+     Stock violet/indigo are the last two families still at web defaults, and
+     they glare against the paper field. The 2008 $5's purple tint and a
+     deeper fibre blue, both pulled well down in saturation. */
+  --color-violet-300: #c3aed6;
+  --color-violet-400: #a98cc4;
+  --color-violet-500: #8a6bab;
+  --color-violet-600: #6d5190;
+  --color-indigo-300: #9fb0d9;
+  --color-indigo-400: #7b90c4;
+  --color-indigo-500: #5a70a8;
+  --color-indigo-600: #45588a;
+
+  /* Engraved plate, not a rounded card. Tailwind's stock radii are soft
+     enough to fight the banknote read, and they're the single loudest
+     "generic web app" tell left once the colour is right. Tightening the
+     scale here squares off every `rounded-md/lg/xl` in the app at once —
+     `rounded-full` is untouched, so pills and dots stay round. */
+  --radius-sm: 0.0625rem;
+  --radius-md: 0.125rem;
+  --radius-lg: 0.1875rem;
+  --radius-xl: 0.25rem;
+  --radius-2xl: 0.375rem;
+  --radius-3xl: 0.5rem;
+}
+
 /* Tailwind v4's Preflight resets buttons to `cursor: default`. Restore the
    pointer for interactive elements (disabled ones keep the default). */
 @layer base {
@@ -19,7 +145,7 @@
 /* When a controller is driving the UI, programmatic .focus() won't reliably
    trigger :focus-visible, so force a clear highlight on whatever is focused. */
 body.gamepad-active :focus {
-  outline: 2px solid rgb(16 185 129);
+  outline: 2px solid var(--color-brass-400);
   outline-offset: 2px;
   border-radius: 0.375rem;
 }
@@ -35,4 +161,253 @@ body {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* --- Engraving -------------------------------------------------------------
+   The shell art's texture is intaglio line-work, not scanlines: concentric
+   lathe curves that interfere with each other. Two offset repeating radial
+   gradients reproduce that moire cheaply and at any size.
+
+   Meant as a whisper on large empty surfaces — panel backs, empty states,
+   the sidebar. At these alphas it reads as tooth in the paper.
+--------------------------------------------------------------------------- */
+.guilloche {
+  background-image:
+    repeating-radial-gradient(
+      circle at 30% 40%,
+      rgb(155 154 128 / 0.05) 0 1px,
+      transparent 1px 7px
+    ),
+    repeating-radial-gradient(
+      circle at 72% 66%,
+      rgb(155 154 128 / 0.05) 0 1px,
+      transparent 1px 9px
+    );
+}
+
+/* Flat engraved hatching, for narrow strips where rosettes would be noise. */
+.engraved {
+  background-image: repeating-linear-gradient(
+    -52deg,
+    rgb(155 154 128 / 0.07) 0 1px,
+    transparent 1px 5px
+  );
+}
+
+/* The oval cartouche. Wardrobe skins and mod thumbnails are portraits — this
+   frames them the way the note frames Mattias. */
+.cartouche {
+  /* A true ellipse — the frame takes its proportion from the element box, so
+     a portrait-shaped box gives a portrait-shaped oval. */
+  border-radius: 50%;
+  border: 1px solid var(--color-brass-800);
+  box-shadow:
+    inset 0 0 0 3px var(--color-zinc-950),
+    inset 0 0 0 4px var(--color-brass-900),
+    inset 0 0 44px rgb(12 11 7 / 0.85);
+  overflow: hidden;
+}
+
+/* The double rule that runs around a bill's border. */
+.banknote-frame {
+  border: 1px solid var(--color-brass-900);
+  box-shadow:
+    inset 0 0 0 2px var(--color-zinc-950),
+    inset 0 0 0 3px var(--color-brass-950);
+}
+
+/* Denominations and serials on a note are set in bold italic — and the shell
+   ships `_shell_bold_italic_font` as a first-class face. Use it for counts,
+   versions and IDs.
+
+   Colour is deliberately left off, so callers keep control — this class sits
+   after Tailwind's utilities and would otherwise beat any `text-*` set
+   alongside it. */
+.serial {
+  font-style: italic;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Engraved caption lettering — the small caps running under a portrait. */
+.stencil {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Colour-shifting ink: the 2000s notes' numeral flips green to copper as it
+   catches the light. Interactive elements borrow it on hover.
+
+   Base colour is left to the caller for the same cascade reason as `.serial`;
+   this only owns the hover. */
+.shift-ink {
+  transition: color 0.18s ease-out;
+}
+.shift-ink:hover {
+  color: var(--color-brass-400);
+}
+@media (prefers-reduced-motion: reduce) {
+  .shift-ink {
+    transition: none;
+  }
+}
+
+/* --- Plate furniture -------------------------------------------------------
+   Repeated treatments, so the views can opt in with one class instead of
+   restating a dozen utilities each time.
+--------------------------------------------------------------------------- */
+
+/* A view's main heading. Engraved caption lettering, with the hairline rule
+   that runs under a denomination. */
+.plate-title {
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  color: var(--color-zinc-100);
+}
+
+/* The small caps label that opens a group of controls. */
+.plate-label {
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-brass-500);
+}
+
+/* Section rule with the double-line feel of a note's border. */
+.plate-rule {
+  border: 0;
+  border-top: 1px solid var(--color-zinc-800);
+  border-bottom: 1px solid var(--color-zinc-900);
+  height: 2px;
+  margin: 0;
+}
+
+/* Primary action. Bill-green ground, engraved lettering. */
+.btn-plate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-lg);
+  background-color: var(--color-emerald-600);
+  padding: 0.375rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  border: 1px solid var(--color-emerald-500);
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.btn-plate:hover:not(:disabled) {
+  background-color: var(--color-emerald-500);
+  border-color: var(--color-emerald-400);
+}
+.btn-plate:disabled {
+  opacity: 0.45;
+}
+
+/* Secondary action — engraved outline on paper. */
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-zinc-700);
+  background-color: transparent;
+  padding: 0.375rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-zinc-300);
+  transition: border-color 0.15s, color 0.15s, background-color 0.15s;
+}
+.btn-outline:hover:not(:disabled) {
+  border-color: var(--color-brass-700);
+  color: var(--color-brass-300);
+  background-color: rgb(203 176 66 / 0.06);
+}
+.btn-outline:disabled {
+  opacity: 0.45;
+}
+
+/* Destructive. Red seal. */
+.btn-seal-red {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-red-600);
+  background-color: rgb(207 69 48 / 0.12);
+  padding: 0.375rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-red-300);
+  transition: background-color 0.15s;
+}
+.btn-seal-red:hover:not(:disabled) {
+  background-color: rgb(207 69 48 / 0.22);
+}
+.btn-seal-red:disabled {
+  opacity: 0.45;
+}
+
+/* Empty state — a blank plate. Dashed borders read as a drag-and-drop target;
+   a ruled frame over faint lathe-work reads as "nothing printed here yet",
+   which is what these actually mean. */
+.empty-plate {
+  border: 1px solid var(--color-zinc-800);
+  box-shadow:
+    inset 0 0 0 2px var(--color-zinc-950),
+    inset 0 0 0 3px var(--color-zinc-900);
+  padding: 4rem 2rem;
+  text-align: center;
+  color: var(--color-zinc-500);
+  background-image:
+    repeating-radial-gradient(
+      circle at 50% 45%,
+      rgb(155 154 128 / 0.045) 0 1px,
+      transparent 1px 8px
+    );
+}
+
+/* Text input / select — a ruled box stamped into the plate. */
+.field {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-zinc-700);
+  background-color: var(--color-zinc-950);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  color: var(--color-zinc-100);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.4);
+  transition: border-color 0.15s;
+}
+.field::placeholder {
+  color: var(--color-zinc-600);
+}
+.field:focus {
+  outline: none;
+  border-color: var(--color-brass-600);
+}
+
+/* Status pill — an engraved stamp rather than a filled chip. */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: 9999px;
+  border: 1px solid currentColor;
+  padding: 0.0625rem 0.5rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
