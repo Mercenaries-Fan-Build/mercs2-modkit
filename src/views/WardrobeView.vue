@@ -2,15 +2,19 @@
 import { ref, computed, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useProjectStore } from "../stores/project";
+import CartouchePortrait from "../components/CartouchePortrait.vue";
 import type { WardrobeModel } from "../types";
 
 const store = useProjectStore();
 const { gameInfo, wardrobeModels, wardrobe, busy, error } = storeToRefs(store);
 
+// `model` is the base tier each hero's portrait is rendered from. Note the
+// mismatch the backend also calls out: the hero key is `jennifer`, but the
+// model names use `jen`.
 const HEROES = [
-  { key: "mattias", label: "Mattias" },
-  { key: "chris", label: "Chris" },
-  { key: "jennifer", label: "Jennifer" },
+  { key: "mattias", label: "Mattias", model: "pmc_hum_mattias" },
+  { key: "chris", label: "Chris", model: "pmc_hum_chris" },
+  { key: "jennifer", label: "Jennifer", model: "pmc_hum_jen" },
 ] as const;
 
 const hero = ref<string>("mattias");
@@ -79,7 +83,7 @@ function add(m: WardrobeModel) {
       <!-- These skins already exist in the game files, so nothing is injected and nothing
            can break. Worth telling the user, because it's why this is safe. -->
       <p
-        class="mt-4 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-xs text-zinc-400"
+        class="engraved mt-4 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-xs text-zinc-400"
       >
         These outfits use models already shipped in your copy of the game — no new files are
         added, so there's nothing to go wrong.
@@ -94,8 +98,8 @@ function add(m: WardrobeModel) {
 
       <!-- Hero. The game's own shell renders these three as engraved portraits
            in oval cartouches — one .bik each — so the picker borrows that
-           framing. The portraits themselves stay in the user's install: the
-           game files are copyrighted, so nothing is shipped with modkit. -->
+           framing, rendering each hero's model out of the player's own vz.wad.
+           Nothing is shipped: the game files are copyrighted. -->
       <section class="mt-6">
         <h3 class="plate-label">Character</h3>
         <div class="mt-3 flex gap-5">
@@ -106,21 +110,11 @@ function add(m: WardrobeModel) {
             :aria-pressed="hero === h.key"
             @click="hero = h.key"
           >
-            <span
-              class="cartouche guilloche flex h-[104px] w-[84px] items-center justify-center bg-zinc-900 transition"
-              :class="
-                hero === h.key
-                  ? 'ring-1 ring-emerald-400/70'
-                  : 'opacity-55 group-hover:opacity-90'
-              "
-            >
-              <span
-                class="text-2xl font-bold italic"
-                :class="hero === h.key ? 'text-emerald-300' : 'text-zinc-500'"
-              >
-                {{ h.label[0] }}
-              </span>
-            </span>
+            <CartouchePortrait
+              :model="h.model"
+              :fallback="h.label[0]"
+              :active="hero === h.key"
+            />
             <span
               class="text-[10px] font-semibold uppercase tracking-[0.18em]"
               :class="hero === h.key ? 'text-brass-400' : 'text-zinc-500'"
@@ -185,7 +179,7 @@ function add(m: WardrobeModel) {
           <li
             v-for="m in filtered"
             :key="m.model"
-            class="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+            class="engraved flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
           >
             <div class="min-w-0 flex-1">
               <p class="truncate text-sm text-zinc-200">
