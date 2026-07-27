@@ -56,7 +56,7 @@ const three = shallowRef<{
 
 // Three.js takes literals, so these can't ride the CSS retint — keep them in
 // step with the theme tokens by hand.
-const HIGHLIGHT = 0x2f9c6c; // emerald-500: seal green, the app's accent
+const HIGHLIGHT = 0x5d8b55; // emerald-500: seal green, the app's accent
 const ISOLATED = 0x5288ac; // sky-500: a *selected* part, distinct from "uses this texture"
 const MUTED = 0x79775f; // zinc-500: light enough to read the shape under the bright rig
 
@@ -80,7 +80,7 @@ function style() {
     if (isSel) {
       // The selected part, lit. Green if it wears this texture, sky if it wears another —
       // "what you picked" and "what uses the texture" are different questions.
-      m.color.setHex(grp.uses_texture ? 0xa5e0c3 : 0xa8c8de);
+      m.color.setHex(grp.uses_texture ? 0xc9dcc6 : 0xa8c8de);
       m.emissive.setHex(grp.uses_texture ? HIGHLIGHT : ISOLATED);
       m.emissiveIntensity = 0.8;
       m.opacity = 1;
@@ -97,7 +97,7 @@ function style() {
     } else if (grp.uses_texture) {
       // A green base, not white: under the bright rig a white base blows out and green
       // emissive on top of it reads as "slightly warm white" — i.e. as nothing.
-      m.color.setHex(0xa5e0c3);
+      m.color.setHex(0xc9dcc6);
       m.emissive.setHex(HIGHLIGHT);
       m.emissiveIntensity = 0.8;
       m.opacity = 1;
