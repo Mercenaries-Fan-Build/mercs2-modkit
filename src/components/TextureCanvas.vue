@@ -92,7 +92,9 @@ function draw() {
   const sq = 8;
   for (let y = 0; y < base; y += sq) {
     for (let x = 0; x < base; x += sq) {
-      ctx.fillStyle = ((x / sq + y / sq) & 1) === 0 ? "#1a1a1d" : "#232327";
+      // Paper-toned, to match the theme's warm neutrals — a cool-grey checker
+      // reads as a hole punched in the plate.
+      ctx.fillStyle = ((x / sq + y / sq) & 1) === 0 ? "#181712" : "#221f19";
       ctx.fillRect(x, y, sq, sq);
     }
   }
@@ -215,7 +217,7 @@ onBeforeUnmount(() => ro?.disconnect());
     <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
       <span class="text-zinc-500">{{ Math.round(zoom * 100) }}%</span>
       <button
-        class="rounded border border-zinc-700 px-2 py-0.5 text-zinc-400 hover:bg-zinc-800"
+        class="btn-outline"
         @click="reset"
       >
         Reset

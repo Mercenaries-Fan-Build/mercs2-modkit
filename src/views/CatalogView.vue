@@ -115,7 +115,7 @@ async function update(item: CatalogMod) {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Browse Catalog</h2>
+      <h2 class="plate-title text-xl">Browse Catalog</h2>
       <p class="text-sm text-zinc-500">
         Mods from curated repositories. Download → enable → deploy; state is
         reconciled against your game folder.
@@ -128,14 +128,14 @@ async function update(item: CatalogMod) {
 
     <div class="mt-4 flex gap-2">
       <button
-        class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+        class="btn-outline"
         :disabled="busy"
         @click="store.fetchCatalog()"
       >
         Refresh
       </button>
       <button
-        class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+        class="btn-outline"
         @click="showSources = !showSources"
       >
         Mod Sources
@@ -148,7 +148,7 @@ async function update(item: CatalogMod) {
       v-if="showSources"
       class="mt-4 rounded-xl border border-zinc-700 bg-zinc-900/70 p-4"
     >
-      <h3 class="text-sm font-medium text-zinc-200">Custom Mod Sources</h3>
+      <h3 class="plate-label">Custom Mod Sources</h3>
       <p class="mt-0.5 text-xs text-zinc-500">
         Any GitHub repository that provides a <code class="text-zinc-400">repository.json</code> index
         can be added as a source. Its mods appear in the catalog after a refresh.
@@ -191,7 +191,7 @@ async function update(item: CatalogMod) {
           v-model="newSourceUrl"
           type="url"
           placeholder="https://github.com/owner/repo  (or /tree/branch-name)"
-          class="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-sky-500 focus:outline-none"
+          class="field min-w-0 flex-1 py-1.5"
           @keydown.enter="addSource"
         />
         <button
@@ -253,24 +253,24 @@ async function update(item: CatalogMod) {
               <!-- A newer release than the installed Library copy exists -->
               <span
                 v-if="store.catalogUpdate(item)"
-                class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300"
+                class="stamp text-amber-300"
                 :title="`A newer release (v${store.catalogUpdate(item)}) is available — your Library copy is older`"
                 >update available</span
               >
               <!-- Lifecycle state, reconciled against the game folder -->
               <span
                 v-if="store.catalogModState(item) === 'deployed'"
-                class="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] text-violet-300"
+                class="stamp text-violet-300"
                 >deployed</span
               >
               <span
                 v-else-if="store.catalogModState(item) === 'enabled'"
-                class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300"
+                class="stamp text-emerald-300"
                 >enabled · not deployed</span
               >
               <span
                 v-else-if="store.catalogModState(item) === 'downloaded'"
-                class="rounded-full bg-zinc-700/50 px-2 py-0.5 text-[10px] text-zinc-300"
+                class="stamp text-zinc-400"
                 >downloaded · disabled</span
               >
             </div>
@@ -297,7 +297,7 @@ async function update(item: CatalogMod) {
             </button>
             <button
               v-if="store.catalogModState(item) === 'none'"
-              class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+              class="btn-plate"
               :disabled="busy"
               title="Download this mod's release asset(s) into the Library"
               @click="download(item)"
@@ -324,7 +324,7 @@ async function update(item: CatalogMod) {
             </template>
             <button
               v-else-if="store.catalogModState(item) === 'enabled'"
-              class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+              class="btn-plate"
               :disabled="busy || !gameInfo"
               :title="!gameInfo ? 'Set the game folder first' : 'Copy into the game folder'"
               @click="deploy(item)"
@@ -344,7 +344,7 @@ async function update(item: CatalogMod) {
 
     <div
       v-else-if="!busy"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center"
+      class="empty-plate mt-10"
     >
       <p class="text-zinc-400">The catalog is empty.</p>
       <p class="mt-1 text-sm text-zinc-600">

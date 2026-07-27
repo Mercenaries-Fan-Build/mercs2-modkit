@@ -233,7 +233,7 @@ function fileName(p: string): string {
 
     <div
       v-if="!gameInfo"
-      class="rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate"
     >
       Choose your game folder first.
     </div>
@@ -269,7 +269,7 @@ function fileName(p: string): string {
             :selected="selectedPart"
           />
           <button
-            class="mt-2 w-full rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            class="btn-outline mt-2 w-full justify-center"
             @click="exportPng"
           >
             Save as PNG…
@@ -306,11 +306,11 @@ function fileName(p: string): string {
               {{ details.kind }}
             </span>
             <span
-              class="rounded-full px-2.5 py-0.5 text-xs"
+              class="stamp"
               :class="
                 details.fully_resident
                   ? 'bg-zinc-800 text-zinc-400'
-                  : 'bg-sky-500/15 text-sky-300'
+                  : 'text-sky-300'
               "
             >
               {{ details.fully_resident ? "stored in full" : "streamed" }}
@@ -354,7 +354,7 @@ function fileName(p: string): string {
           Higher-resolution replacements aren't supported yet.
         </p>
         <button
-          class="mt-3 w-full rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate mt-3 w-full justify-center"
           :disabled="busy"
           @click="replace"
         >
@@ -369,7 +369,7 @@ function fileName(p: string): string {
 
       <!-- Where it's used: the reason this page exists. -->
       <section class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">Used by</h3>
+        <h3 class="plate-label">Used by</h3>
 
         <p
           v-if="details.shared"
@@ -480,12 +480,12 @@ function fileName(p: string): string {
           -->
           <div v-if="parts.length" class="mt-4">
             <div class="flex items-center justify-between">
-              <h4 class="text-xs font-medium uppercase tracking-wide text-zinc-500">
+              <h4 class="plate-label">
                 Parts of this model ({{ parts.length }})
               </h4>
               <button
                 v-if="selectedPart !== null"
-                class="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800"
+                class="btn-outline"
                 @click="selectedPart = null"
               >
                 Show all
@@ -563,7 +563,7 @@ function fileName(p: string): string {
           Saying so beats pretending we can show it.
         -->
         <div v-if="details.declared_only_by.length" class="mt-4">
-          <h4 class="text-xs font-medium uppercase tracking-wide text-zinc-500">
+          <h4 class="plate-label">
             Also referenced by (but not painted on)
           </h4>
           <p class="mt-1 text-xs text-zinc-600">
@@ -589,7 +589,7 @@ function fileName(p: string): string {
         a workable answer.
       -->
       <section v-if="allParts.length" class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">
+        <h3 class="plate-label">
           Everywhere it's painted
           <span class="text-zinc-600">({{ allParts.length }} parts)</span>
         </h3>
@@ -619,7 +619,7 @@ function fileName(p: string): string {
                 {{ p.triangles.toLocaleString() }} tris
               </span>
               <span
-                class="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400"
+                class="stamp shrink-0 text-zinc-500"
               >
                 {{ p.slot }}
               </span>
@@ -630,7 +630,7 @@ function fileName(p: string): string {
 
       <!-- Other maps of the same surface. -->
       <section v-if="details.siblings.length" class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">Other maps of this surface</h3>
+        <h3 class="plate-label">Other maps of this surface</h3>
         <p class="mt-1 text-xs text-zinc-500">
           The same surface's colour, bump and shine maps.
         </p>
@@ -649,7 +649,7 @@ function fileName(p: string): string {
 
       <!-- The rest of the character / vehicle. -->
       <section v-if="details.seen_with.length" class="mt-6">
-        <h3 class="text-sm font-medium text-zinc-300">
+        <h3 class="plate-label">
           Used alongside
           <span class="text-zinc-600">({{ details.seen_with.length }})</span>
         </h3>

@@ -30,7 +30,7 @@ const emit = defineEmits<{ confirm: []; cancel: [] }>();
         </div>
         <div class="mt-5 flex justify-end gap-2">
           <button
-            class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800"
+            class="btn-outline"
             @click="emit('cancel')"
           >
             {{ cancelLabel }}

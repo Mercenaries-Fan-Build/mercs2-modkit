@@ -120,7 +120,7 @@ function outcomeText(o: GroupOutcome): string {
 <template>
   <div class="mx-auto max-w-3xl px-8 py-6">
     <header>
-      <h2 class="text-xl font-semibold">Build &amp; Deploy</h2>
+      <h2 class="plate-title text-xl">Build &amp; Deploy</h2>
       <p class="text-sm text-zinc-500">
         Assemble your mods into one <code>vz-patch.wad</code>, check it, then install it.
       </p>
@@ -128,7 +128,7 @@ function outcomeText(o: GroupOutcome): string {
 
     <div
       v-if="nothingToBuild"
-      class="mt-10 rounded-xl border border-dashed border-zinc-800 px-8 py-16 text-center text-zinc-500"
+      class="empty-plate mt-10"
     >
       Nothing to build yet. Enable a mod, add a
       <RouterLink to="/wardrobe" class="text-emerald-400 underline">wardrobe outfit</RouterLink>
@@ -160,7 +160,7 @@ function outcomeText(o: GroupOutcome): string {
       <section class="mt-6 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-center justify-between">
           <div>
-            <h3 class="text-sm font-medium text-zinc-300">Mod WADs</h3>
+            <h3 class="plate-label">Mod WADs</h3>
             <p class="mt-1 text-xs text-zinc-500">
               Add existing <code>vz-patch.wad</code> mods. Normally you could only use one at
               a time — these get merged together.
@@ -219,7 +219,7 @@ function outcomeText(o: GroupOutcome): string {
         v-if="store.enabledMods.length"
         class="mt-6 rounded-xl border border-zinc-800 p-5"
       >
-        <h3 class="text-sm font-medium text-zinc-300">Load order</h3>
+        <h3 class="plate-label">Load order</h3>
         <p class="mt-1 text-xs text-zinc-500">
           Later mods override earlier ones. If two mods change the same thing, the one
           lower in this list wins.
@@ -264,7 +264,7 @@ function outcomeText(o: GroupOutcome): string {
       </section>
 
       <button
-        class="mt-5 w-full rounded-lg bg-emerald-600 px-4 py-2.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+        class="btn-plate mt-5 w-full justify-center"
         :disabled="busy"
         @click="buildAndValidate"
       >
@@ -295,7 +295,7 @@ function outcomeText(o: GroupOutcome): string {
 
       <!-- What the load order actually did. -->
       <section v-if="buildResult" class="mt-6">
-        <h3 class="mb-2 text-sm font-medium text-zinc-300">Result</h3>
+        <h3 class="plate-label mb-2">Result</h3>
         <div class="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm">
           <p class="font-mono text-xs break-all text-zinc-200">{{ buildResult.path }}</p>
           <p class="mt-1 text-xs text-zinc-500">
@@ -314,11 +314,11 @@ function outcomeText(o: GroupOutcome): string {
             class="flex items-center gap-2 text-xs"
           >
             <span
-              class="rounded-full px-2 py-0.5"
+              class="stamp"
               :class="
                 o.outcome === 'applied'
-                  ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'bg-amber-500/15 text-amber-300'
+                  ? 'text-emerald-300'
+                  : 'text-amber-300'
               "
             >
               {{ o.outcome === "applied" ? "applied" : "overridden" }}
@@ -331,14 +331,14 @@ function outcomeText(o: GroupOutcome): string {
 
       <!-- Validation -->
       <section v-if="validation" class="mt-6">
-        <h3 class="mb-2 flex items-center gap-2 text-sm font-medium text-zinc-300">
+        <h3 class="plate-label mb-2 flex items-center gap-2">
           Validation
           <span
-            class="rounded-full px-2 py-0.5 text-xs"
+            class="stamp"
             :class="
               validation.ok
-                ? 'bg-emerald-500/15 text-emerald-300'
-                : 'bg-red-500/15 text-red-300'
+                ? 'text-emerald-300'
+                : 'text-red-300'
             "
           >
             {{ validation.ok ? "passed" : "failed" }}
@@ -352,7 +352,7 @@ function outcomeText(o: GroupOutcome): string {
 
       <!-- Install. Close the game first: it holds the WAD open. -->
       <section v-if="buildResult" class="mt-6 rounded-xl border border-zinc-800 p-5">
-        <h3 class="text-sm font-medium text-zinc-300">Install</h3>
+        <h3 class="plate-label">Install</h3>
         <p class="mt-1 text-xs text-zinc-500">
           Copies the WAD into
           <code>{{ gameInfo?.data_dir ?? "the game's data folder" }}</code
@@ -360,7 +360,7 @@ function outcomeText(o: GroupOutcome): string {
           this. <strong class="text-zinc-400">Close the game before installing.</strong>
         </p>
         <button
-          class="mt-3 w-full rounded-lg bg-emerald-600 px-4 py-2.5 font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate mt-3 w-full justify-center"
           :disabled="busy || !gameInfo?.data_dir"
           @click="deploy"
         >
@@ -377,12 +377,12 @@ function outcomeText(o: GroupOutcome): string {
 
       <!-- Undo. Every hazard a bad WAD can cause is recoverable from here. -->
       <section class="mt-6 rounded-xl border border-zinc-800 p-5">
-        <h3 class="text-sm font-medium text-zinc-300">Undo</h3>
+        <h3 class="plate-label">Undo</h3>
         <p class="mt-1 text-xs text-zinc-500">
           Restore a previous patch, or remove it entirely to go back to the unmodded game.
         </p>
         <button
-          class="mt-3 w-full rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          class="btn-outline mt-3 w-full justify-center"
           :disabled="busy || !gameInfo?.data_dir"
           @click="restore(null)"
         >
@@ -416,17 +416,28 @@ function outcomeText(o: GroupOutcome): string {
 </template>
 
 <style scoped>
+/* Was hardcoded rgb(), so it kept the stock palette after the retint. Points
+   at the tokens now, and matches the shared `.btn-outline` treatment. */
 .btn-secondary {
-  border-radius: 0.5rem;
-  border: 1px solid rgb(63 63 70);
-  padding: 0.5rem 0.75rem;
-  font-size: 0.875rem;
-  color: rgb(212 212 216);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-zinc-700);
+  padding: 0.375rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-zinc-300);
+  transition: border-color 0.15s, color 0.15s, background-color 0.15s;
 }
 .btn-secondary:hover:not(:disabled) {
-  background-color: rgb(39 39 42);
+  border-color: var(--color-brass-700);
+  color: var(--color-brass-300);
+  background-color: rgb(203 176 66 / 0.06);
 }
 .btn-secondary:disabled {
-  opacity: 0.4;
+  opacity: 0.45;
 }
 </style>

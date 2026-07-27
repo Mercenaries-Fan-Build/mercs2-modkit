@@ -24,7 +24,7 @@ function hex(n: number): string {
     </button>
 
     <header class="mt-2">
-      <h2 class="text-xl font-semibold">{{ mod.manifest.name }}</h2>
+      <h2 class="plate-title text-xl">{{ mod.manifest.name }}</h2>
       <p class="text-sm text-zinc-500">
         v{{ mod.manifest.version }}
         <span v-if="mod.manifest.author"> · {{ mod.manifest.author }}</span>
@@ -35,7 +35,7 @@ function hex(n: number): string {
     </header>
 
     <section class="mt-6">
-      <h3 class="mb-2 text-sm font-medium text-zinc-300">
+      <h3 class="plate-label mb-2">
         Assets ({{ mod.assets.length }})
       </h3>
       <div class="overflow-hidden rounded-xl border border-zinc-800">
