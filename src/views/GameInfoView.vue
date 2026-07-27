@@ -408,7 +408,7 @@ async function normalizeRegion() {
                 <dt class="w-32 shrink-0 text-zinc-500">Your region</dt>
                 <dd>
                   <select
-                    class="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+                    class="field px-2 py-1 text-xs disabled:opacity-50"
                     :value="region.expectedRegion"
                     :disabled="busy"
                     @change="onRegionSelect"
