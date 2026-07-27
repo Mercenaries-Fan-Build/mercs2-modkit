@@ -2,6 +2,7 @@
 import { ref, shallowRef, onMounted, onBeforeUnmount, watch } from "vue";
 import * as THREE from "three";
 import { useProjectStore } from "../stores/project";
+import type { ModelGeometry } from "../types";
 
 /**
  * A hero rendered as an engraved bust inside the oval cartouche.
@@ -35,6 +36,53 @@ const props = defineProps<{
 const EYE_LINE = 0.86;
 const FRAME = 0.19;
 
+/**
+ * Reading a portrait means indexing vz.wad (2.5 GB) and decoding skins. The
+ * backend commands are `#[tauri::command(async)]` so that work is off the UI
+ * thread, but three heroes mounting at once would still have three of those
+ * indexing passes running concurrently. Serialise them through one chain: the
+ * portraits then fill in one after another instead of contending.
+ */
+let chain: Promise<unknown> = Promise.resolve();
+function enqueue<T>(job: () => Promise<T>): Promise<T> {
+  const next = chain.then(job, job);
+  // Keep the chain alive even when a job rejects, and don't leave an unhandled
+  // rejection behind on the copy we store.
+  chain = next.catch(() => undefined);
+  return next;
+}
+
+/** Decoded portrait payload, kept so revisiting the Wardrobe is instant. */
+type Portrait = { geo: ModelGeometry; urls: Map<string, string> };
+const cache = new Map<string, Portrait>();
+
+async function fetchPortrait(store: ReturnType<typeof useProjectStore>, model: string) {
+  const hit = cache.get(model);
+  if (hit) return hit;
+
+  const geo = await store.modelGeometry(model, "");
+
+  const wanted = new Set<string>();
+  for (const grp of geo.groups) {
+    const d = grp.textures.find((t) => t.slot === "diffuse" && t.name);
+    if (d?.name) wanted.add(d.name);
+  }
+
+  const urls = new Map<string, string>();
+  for (const name of wanted) {
+    try {
+      const url = (await store.textureDetails(name)).preview?.data_url;
+      if (url) urls.set(name, url);
+    } catch {
+      // Streamed-out or unreadable; that part falls back to the paper tone.
+    }
+  }
+
+  const payload = { geo, urls };
+  cache.set(model, payload);
+  return payload;
+}
+
 const store = useProjectStore();
 const host = ref<HTMLDivElement | null>(null);
 const ready = ref(false);
@@ -59,15 +107,16 @@ async function draw() {
   const el = host.value;
   if (!el || !store.gamePath) return;
 
-  let geo;
+  let portrait: Portrait;
   try {
-    // Texture is irrelevant for a portrait — we only want the silhouette — so
-    // pass an empty name and let the backend pick a drawable tier.
-    geo = await store.modelGeometry(props.model, "");
+    // The texture argument is the one to *highlight*, which a portrait has no
+    // use for — pass an empty name and let the backend pick a drawable tier.
+    portrait = await enqueue(() => fetchPortrait(store, props.model));
   } catch {
     return; // Not in this install; the initial stays.
   }
   if (!host.value) return; // unmounted while awaiting
+  const { geo, urls } = portrait;
 
   teardown();
 
@@ -104,42 +153,29 @@ async function draw() {
   g.setAttribute("uv", new THREE.BufferAttribute(Float32Array.from(geo.uvs), 2));
   g.setIndex(new THREE.BufferAttribute(indices, 1));
 
-  // Paint each part with its own skin. A character is many draw groups binding
-  // several materials — Chris is 25 — but they share only a handful of diffuse
-  // maps between them, so collect the distinct names and decode each once.
-  const wanted = new Set<string>();
-  for (const grp of geo.groups) {
-    const d = grp.textures.find((t) => t.slot === "diffuse" && t.name);
-    if (d?.name) wanted.add(d.name);
-  }
-
+  // Upload the decoded skins. These are local data URLs by now, so this is a
+  // GPU upload rather than any more WAD work.
   const maps = new Map<string, THREE.Texture>();
   const loader = new THREE.TextureLoader();
   await Promise.all(
-    [...wanted].map(async (name) => {
-      let url: string | null = null;
-      try {
-        url = (await store.textureDetails(name)).preview?.data_url ?? null;
-      } catch {
-        return; // streamed-out or unreadable; that part falls back to paper tone
-      }
-      if (!url) return;
-      await new Promise<void>((resolve) => {
-        loader.load(
-          url as string,
-          (t) => {
-            t.colorSpace = THREE.SRGBColorSpace;
-            t.flipY = false; // the game's UVs already have the origin at the top
-            maps.set(name, t);
-            resolve();
-          },
-          undefined,
-          () => resolve(),
-        );
-      });
-    }),
+    [...urls].map(
+      ([name, url]) =>
+        new Promise<void>((resolve) => {
+          loader.load(
+            url,
+            (t) => {
+              t.colorSpace = THREE.SRGBColorSpace;
+              t.flipY = false; // the game's UVs already have the origin at the top
+              maps.set(name, t);
+              resolve();
+            },
+            undefined,
+            () => resolve(),
+          );
+        }),
+    ),
   );
-  if (!host.value) return; // unmounted while decoding
+  if (!host.value) return; // unmounted while uploading
   textures.value = [...maps.values()];
 
   // One material per group, so each part gets the right map. Groups without a
