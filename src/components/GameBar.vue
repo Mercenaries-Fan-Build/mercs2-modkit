@@ -62,30 +62,26 @@ function tail(p: string, n = 48): string {
 }
 
 function versionTone(v: string): string {
-  if (v === "v1.1") return "bg-emerald-500/15 text-emerald-300";
-  if (v === "v1.0") return "bg-sky-500/15 text-sky-300";
-  return "bg-zinc-700/40 text-zinc-400";
+  if (v === "v1.1") return "text-emerald-300";
+  if (v === "v1.0") return "text-sky-300";
+  return "text-zinc-500";
 }
 </script>
 
 <template>
   <header
-    class="flex items-center gap-4 border-b border-zinc-800 bg-zinc-900/80 px-6 py-3 backdrop-blur"
+    class="engraved flex items-center gap-4 border-b border-zinc-800 bg-zinc-900/80 px-6 py-3 backdrop-blur"
   >
     <!-- No game set -->
     <template v-if="!gameInfo">
       <div class="flex-1">
-        <p class="text-sm font-medium text-zinc-200">No game folder set</p>
+        <p class="plate-title text-xs text-zinc-200">No game folder set</p>
         <p class="text-xs text-zinc-500">
           Point the modkit at your Mercenaries 2 install to enable building &amp;
           deploying.
         </p>
       </div>
-      <button
-        class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-        :disabled="busy"
-        @click="chooseFolder"
-      >
+      <button class="btn-plate" :disabled="busy" @click="chooseFolder">
         Set game folder
       </button>
     </template>
@@ -94,12 +90,12 @@ function versionTone(v: string): string {
     <template v-else>
       <div class="flex items-start gap-3">
         <div
-          class="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-800 text-xs font-bold text-zinc-400"
+          class="banknote-frame guilloche flex h-9 w-9 items-center justify-center bg-zinc-900 text-[11px] font-bold tracking-widest text-brass-400"
         >
           M2
         </div>
         <div class="min-w-0">
-          <p class="text-sm font-medium text-zinc-100">Mercenaries 2</p>
+          <p class="plate-title text-xs text-zinc-100">Mercenaries 2</p>
           <p class="font-mono text-[11px] text-zinc-500" :title="gamePath ?? ''">
             {{ tail(gameInfo.root) }}
           </p>
@@ -107,7 +103,7 @@ function versionTone(v: string): string {
                launch controls; compact 10px chips that wrap as needed. -->
           <div class="mt-1 flex flex-wrap items-center gap-1.5">
             <span
-              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+              class="stamp serial"
               :class="versionTone(gameInfo.version)"
             >
               {{ gameInfo.version }}
@@ -187,7 +183,7 @@ function versionTone(v: string): string {
         </label>
         <button
           v-if="!gameRunning"
-          class="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          class="btn-plate"
           :disabled="busy || transitioning"
           :title="
             verboseLog
@@ -201,7 +197,7 @@ function versionTone(v: string): string {
         </button>
         <button
           v-else
-          class="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50"
+          class="btn-seal-red"
           :disabled="transitioning"
           title="Stop the running game"
           data-gamepad-play
@@ -210,14 +206,14 @@ function versionTone(v: string): string {
           {{ transitioning ? "Stopping…" : "■ Stop" }}
         </button>
         <button
-          class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+          class="shift-ink rounded-md px-2 py-1 text-[11px] tracking-wider uppercase text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
           :disabled="busy"
           @click="store.refreshGame()"
         >
           Refresh
         </button>
         <button
-          class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+          class="shift-ink rounded-md px-2 py-1 text-[11px] tracking-wider uppercase text-zinc-400 hover:bg-zinc-800"
           @click="chooseFolder"
         >
           Change
@@ -228,17 +224,20 @@ function versionTone(v: string): string {
 </template>
 
 <style scoped>
+/* These were hardcoded rgb() literals, so they kept the old stock palette
+   after the theme retint. Point them at the tokens instead. */
 .chip {
   border-radius: 9999px;
   padding: 0.125rem 0.375rem;
   font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
 }
 .chip-ok {
-  background-color: rgb(16 185 129 / 0.15);
-  color: rgb(110 231 183);
+  background-color: color-mix(in srgb, var(--color-emerald-500) 15%, transparent);
+  color: var(--color-emerald-300);
 }
 .chip-off {
-  background-color: rgb(113 113 122 / 0.25);
-  color: rgb(161 161 170);
+  background-color: color-mix(in srgb, var(--color-zinc-600) 25%, transparent);
+  color: var(--color-zinc-400);
 }
 </style>
