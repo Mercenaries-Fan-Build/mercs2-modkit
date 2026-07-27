@@ -459,7 +459,7 @@ fn decode_preview(name: &str, t: &TextureData, cap: u32) -> Option<TexturePrevie
 }
 
 /// Minimal base64 (standard alphabet, padded) — not worth a dependency.
-pub(crate) fn b64(data: &[u8]) -> String {
+fn b64(data: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {

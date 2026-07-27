@@ -89,23 +89,11 @@ function versionTone(v: string): string {
     <!-- Game detected -->
     <template v-else>
       <div class="flex items-start gap-3">
-        <!-- The install's own icon. It's a wide wordmark, so the plate follows
-             the artwork's aspect rather than the .ico's square frame; the text
-             stands in when the install has no icon. -->
         <div
-          class="flex h-9 shrink-0 items-center justify-center overflow-hidden rounded-md border border-brass-900 bg-zinc-950 px-2"
-          :class="store.gameIcon ? 'w-[76px]' : 'w-9'"
+          class="guilloche flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-brass-900 bg-zinc-950 text-[11px] font-bold tracking-widest text-brass-400"
           title="Mercenaries 2"
         >
-          <img
-            v-if="store.gameIcon"
-            :src="store.gameIcon"
-            alt="Mercenaries 2"
-            class="max-h-full w-full object-contain"
-          />
-          <span v-else class="text-[11px] font-bold tracking-widest text-brass-400">
-            M2
-          </span>
+          M2
         </div>
         <div class="min-w-0">
           <p class="plate-title text-xs text-zinc-100">Mercenaries 2</p>

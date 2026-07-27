@@ -11,7 +11,7 @@ use commands::conflict_resolver::build_conflict_graph;
 use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
 use commands::deploy_wad::{deploy_patch_wad, list_patch_wad_backups, restore_patch_wad};
-use commands::game::{detect_game, game_icon};
+use commands::game::detect_game;
 use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::language::{scan_languages, set_language};
@@ -53,7 +53,6 @@ pub fn run() {
         .manage(GameProcess::default())
         .invoke_handler(tauri::generate_handler![
             load_mod,
-            game_icon,
             validate_manifest,
             detect_asset_type,
             build_conflict_graph,
