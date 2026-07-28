@@ -1,0 +1,32 @@
+<!--
+  Source artwork for modkit's application icon. Regenerate the platform icon set
+  with:
+
+      npx tauri icon src-tauri/icons/source/modkit-mark.svg
+
+  The mark is the same spade-with-knocked-out-skull path the sidebar draws (see
+  src/components/ModkitMark.vue) — kept in sync by hand, since the Vue component
+  renders it at `currentColor` against the app chrome while an app icon needs its
+  own background and a fixed fill.
+
+  Laid out for an icon rather than a glyph: the art is inset to ~62% of the
+  canvas on a rounded plate, because macOS and Windows both render app icons
+  small and a full-bleed mark loses its silhouette. translate(192,192)
+  scale(6.4) maps the 0-100 viewBox of the original path so the drawn extent
+  (x 12-88, y 4-96) lands centred on the 1024 square.
+
+  Colours are the app's own palette: zinc-900 plate, brass-400 mark.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="180" ry="180" fill="#181712"/>
+  <rect x="8" y="8" width="1008" height="1008" rx="174" ry="174" fill="none" stroke="#85621b" stroke-width="10"/>
+  <g transform="translate(192,192) scale(6.4)" fill="#cbb042" fill-rule="evenodd">
+    <path
+      d="M50 4C50 4 12 37 12 56.5C12 70.5 22 78 33 78C39.5 78 45 74 47.5 68.5C46.5 80.5 41 90 32 96L68 96C59 90 53.5 80.5 52.5 68.5C55 74 60.5 78 67 78C78 78 88 70.5 88 56.5C88 37 50 4 50 4Z
+         M45 13L50.5 25L54.5 17.5L57.5 28L62 24C69.5 30 74 39.5 74 50C74 57.5 71 64 66.5 68.5L66.5 79L62.5 83L58.5 79L54.5 83L50.5 79L46.5 83L42.5 79L38.5 83L34.5 79L34.5 68.5C30 64 27 57.5 27 50C27 39 32 29 40 23.5Z
+         M33.5 44.5L46 50L42.5 58.5L31 54.5Z
+         M67.5 44.5L55 50L58.5 58.5L70 54.5Z
+         M50.5 55L54.5 65.5L46.5 65.5Z"
+    />
+  </g>
+</svg>

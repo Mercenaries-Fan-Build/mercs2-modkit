@@ -248,7 +248,7 @@ mod tests {
 
 /// True when running inside a Flatpak sandbox.
 #[cfg(target_os = "linux")]
-fn in_flatpak() -> bool {
+pub(crate) fn in_flatpak() -> bool {
     Path::new("/.flatpak-info").exists() || std::env::var_os("FLATPAK_ID").is_some()
 }
 

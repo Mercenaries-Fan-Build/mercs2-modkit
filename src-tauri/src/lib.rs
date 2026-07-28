@@ -26,6 +26,10 @@ use commands::save_backup::{
     set_saves_dir,
 };
 use commands::setup::{crack_game, install_pmc_bb};
+use commands::toolchain::{
+    install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
+    uninstall_tool, ToolProcesses,
+};
 use commands::updates::{latest_release, updater_supported};
 use commands::validator::{fetch_wad_simulator, validate_wad};
 use commands::vcredist::{check_vcredist, install_vcredist};
@@ -51,6 +55,7 @@ pub fn run() {
             Ok(())
         })
         .manage(GameProcess::default())
+        .manage(ToolProcesses::default())
         .invoke_handler(tauri::generate_handler![
             load_mod,
             validate_manifest,
@@ -75,6 +80,13 @@ pub fn run() {
             texture_parts,
             fetch_wad_simulator,
             validate_wad,
+            toolset_status,
+            install_tools,
+            uninstall_tool,
+            open_tool_shell,
+            launch_tool,
+            poll_tools,
+            stop_tool,
             detect_game,
             fetch_catalog,
             get_custom_sources,

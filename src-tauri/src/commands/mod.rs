@@ -21,6 +21,7 @@ pub mod save_backup;
 pub mod setup;
 pub mod texture_swap;
 pub mod texture_usage;
+pub mod toolchain;
 pub mod updates;
 pub mod validator;
 pub mod vcredist;
