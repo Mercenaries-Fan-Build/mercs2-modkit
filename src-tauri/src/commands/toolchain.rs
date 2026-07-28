@@ -274,7 +274,11 @@ fn tool(name: &str) -> Option<&'static Tool> {
 /// 32-bit x86 rows. Every entry here must have a matching `suffix:` row in the
 /// toolset's release matrix — a suffix with no publisher makes every tool report
 /// "no build for this machine", which is the arm64-Linux behaviour this replaced.
-fn platform_suffix() -> Option<&'static str> {
+///
+/// `pub(crate)` so [`super::setup`] can assert its own arch spelling against this
+/// one; the two modules download from different repos but must agree on how an
+/// arch is named in an asset.
+pub(crate) fn platform_suffix() -> Option<&'static str> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => "-windows-x86_64.exe",
         ("windows", "x86") => "-windows-i686.exe",
