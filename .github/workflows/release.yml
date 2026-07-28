@@ -87,6 +87,164 @@ jobs:
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
 
+  # Same recipe as `linux`, on a native arm64 runner. Cross-compiling was not an
+  # option: Tauri links webkit2gtk/gtk3 through pkg-config, so an aarch64 build
+  # from an x64 host needs a full arm64 sysroot of those libraries — a native
+  # runner is both simpler and what the deb/rpm/AppImage bundlers expect.
+  # No Flatpak row: the flatpak job consumes the x86_64 .deb and Flathub's arm64
+  # runtime is a separate manifest, which is its own piece of work.
+  linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            rpm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Set release version from tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+            echo "Stamping build with version $VERSION"
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          else
+            echo "Not a tag build; keeping version from tauri.conf.json"
+          fi
+
+      - name: Build Tauri app (Linux arm64)
+        run: npm run tauri build -- --target aarch64-unknown-linux-gnu --bundles deb,rpm,appimage
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mercs2-modkit-linux-aarch64
+          path: |
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig
+          if-no-files-found: error
+
+      - name: Attach to GitHub release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/deb/*.deb
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+            src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+
+  # macOS was missing entirely — modkit published nothing for it, on either arch,
+  # while the toolset it manages has shipped macOS binaries all along.
+  #
+  # BOTH arches build on the arm64 runner: aarch64 natively and x86_64 as a cross
+  # target the Apple toolchain links without an extra sysroot. Intel-native
+  # runners are being retired, so cross-compiling is the durable way to keep
+  # publishing the x86_64 build. This mirrors what the toolset's own release
+  # matrix already does.
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # No apt equivalent here: Tauri uses the system WKWebView, and modkit's
+      # own C-library deps resolve to Apple frameworks.
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Set release version from tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+            echo "Stamping build with version $VERSION"
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          else
+            echo "Not a tag build; keeping version from tauri.conf.json"
+          fi
+
+      - name: Build Tauri app (macOS ${{ matrix.arch }})
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles app,dmg
+        env:
+          # Signs the .app.tar.gz updater artifact. This is the UPDATER signature
+          # (minisign), which is unrelated to Apple code signing — without an
+          # Apple Developer certificate the .dmg is unsigned and unnotarised, so
+          # Gatekeeper will quarantine it on first open. Set APPLE_CERTIFICATE
+          # and friends here when a cert exists.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mercs2-modkit-macos-${{ matrix.arch }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+
+      - name: Attach to GitHub release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+
   flatpak:
     needs: linux
     runs-on: ubuntu-22.04
@@ -211,18 +369,90 @@ jobs:
             ${{ env.PORTABLE_ZIP }}
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
 
+  # Windows on ARM, on a native arm64 runner. WebView2 ships for ARM64, so the
+  # app itself is fine; a native runner avoids needing the cross ARM64 MSVC
+  # toolchain and lets NSIS bundle for the right architecture.
+  windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Set release version from tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+            echo "Stamping build with version $VERSION"
+            node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          else
+            echo "Not a tag build; keeping version from tauri.conf.json"
+          fi
+
+      - name: Build Tauri app (Windows arm64)
+        run: npm run tauri build -- --target aarch64-pc-windows-msvc --bundles nsis
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Package portable zip (exe + manifest)
+        shell: pwsh
+        run: |
+          $zip = "mercs2-modkit-portable-windows-arm64.zip"
+          $stage = "portable-stage"
+          New-Item -ItemType Directory -Path "$stage/manifests" | Out-Null
+          Copy-Item "src-tauri/target/aarch64-pc-windows-msvc/release/mercs2-modkit.exe" "$stage/"
+          Copy-Item "manifests/mercs2.manifest.json" "$stage/manifests/"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip
+          echo "PORTABLE_ZIP=$zip" >> $env:GITHUB_ENV
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mercs2-modkit-windows-aarch64
+          path: |
+            ${{ env.PORTABLE_ZIP }}
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
+          if-no-files-found: error
+
+      - name: Attach to GitHub release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.PORTABLE_ZIP }}
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+
   # Builds the Tauri-updater manifest (latest.json) that installed copies of
   # modkit poll via releases/latest/download/latest.json, pointing at this
-  # release's signed NSIS installer and AppImage.
+  # release's signed installers for every platform we publish.
   updater-manifest:
-    needs: [linux, windows]
+    needs: [linux, linux-arm64, macos, windows, windows-arm64]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     steps:
       - name: Download platform artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: mercs2-modkit-*-x86_64
+          # Every per-platform upload, not just the two x86_64 ones the manifest
+          # used to cover.
+          pattern: mercs2-modkit-*
           path: artifacts
 
       - name: Assemble latest.json
@@ -232,30 +462,39 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
 
-          exe=$(find artifacts -name '*-setup.exe' | head -n1)
-          appimage=$(find artifacts -name '*.AppImage' | head -n1)
-          test -n "$exe" || { echo "No NSIS installer in artifacts"; exit 1; }
-          test -n "$appimage" || { echo "No AppImage in artifacts"; exit 1; }
-          test -f "$exe.sig" || { echo "Missing $exe.sig — was TAURI_SIGNING_PRIVATE_KEY set?"; exit 1; }
-          test -f "$appimage.sig" || { echo "Missing $appimage.sig — was TAURI_SIGNING_PRIVATE_KEY set?"; exit 1; }
-
           jq -n \
             --arg version "$version" \
             --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg notes "See ${base%download/*}tag/${GITHUB_REF_NAME} for release notes." \
-            --arg win_url "$base/$(basename "$exe")" \
-            --arg win_sig "$(cat "$exe.sig")" \
-            --arg linux_url "$base/$(basename "$appimage")" \
-            --arg linux_sig "$(cat "$appimage.sig")" \
-            '{
-              version: $version,
-              pub_date: $pub_date,
-              notes: $notes,
-              platforms: {
-                "windows-x86_64": { url: $win_url, signature: $win_sig },
-                "linux-x86_64": { url: $linux_url, signature: $linux_sig }
-              }
-            }' > latest.json
+            '{version: $version, pub_date: $pub_date, notes: $notes, platforms: {}}' > latest.json
+
+          # Add one Tauri updater platform entry. Every platform we publish is
+          # REQUIRED: a missing key means installed copies on that platform poll
+          # forever and are silently told they are up to date — the exact failure
+          # this whole page exists to end. So a missing artifact fails the build.
+          add() {
+            local key="$1" dir="$2" glob="$3"
+            local f
+            f=$(find "artifacts/$dir" -name "$glob" 2>/dev/null | head -n1)
+            test -n "$f" || { echo "::error::No $glob in $dir — cannot publish $key"; exit 1; }
+            test -f "$f.sig" || { echo "::error::Missing $f.sig — was TAURI_SIGNING_PRIVATE_KEY set?"; exit 1; }
+            jq --arg k "$key" \
+               --arg u "$base/$(basename "$f")" \
+               --arg s "$(cat "$f.sig")" \
+               '.platforms[$k] = {url: $u, signature: $s}' latest.json > latest.tmp
+            mv latest.tmp latest.json
+            echo "  $key -> $(basename "$f")"
+          }
+
+          echo "updater platforms:"
+          add "windows-x86_64"  "mercs2-modkit-windows-x86_64"  '*-setup.exe'
+          add "windows-aarch64" "mercs2-modkit-windows-aarch64" '*-setup.exe'
+          add "linux-x86_64"    "mercs2-modkit-linux-x86_64"    '*.AppImage'
+          add "linux-aarch64"   "mercs2-modkit-linux-aarch64"   '*.AppImage'
+          # macOS updates from the .app.tar.gz, not the .dmg the release page shows.
+          add "darwin-aarch64"  "mercs2-modkit-macos-aarch64"   '*.app.tar.gz'
+          add "darwin-x86_64"   "mercs2-modkit-macos-x86_64"    '*.app.tar.gz'
+
           cat latest.json
 
       - name: Attach latest.json to GitHub release
