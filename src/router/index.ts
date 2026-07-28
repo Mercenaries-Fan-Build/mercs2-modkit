@@ -69,5 +69,10 @@ export const router = createRouter({
       name: "export",
       component: () => import("../views/ExportView.vue"),
     },
+    {
+      path: "/tools",
+      name: "tools",
+      component: () => import("../views/ToolsView.vue"),
+    },
   ],
 });

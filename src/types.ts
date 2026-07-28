@@ -522,6 +522,89 @@ export interface ComponentUpdate {
   available: boolean;
 }
 
+/**
+ * One binary from the Workshop toolset (the mercs2-wad-simulator release), as
+ * shown on the Workshop Tools page.
+ */
+export interface ToolStatus {
+  /** Asset stem, e.g. "wad_simulator". Also the id used by install/uninstall. */
+  name: string;
+  label: string;
+  blurb: string;
+  /**
+   * A windowed program you launch (the Workshop, the native game) rather than a
+   * command-line tool. Independent of `driven_by_modkit`.
+   */
+  windowed: boolean;
+  /** Modkit shells out to this tool itself, so removing it breaks a feature. */
+  driven_by_modkit: boolean;
+  /**
+   * False when the release publishes no build for this machine — the
+   * engine-backed apps (Workshop, Game) are 64-bit only, and there are no assets
+   * at all for unsupported OS/arch pairs.
+   */
+  available: boolean;
+  /** Absolute path once installed, else null. */
+  path: string | null;
+  /** The executable's size only — a companion bundle is not counted. */
+  size: number | null;
+  /** Not yet faithful to the retail game — offered for testing, not playing. */
+  experimental: boolean;
+  /**
+   * This tool cannot start without a Mercenaries 2 install — outside Windows it
+   * has no registry key to fall back on.
+   */
+  requires_game_dir: boolean;
+  /**
+   * Data bundle this tool needs unpacked beside it, or null if it needs none.
+   * The Workshop reads its reference data from `workshop_data/` next to its exe.
+   */
+  companion_dir: string | null;
+  /** False alongside a non-null `path` means a half-finished install. */
+  companion_ready: boolean;
+}
+
+/**
+ * Toolset-wide status. The whole toolset ships in ONE release, so it has a
+ * single installed tag rather than a version per tool.
+ */
+export interface ToolsetStatus {
+  installed_tag: string | null;
+  /** Null when the lookup was skipped or failed (offline). */
+  latest_tag: string | null;
+  update_available: boolean;
+  /**
+   * Directory "Open folder" opens — the version directory once something is
+   * installed, otherwise the toolset root. Always a real, existing directory.
+   */
+  dir: string;
+  tools: ToolStatus[];
+}
+
+/** A tool modkit launched that exited badly. Reported once, on the next poll. */
+export interface ToolFailure {
+  name: string;
+  label: string;
+  /** Exit status plus the tail of that tool's log. */
+  message: string;
+}
+
+/** Liveness snapshot for the tools modkit started. */
+export interface ToolsRunning {
+  /** Names of tools still running. */
+  running: string[];
+  /** Crashes since the previous poll — drained server-side, so never repeated. */
+  failures: ToolFailure[];
+}
+
+/** Progress event emitted by the backend while installing the toolset. */
+export interface ToolsetProgress {
+  tool: string;
+  label: string;
+  done: number;
+  total: number;
+}
+
 export interface InstallDllResult {
   path: string;
   version: string;

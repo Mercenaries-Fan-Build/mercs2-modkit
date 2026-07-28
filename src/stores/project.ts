@@ -38,6 +38,9 @@ import type {
   TexturePreview,
   TextureSwap,
   TextureTarget,
+  ToolsetProgress,
+  ToolsetStatus,
+  ToolsRunning,
   BackupResult,
   RestoreResult,
   TrashResult,
@@ -150,6 +153,12 @@ interface ProjectState {
   crackVersion: string | null;
   // Release-update status per core component, keyed "pmc_bb" / "apply_crack".
   componentUpdates: Record<string, ComponentUpdate>;
+  // Workshop toolset (the mercs2-wad-simulator release binaries modkit manages).
+  toolset: ToolsetStatus | null;
+  /** An install/update is running; holds which tool is in flight. */
+  toolsetProgress: ToolsetProgress | null;
+  /** Names of windowed tools modkit started that are still running. */
+  runningTools: string[];
   // Host's 32-bit VC++ 2008 runtime status (null = not yet checked).
   vcRedist: VcRedistStatus | null;
   // Matchmaking region registry status (null = not yet checked / N/A).
@@ -200,6 +209,9 @@ export const useProjectStore = defineStore("project", {
     pmcBbVersion: null,
     crackVersion: null,
     componentUpdates: {},
+    toolset: null,
+    toolsetProgress: null,
+    runningTools: [],
     vcRedist: null,
     region: null,
     preferredRegion: null,
@@ -804,6 +816,122 @@ export const useProjectStore = defineStore("project", {
         } catch {
           /* offline or no releases yet — keep any prior result */
         }
+      }
+    },
+
+    /**
+     * Refresh the Workshop toolset status. `checkRemote` also asks GitHub for
+     * the latest release tag; skip it for a cheap local-only refresh.
+     *
+     * Best-effort like the other update checks — an offline lookup still returns
+     * what is installed, so the page renders either way.
+     */
+    async refreshToolset(checkRemote = true) {
+      try {
+        this.toolset = await invoke<ToolsetStatus>("toolset_status", {
+          checkRemote,
+        });
+      } catch {
+        /* toolset dir unreadable — leave any prior status in place */
+      }
+    },
+
+    /**
+     * Install the named tools at the latest release, bringing everything already
+     * installed up to that same release with them. Pass nothing to just update.
+     *
+     * The union is enforced in Rust: the toolset ships as one release, so modkit
+     * never leaves a mix of tags on disk.
+     */
+    async installTools(names: string[] = []) {
+      if (this.toolsetProgress) return;
+      this.error = null;
+      this.toolsetProgress = { tool: "", label: "", done: 0, total: 0 };
+      try {
+        this.toolset = await invoke<ToolsetStatus>("install_tools", { names });
+      } catch (e) {
+        this.error = `Toolset install failed: ${e}`;
+      } finally {
+        this.toolsetProgress = null;
+      }
+    },
+
+    /**
+     * Open the platform's default terminal (PowerShell on Windows, Terminal on
+     * macOS, the desktop's emulator on Linux) in the user's home folder, with
+     * the installed CLI tools on PATH.
+     */
+    async openToolShell() {
+      this.error = null;
+      try {
+        await invoke("open_tool_shell");
+      } catch (e) {
+        this.error = String(e);
+      }
+    },
+
+    /**
+     * Launch one of the windowed tools (Workshop, native game), handing it the
+     * game install modkit already detected so the user is not asked for a path
+     * modkit knows.
+     */
+    async launchTool(name: string) {
+      this.error = null;
+      try {
+        // The Tools page can be the first thing opened in a session, so the
+        // saves listing may not have been fetched yet. Without this the game
+        // falls back to its own default and misses a custom saves folder.
+        if (!this.savesInfo) await this.refreshSaves().catch(() => {});
+        await invoke("launch_tool", {
+          name,
+          gameDir: this.gamePath,
+          savesDir: this.savesInfo?.dir ?? null,
+        });
+        // Reflect it immediately rather than waiting up to a poll interval for
+        // the button to catch up.
+        if (!this.runningTools.includes(name)) this.runningTools.push(name);
+      } catch (e) {
+        this.error = String(e);
+      }
+    },
+
+    /** Stop a tool modkit started. */
+    async stopTool(name: string) {
+      this.error = null;
+      try {
+        await invoke("stop_tool", { name });
+        this.runningTools = this.runningTools.filter((n) => n !== name);
+      } catch (e) {
+        this.error = String(e);
+      }
+    },
+
+    /**
+     * Refresh which tools are running, mirroring `refreshRunning` for the game.
+     * Crashes come back here too — a tool that dies on startup would otherwise
+     * just flip its button back to "Open" with no explanation.
+     */
+    async pollTools() {
+      try {
+        const res = await invoke<ToolsRunning>("poll_tools");
+        this.runningTools = res.running;
+        if (res.failures.length) {
+          this.error = res.failures
+            .map((f) => `${f.label} ${f.message}`)
+            .join("\n\n");
+        }
+      } catch {
+        /* backend not reachable — leave the last known state alone */
+      }
+    },
+
+    /** Remove one installed tool (the engine-backed apps are the large ones). */
+    async uninstallTool(name: string) {
+      this.error = null;
+      try {
+        this.toolset = await invoke<ToolsetStatus>("uninstall_tool", { name });
+      } catch (e) {
+        this.error = String(e);
       }
     },
 

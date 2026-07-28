@@ -9,7 +9,7 @@ import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
 
 const store = useProjectStore();
-const { mods, asiMods, conflictCount, modkitUpdate, componentUpdates } =
+const { mods, asiMods, conflictCount, modkitUpdate, componentUpdates, toolset } =
   storeToRefs(store);
 
 // Core components (pmc_bb, apply_crack) with a newer release than what's installed.
@@ -30,6 +30,9 @@ onMounted(() => {
   store.init();
   store.checkModkitUpdate();
   store.checkComponentUpdates();
+  // Surfaces the nav dot when the toolset has a newer release. One API call for
+  // all 11 binaries — they ship in a single release.
+  store.refreshToolset();
 });
 </script>
 
@@ -116,6 +119,18 @@ onMounted(() => {
           active-class="nav-link-active"
         >
           Build &amp; Deploy
+        </RouterLink>
+        <RouterLink
+          to="/tools"
+          class="nav-link"
+          active-class="nav-link-active"
+        >
+          Workshop tools
+          <span
+            v-if="toolset?.update_available"
+            class="ml-auto h-1.5 w-1.5 rounded-full bg-amber-400"
+            title="A newer release of the Workshop toolset is available"
+          />
         </RouterLink>
         <RouterLink
           to="/saves"
