@@ -43,7 +43,8 @@ jobs:
             curl \
             wget \
             file \
-            rpm
+            rpm \
+            xdg-utils
 
       - name: Install frontend dependencies
         run: npm ci
@@ -111,6 +112,9 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      # xdg-utils is what the x64 image ships preinstalled and this one does not:
+      # the AppImage bundler copies /usr/bin/xdg-open into the bundle for the
+      # opener plugin, and aborts the whole build when it is missing.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -125,7 +129,8 @@ jobs:
             curl \
             wget \
             file \
-            rpm
+            rpm \
+            xdg-utils
 
       - name: Install frontend dependencies
         run: npm ci
