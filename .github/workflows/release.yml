@@ -234,6 +234,19 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # Both arches bundle to the same basename, `mercs2-modkit.app.tar.gz`, so
+      # they would overwrite each other as release assets. Stamp the arch in
+      # before either upload; updater-manifest derives the URL from whatever
+      # basename it finds, so the rename flows through to latest.json.
+      - name: Stamp arch into the updater tarball
+        run: |
+          set -euo pipefail
+          dir="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          for f in "$dir"/*.app.tar.gz; do
+            mv "$f"      "${f%.app.tar.gz}_${{ matrix.arch }}.app.tar.gz"
+            mv "$f.sig"  "${f%.app.tar.gz}_${{ matrix.arch }}.app.tar.gz.sig"
+          done
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -244,11 +257,16 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: error
 
+      # The .app.tar.gz has to be attached, not just archived as a build
+      # artifact: latest.json points macOS updaters at its release-download
+      # URL, and while it was dmg-only that URL 404'd for both arches.
       - name: Attach to GitHub release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
 
   flatpak:
     needs: linux
