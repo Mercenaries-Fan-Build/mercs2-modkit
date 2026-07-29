@@ -155,6 +155,26 @@ const TOOLS: &[Tool] = &[
         requires_game_dir: true,
     },
     Tool {
+        name: "qm",
+        label: "Quartermaster",
+        blurb: "Checks a mod folder for the mistakes that hang the game, then \
+                builds it into a WAD.",
+        windowed: false,
+        driven_by_modkit: false,
+        // The release publishes `qm` on the four 64-bit rows only. It is authoring
+        // tooling — it reads a mod folder and writes a WAD, never running inside
+        // the game's 32-bit process — so unlike an injected tool it has no reason
+        // to match the game's bitness, and there is no i686 asset to install.
+        sixty_four_bit_only: true,
+        companion: None,
+        experimental: false,
+        // `qm build` needs the game, but `qm lint` deliberately does not — it is
+        // manifest text plus the mod folder, no install and no network, which is
+        // what lets it run in a public CI job. Requiring a game dir here would
+        // block the half that is meant to work without one.
+        requires_game_dir: false,
+    },
+    Tool {
         name: "wad_simulator",
         label: "WAD Simulator",
         blurb: "Validates a built patch WAD the way the engine consumes it.",
