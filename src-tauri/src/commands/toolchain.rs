@@ -160,8 +160,13 @@ const TOOLS: &[Tool] = &[
         blurb: "Checks a mod folder for the mistakes that hang the game, then \
                 builds it into a WAD.",
         windowed: false,
-        driven_by_modkit: false,
-        // The release publishes `qm` on the four 64-bit rows only. It is authoring
+        // Modkit builds the end user's Shipment THROUGH qm — it is what packs and
+        // composes a mod folder into a game-ready WAD, so a missing qm breaks
+        // building, not just a hand-run command. Users also invoke it directly to
+        // lint without any game content, which is why it is listed rather than
+        // hidden as an implementation detail.
+        driven_by_modkit: true,
+        // The release publishes `qm` for 64-bit targets only. It is authoring
         // tooling — it reads a mod folder and writes a WAD, never running inside
         // the game's 32-bit process — so unlike an injected tool it has no reason
         // to match the game's bitness, and there is no i686 asset to install.
