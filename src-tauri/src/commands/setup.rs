@@ -86,16 +86,31 @@ fn platform_token() -> &'static str {
 
 /// CPU-arch token (paired with the OS token) to pick the matching `apply_crack`
 /// build when a release ships more than one arch (e.g. windows i686 + x86_64).
-fn arch_token() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
+///
+/// ARM is spelled **`arm64`**, not `aarch64`. That is the convention every repo
+/// in the ecosystem publishes under — see
+/// [`super::toolchain::platform_suffix`], which resolves `-macos-arm64`,
+/// `-linux-arm64` and `-windows-arm64.exe`, and the assets the toolset release
+/// actually carries. Spelling it `aarch64` here meant the `exact` predicate in
+/// [`crack_game`] could never match on an ARM host, quietly demoting every ARM
+/// user to the OS-only fallback and whichever asset GitHub happened to list
+/// first — an x86_64 binary that will not even exec on ARM Linux.
+/// [`arch_tokens_match_the_toolset_suffix`] pins the two modules together.
+///
+/// `None` for an arch the releases do not build (riscv, 32-bit ARM, …). That is
+/// distinct from a guess: the previous `""` sentinel made `n.contains(arch)`
+/// vacuously true, so `exact` silently collapsed into the fallback instead of
+/// reporting that the host is unsupported.
+fn arch_token() -> Option<&'static str> {
+    Some(if cfg!(target_arch = "x86_64") {
         "x86_64"
     } else if cfg!(target_arch = "x86") {
         "i686"
     } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
+        "arm64"
     } else {
-        ""
-    }
+        return None;
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -160,16 +175,29 @@ pub async fn crack_game(
     let client = client()?;
     let os = platform_token();
     let arch = arch_token();
-    // Prefer the build matching our exact OS+arch (releases now ship e.g. both
-    // windows-i686 and windows-x86_64); fall back to any build for this OS so a
-    // single-arch release still resolves. apply_crack only byte-patches the exe,
-    // so the patched output is identical across arches — this is host-compat only.
-    let exact = |n: &str| n.starts_with("apply_crack") && n.contains(os) && n.contains(arch);
+    // Prefer the build matching our exact OS+arch (the release ships all four
+    // arches per OS); fall back to any build for this OS so a single-arch or
+    // older release still resolves. apply_crack only byte-patches the exe, so the
+    // patched output is identical across arches — this is host-compat only.
+    //
+    // The fallback is a last resort, not a convenience: on a host whose arch we
+    // do not recognise it will hand back a binary for some *other* arch, which at
+    // best runs under emulation and at worst refuses to exec. It stays because
+    // failing to find anything is worse, and because `exact` now covers every
+    // arch the release actually builds.
+    let exact = |n: &str| {
+        arch.is_some_and(|a| n.starts_with("apply_crack") && n.contains(os) && n.contains(a))
+    };
     let os_only = |n: &str| n.starts_with("apply_crack") && n.contains(os);
     let picks: [&(dyn Fn(&str) -> bool + Sync); 2] = [&exact, &os_only];
     let (tag, name, bytes) = download_latest_asset(&client, CRACK_REPO, &picks)
         .await
-        .map_err(|e| format!("{e}. No apply_crack build for {os}/{arch}."))?;
+        .map_err(|e| {
+            format!(
+                "{e}. No apply_crack build for {os}/{}.",
+                arch.unwrap_or(std::env::consts::ARCH)
+            )
+        })?;
 
     // Cache the tool binary and make it executable.
     let bindir = app_data_dir()?.join("bin");
@@ -203,4 +231,59 @@ pub async fn crack_game(
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         tool_version: tag,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two download paths must spell an arch the same way.
+    ///
+    /// [`arch_token`] picks `apply_crack` assets from the securom-bypass release;
+    /// [`super::super::toolchain::platform_suffix`] picks tool assets from the
+    /// toolset release. Both repos publish under one naming scheme, but nothing
+    /// tied the two constants together — so `aarch64` here drifted against
+    /// `-…-arm64` there, and the mismatch was invisible until an ARM host tried
+    /// to install. Asserting the token is a substring of the suffix catches that
+    /// on any runner, whatever arch CI happens to use.
+    #[test]
+    fn arch_tokens_match_the_toolset_suffix() {
+        let (Some(token), Some(suffix)) = (arch_token(), super::super::toolchain::platform_suffix())
+        else {
+            // An arch neither module publishes for. Both said so — consistent.
+            return;
+        };
+        assert!(
+            suffix.contains(token),
+            "arch_token() is {token:?} but the toolset publishes {suffix:?} — an \
+             `apply_crack-…-{token}` asset will never match on this host",
+        );
+    }
+
+    /// The OS token has to appear in the suffix for the same reason.
+    #[test]
+    fn os_token_matches_the_toolset_suffix() {
+        let Some(suffix) = super::super::toolchain::platform_suffix() else {
+            return;
+        };
+        assert!(
+            suffix.contains(platform_token()),
+            "platform_token() is {:?} but the toolset publishes {suffix:?}",
+            platform_token(),
+        );
+    }
+
+    /// ARM is `arm64` in asset names, never `aarch64` — the spelling this whole
+    /// pairing exists to keep straight. Pinned independently of the host so a
+    /// regression fails on an x86_64 runner too, where the test above is silent
+    /// about ARM.
+    #[test]
+    fn arm_is_spelled_arm64() {
+        if cfg!(target_arch = "aarch64") {
+            assert_eq!(arch_token(), Some("arm64"));
+        }
+        for suffix in ["-macos-arm64", "-linux-arm64", "-windows-arm64.exe"] {
+            assert!(!suffix.contains("aarch64"), "{suffix} regressed to aarch64");
+        }
+    }
 }

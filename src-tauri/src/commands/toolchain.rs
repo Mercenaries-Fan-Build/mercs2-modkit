@@ -155,6 +155,31 @@ const TOOLS: &[Tool] = &[
         requires_game_dir: true,
     },
     Tool {
+        name: "qm",
+        label: "Quartermaster",
+        blurb: "Checks a mod folder for the mistakes that hang the game, then \
+                builds it into a WAD.",
+        windowed: false,
+        // Modkit builds the end user's Shipment THROUGH qm — it is what packs and
+        // composes a mod folder into a game-ready WAD, so a missing qm breaks
+        // building, not just a hand-run command. Users also invoke it directly to
+        // lint without any game content, which is why it is listed rather than
+        // hidden as an implementation detail.
+        driven_by_modkit: true,
+        // The release publishes `qm` for 64-bit targets only. It is authoring
+        // tooling — it reads a mod folder and writes a WAD, never running inside
+        // the game's 32-bit process — so unlike an injected tool it has no reason
+        // to match the game's bitness, and there is no i686 asset to install.
+        sixty_four_bit_only: true,
+        companion: None,
+        experimental: false,
+        // `qm build` needs the game, but `qm lint` deliberately does not — it is
+        // manifest text plus the mod folder, no install and no network, which is
+        // what lets it run in a public CI job. Requiring a game dir here would
+        // block the half that is meant to work without one.
+        requires_game_dir: false,
+    },
+    Tool {
         name: "wad_simulator",
         label: "WAD Simulator",
         blurb: "Validates a built patch WAD the way the engine consumes it.",
@@ -274,7 +299,11 @@ fn tool(name: &str) -> Option<&'static Tool> {
 /// 32-bit x86 rows. Every entry here must have a matching `suffix:` row in the
 /// toolset's release matrix — a suffix with no publisher makes every tool report
 /// "no build for this machine", which is the arm64-Linux behaviour this replaced.
-fn platform_suffix() -> Option<&'static str> {
+///
+/// `pub(crate)` so [`super::setup`] can assert its own arch spelling against this
+/// one; the two modules download from different repos but must agree on how an
+/// arch is named in an asset.
+pub(crate) fn platform_suffix() -> Option<&'static str> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => "-windows-x86_64.exe",
         ("windows", "x86") => "-windows-i686.exe",
