@@ -105,7 +105,7 @@ fn known_regions_vec() -> Vec<String> {
 
 /// Report the matchmaking-relevant registry state for `game_root`, judged
 /// against `preferred_region` (or the pool default when unset/unknown).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_region(game_root: String, preferred_region: Option<String>) -> RegionStatus {
     let install_dir = install_dir_value(&game_root);
     let expected = resolve_region(preferred_region.as_deref());

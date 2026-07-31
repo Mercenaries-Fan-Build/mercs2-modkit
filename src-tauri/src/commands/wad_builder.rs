@@ -196,7 +196,7 @@ fn all_groups(options: &BuildOptions) -> Result<Vec<ClaimGroup>, String> {
     Ok(groups)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn assemble_patch_wad(options: BuildOptions) -> Result<BuildResult, String> {
     let groups = all_groups(&options)?;
     let resolved = claim::resolve(&groups);
@@ -239,7 +239,7 @@ pub fn assemble_patch_wad(options: BuildOptions) -> Result<BuildResult, String> 
 
 /// Dry-run the load order: report what would apply, what would be overridden, and any
 /// unresolvable overlap — without writing anything.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConflicts> {
     let groups = match all_groups(&options) {
         Ok(g) => g,

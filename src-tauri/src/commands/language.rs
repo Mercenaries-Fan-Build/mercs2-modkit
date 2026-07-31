@@ -179,7 +179,7 @@ pub fn scan_languages(game_root: String) -> Result<LanguageStatus, String> {
 /// Keep `language` and move every other language's `.wad`/`.pws` to the trash.
 /// Refuses if the chosen language has no content on disk (that would leave the
 /// game with no VO/text).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_language(game_root: String, language: String) -> Result<SetLanguageResult, String> {
     let root = PathBuf::from(&game_root);
     if !root.is_dir() {

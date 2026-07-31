@@ -77,9 +77,9 @@ const GLOBAL_INI: &str =
 /// Spawn the game, with the install folder as the working directory so it
 /// resolves its data files and side-by-side DLLs. Refuses to start a second
 /// instance while the one we launched is still running.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn launch_game(
-    state: State<GameProcess>,
+    state: State<'_, GameProcess>,
     exe_path: String,
     game_root: Option<String>,
     overrides: Option<LaunchOverrides>,
@@ -133,7 +133,7 @@ pub fn launch_game(
 
 /// Report what runtime discovery resolves to (honoring the same overrides), so
 /// the UI can display it / let the user correct it before launching.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discover_runtime(overrides: Option<LaunchOverrides>) -> RuntimeInfo {
     let _ov = overrides.unwrap_or_default();
     #[cfg(target_os = "linux")]

@@ -50,7 +50,7 @@ pub struct InstallVcRedistResult {
 }
 
 /// Report whether the VC++ 2008 (x86) runtime is installed.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_vcredist() -> VcRedistStatus {
     #[cfg(target_os = "windows")]
     {

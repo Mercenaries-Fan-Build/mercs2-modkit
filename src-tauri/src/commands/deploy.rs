@@ -39,7 +39,7 @@ fn basename(rel: &str) -> &str {
 
 /// Copy a mod's staged `.asi` plugins into the chosen ASI loader folder,
 /// backing up any file already present at the destination.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn deploy_asi(args: DeployAsiArgs) -> Result<DeployResult, String> {
     if !VALID_TARGETS.contains(&args.target.as_str()) {
         return Err(format!(
@@ -120,7 +120,7 @@ fn now_millis() -> u128 {
 /// clobbers a prior copy); with `permanent` it is deleted outright. Operates on
 /// absolute paths (typically from the detected `deployed_asi` list), so it can
 /// remove any plugin in the game folder — managed or orphaned.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_paths(paths: Vec<String>, permanent: bool) -> Result<TrashResult, String> {
     let dir = if permanent { None } else { Some(trash_dir()?) };
 

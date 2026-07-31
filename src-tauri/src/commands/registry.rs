@@ -278,7 +278,7 @@ fn custom_sources_path() -> Result<std::path::PathBuf, String> {
 }
 
 /// Return the user's saved custom mod-source repositories.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_custom_sources() -> Vec<RepoSource> {
     let path = match custom_sources_path() {
         Ok(p) => p,
@@ -292,7 +292,7 @@ pub fn get_custom_sources() -> Vec<RepoSource> {
 }
 
 /// Overwrite the saved custom mod-source list with `sources`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_custom_sources(sources: Vec<RepoSource>) -> Result<(), String> {
     let path = custom_sources_path()?;
     let text = serde_json::to_string_pretty(&sources)
