@@ -38,7 +38,7 @@ serde_json = "1"
 # engine's decompression buffer at a single 32 KB page), `validate_blocks` (one primary ASET
 # row per hash), `sges::compressed_len`, `scripts_block` (Lua editing), `texture::replace_body`.
 mercs2_formats = "3.0"
-loadprobe = "2.0"
+loadprobe = "2.1"
 
 # Lua 5.1 compiler emitting the game's exact bytecode dialect (float lua_Number, 32-bit
 # size_t). The wardrobe is pure Lua: modkit recompiles `wifpmcinterior` with each mod's
@@ -71,14 +71,3 @@ texpresso = "2"
 
 [dev-dependencies]
 tempfile = "3"
-
-
-# ── DEV-LOCAL OVERRIDE — remove once loadprobe 2.1.0 is published ────────────────────────────
-# `loadprobe` 2.0.x shipped BIN-ONLY: no `[lib]`, no `src/lib.rs`, only `[[bin]]`. So
-# `use loadprobe::{parse, report, sha256};` cannot link — the version resolves and downloads
-# fine, then five of OUR files fail with "unresolved module or unlinked crate", which reads as
-# our bug rather than a missing target. Fixed upstream by adding the lib target (loadprobe
-# 2.1.0). Until that is on crates.io, build against the local checkout, exactly as the note at
-# the top of this file recommends.
-[patch.crates-io]
-loadprobe = { path = "../../notes-on-the-released-game/tools/wad_simulator/crates/loadprobe" }
