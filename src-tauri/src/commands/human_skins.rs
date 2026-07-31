@@ -92,11 +92,27 @@ pub struct SkinIndex {
     pub skins: Vec<HumanSkin>,
 }
 
-fn fingerprint(archive: &FfcsArchive) -> u32 {
-    let mut buf = Vec::with_capacity(archive.aset.len() * 8);
-    for e in &archive.aset {
-        buf.extend_from_slice(&e.asset_hash.to_le_bytes());
-        buf.extend_from_slice(&e.type_id.to_le_bytes());
+/// One mounted archive. Ordered base-first; a later source SHADOWS an earlier one, which is the
+/// game's own mount rule (WAD mount order is last-wins).
+struct Source {
+    file: std::fs::File,
+    archive: FfcsArchive,
+}
+
+/// Fingerprint over EVERY mounted archive, not just the base.
+///
+/// This used to hash `vz.wad`'s ASET alone, which made the cache blind to overlays: you could drop
+/// a `vz-patch.wad` carrying a brand-new skin, and because the base WAD had not changed the
+/// fingerprint matched, the cache was served, and the new model never appeared in the wardrobe. It
+/// also meant REMOVING a patch left its skins listed. Folding each source's ASET in — in mount
+/// order — makes adding, changing or removing a patch invalidate the scan.
+fn fingerprint(srcs: &[Source]) -> u32 {
+    let mut buf = Vec::new();
+    for s in srcs {
+        for e in &s.archive.aset {
+            buf.extend_from_slice(&e.asset_hash.to_le_bytes());
+            buf.extend_from_slice(&e.type_id.to_le_bytes());
+        }
     }
     crc32_mercs2(&buf)
 }
@@ -105,16 +121,70 @@ fn cache_path() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("human-skins.json"))
 }
 
-fn vz_wad(game_path: &str) -> Result<PathBuf, String> {
-    for c in [
+/// Extra names the user's own content introduces, one per line / array entry, hashed the same way
+/// the built-in table is.
+///
+/// `ASSET_NAMES` is `include_str!`'d at COMPILE time, so a model the user authored can never be
+/// named by it — and since `wearable` requires a name (`Player.SetOutfit` addresses the model by
+/// name), every user-authored skin was permanently unwearable no matter how good its rig. This
+/// reads an optional `custom-names.json` from the app data dir: a JSON array of NAMES only, never
+/// hash→name pairs, so a typo cannot mint a wrong mapping — the hash is always derived from the
+/// name, which is what the engine does too.
+fn custom_names() -> Vec<String> {
+    let Ok(dir) = app_data_dir() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(dir.join("custom-names.json")) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<Vec<String>>(&bytes).unwrap_or_default()
+}
+
+/// The archives to scan, in mount order: `vz.wad` first, then any overlay beside it.
+///
+/// Modkit mounted only `vz.wad` here, so nothing shipped in a patch overlay was ever considered —
+/// the scan could not see a new skin even though the rest of the app loads the overlay fine.
+fn wad_paths(game_path: &str) -> Result<Vec<PathBuf>, String> {
+    let base = [
         Path::new(game_path).join("data").join("vz.wad"),
         Path::new(game_path).join("vz.wad"),
-    ] {
-        if c.is_file() {
-            return Ok(c);
+    ]
+    .into_iter()
+    .find(|c| c.is_file())
+    .ok_or_else(|| format!("Could not find vz.wad under {game_path}"))?;
+    let mut out = vec![base.clone()];
+    // Overlays sit next to the base WAD. `vz-patch.wad` is the name the injection tooling ships.
+    if let Some(dir) = base.parent() {
+        let patch = dir.join("vz-patch.wad");
+        if patch.is_file() {
+            out.push(patch);
         }
     }
-    Err(format!("Could not find vz.wad under {game_path}"))
+    Ok(out)
+}
+
+fn open_sources(game_path: &str) -> Result<Vec<Source>, String> {
+    let mut srcs = Vec::new();
+    for p in wad_paths(game_path)? {
+        let mut file =
+            std::fs::File::open(&p).map_err(|e| format!("open {}: {e}", p.display()))?;
+        let size = file.metadata().map_err(|e| format!("stat: {e}"))?.len();
+        let archive = load_ffcs_archive(&mut file, size)
+            .map_err(|e| format!("FFCS {}: {e}", p.display()))?;
+        srcs.push(Source { file, archive });
+    }
+    Ok(srcs)
+}
+
+/// A model's bones, taken from the LAST source that carries it (mount order is last-wins).
+fn bones_of_sources(srcs: &mut [Source], hash: u32) -> HashSet<u32> {
+    for s in srcs.iter_mut().rev() {
+        let b = bones_of(&mut s.file, &s.archive, hash);
+        if !b.is_empty() {
+            return b;
+        }
+    }
+    HashSet::new()
 }
 
 /// Bone name-hashes of a model's skeleton.
@@ -132,11 +202,8 @@ fn bones_of(f: &mut std::fs::File, archive: &FfcsArchive, hash: u32) -> HashSet<
 /// do nothing. It's the ones at 100% that are certain.
 #[tauri::command(async)]
 pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
-    let wad = vz_wad(&game_path)?;
-    let mut f = std::fs::File::open(&wad).map_err(|e| format!("open vz.wad: {e}"))?;
-    let size = f.metadata().map_err(|e| format!("stat: {e}"))?.len();
-    let archive = load_ffcs_archive(&mut f, size).map_err(|e| format!("FFCS: {e}"))?;
-    let want = fingerprint(&archive);
+    let mut srcs = open_sources(&game_path)?;
+    let want = fingerprint(&srcs);
 
     if let Ok(bytes) = std::fs::read(cache_path()?) {
         if let Ok(idx) = serde_json::from_slice::<SkinIndex>(&bytes) {
@@ -146,19 +213,28 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
         }
     }
 
-    let names: HashMap<u32, &str> = ASSET_NAMES
+    // Built-in table first, then the user's own names, which win on a tie.
+    let mut names: HashMap<u32, String> = ASSET_NAMES
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(|n| (pandemic_hash_m2(n), n))
+        .map(|n| (pandemic_hash_m2(n), n.to_string()))
         .collect();
+    for n in custom_names() {
+        let n = n.trim().to_string();
+        if !n.is_empty() {
+            names.insert(pandemic_hash_m2(&n), n);
+        }
+    }
 
     // Reference rig = the bones all three heroes share. Using the intersection rather than any
     // one hero avoids treating that hero's private extras (Mattias has 116 bones to Jen's 92)
     // as requirements.
     let hero_rigs: Vec<(&str, HashSet<u32>)> = HERO_MODELS
         .iter()
-        .map(|(label, model)| (*label, bones_of(&mut f, &archive, pandemic_hash_m2(model))))
+        .map(|(label, model)| {
+            (*label, bones_of_sources(&mut srcs, pandemic_hash_m2(model)))
+        })
         .collect();
     let common: HashSet<u32> = hero_rigs
         .iter()
@@ -175,11 +251,12 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
         .map(|(_, m)| pandemic_hash_m2(m))
         .collect();
 
+    // Every model across every mounted archive, deduped. An overlay's brand-new asset appears here
+    // alongside the base game's; one it SHADOWS is listed once and resolved from the overlay.
     let models: Vec<u32> = {
         let mut seen = HashSet::new();
-        archive
-            .aset
-            .iter()
+        srcs.iter()
+            .flat_map(|s| s.archive.aset.iter())
             .filter(|e| e.type_id == TYPE_ID_MODEL)
             .map(|e| e.asset_hash)
             .filter(|h| seen.insert(*h))
@@ -188,7 +265,7 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
 
     let mut skins = Vec::new();
     for m in models {
-        let bones = bones_of(&mut f, &archive, m);
+        let bones = bones_of_sources(&mut srcs, m);
         if bones.is_empty() {
             continue;
         }
@@ -210,8 +287,10 @@ pub fn human_skins(game_path: String) -> Result<SkinIndex, String> {
             .unwrap_or_default();
 
         // Its look: the diffuse maps its parts actually paint.
-        let (triangles, textures) = match extract_model(&mut f, &archive, m)
-            .ok()
+        let (triangles, textures) = match srcs
+            .iter_mut()
+            .rev()
+            .find_map(|s| extract_model(&mut s.file, &s.archive, m).ok())
             .and_then(|c| build_indexed_all(&c).ok())
         {
             Some((_, indices, groups, _)) => {

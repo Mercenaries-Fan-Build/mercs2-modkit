@@ -59,7 +59,7 @@ pub struct DetectedTypeInfo {
 }
 
 /// Frontend command: detect the type of a single asset file by path.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_asset_type(path: String) -> DetectedTypeInfo {
     DetectedTypeInfo {
         detected_type: detect_type_for(Path::new(&path)),

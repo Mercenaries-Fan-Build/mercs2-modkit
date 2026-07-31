@@ -617,7 +617,7 @@ pub struct TextureExport {
 /// real thing at full size; for a streamed one it's the resident tail (a 512² skin may only
 /// keep 64² inline), and `is_full_resolution` says so — better an honest small PNG than a
 /// blurry upscale presented as the original.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_texture(
     game_path: String,
     name: String,
@@ -682,7 +682,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Describe what swapping `name` would do — and whether we'll allow it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_texture(game_path: String, name: String) -> Result<TextureTarget, String> {
     let Donor { hash, width, height, format, resident, .. } = donor(&game_path, &name)?;
 

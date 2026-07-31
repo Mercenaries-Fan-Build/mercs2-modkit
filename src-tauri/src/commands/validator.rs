@@ -36,7 +36,7 @@ pub async fn fetch_wad_simulator(window: Window) -> Result<String, String> {
 
 /// Run the simulator against a WAD. `simulator_path` defaults to `wad_simulator`
 /// on `PATH` when omitted (e.g. after `cargo install wad_simulator`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn validate_wad(
     wad_path: String,
     simulator_path: Option<String>,

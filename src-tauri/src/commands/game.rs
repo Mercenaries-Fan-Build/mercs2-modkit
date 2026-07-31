@@ -299,7 +299,7 @@ fn list_deployed_patches(dir: &Path) -> Vec<String> {
 }
 
 /// Detect a Mercenaries 2 install from a folder the user selected.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_game(path: String) -> Result<GameInfo, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {

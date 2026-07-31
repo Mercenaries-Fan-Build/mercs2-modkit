@@ -222,7 +222,7 @@ fn count_files(dir: &Path) -> usize {
 
 /// Import local `.asi` plugin file(s) as an ASI mod by staging copies of them.
 /// `name` overrides the derived mod name (default: first file's stem).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_local_asi(paths: Vec<String>, name: Option<String>) -> Result<InstallResult, String> {
     if paths.is_empty() {
         return Err("No files selected".to_string());

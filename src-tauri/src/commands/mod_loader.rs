@@ -34,7 +34,7 @@ pub fn default_patch_for(detected_type: &str) -> String {
 }
 
 /// Load a mod directory: reads `<path>/manifest.json` and resolves each asset.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_mod(path: String) -> Result<LoadedMod, String> {
     let root = PathBuf::from(&path);
     let manifest_path = root.join("manifest.json");

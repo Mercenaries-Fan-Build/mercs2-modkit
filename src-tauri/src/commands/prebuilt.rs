@@ -50,7 +50,7 @@ pub struct PrebuiltWad {
 }
 
 /// Inspect a patch WAD without importing it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_patch_wad(path: String) -> Result<PrebuiltWad, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
     let contents = read_patch_wad(&bytes)

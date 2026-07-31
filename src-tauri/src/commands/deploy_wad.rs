@@ -68,7 +68,7 @@ pub struct DeployWadArgs {
 /// Install a built `vz-patch.wad` into the game, backing up whatever was there.
 ///
 /// The game holds the file open while running — close it first, or the copy fails.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> {
     let src = PathBuf::from(&args.wad_path);
     if !src.is_file() {
@@ -131,7 +131,7 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
 }
 
 /// List restorable snapshots of previously-installed patch WADs, newest first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_patch_wad_backups() -> Result<Vec<WadBackup>, String> {
     let dir = backups_dir()?;
     let mut out = Vec::new();
@@ -169,7 +169,7 @@ pub struct RestoreWadArgs {
 /// (reverting the game to stock `vz.wad`, which is always a safe state).
 ///
 /// The current WAD is snapshotted first, so "restore" is itself undoable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String> {
     let dest = patch_target(&args.data_dir);
 

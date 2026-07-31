@@ -423,7 +423,7 @@ pub fn backup_before_launch(prefix: Option<&str>) -> Result<BackupResult, String
 }
 
 /// The live SaveGames folder and per-save header details.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_saves(prefix: Option<String>) -> SavesInfo {
     let overridden = saves_dir_override().is_some();
     let Ok(dir) = saves_dir(prefix.as_deref()) else {
@@ -445,7 +445,7 @@ pub fn list_saves(prefix: Option<String>) -> SavesInfo {
 /// Set (or clear, with None) the SaveGames-folder override. The folder must
 /// exist when setting — the picker only returns real directories, so anything
 /// else is a stale path.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_saves_dir(dir: Option<String>) -> Result<(), String> {
     let path = override_path()?;
     match dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
@@ -465,7 +465,7 @@ pub fn set_saves_dir(dir: Option<String>) -> Result<(), String> {
 }
 
 /// Snapshot the current saves now (manual "Back up now" button).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_saves(prefix: Option<String>, reason: Option<String>) -> Result<BackupResult, String> {
     let saves = saves_dir(prefix.as_deref())?;
     backup_into(
@@ -476,14 +476,14 @@ pub fn backup_saves(prefix: Option<String>, reason: Option<String>) -> Result<Ba
 }
 
 /// Stored snapshots, newest first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_save_backups() -> Result<Vec<SaveBackupInfo>, String> {
     list_backups_in(&paths::save_backups_dir()?)
 }
 
 /// Copy a snapshot's saves back over the live SaveGames folder, snapshotting
 /// the current state first so the restore itself is undoable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_save_backup(id: String, prefix: Option<String>) -> Result<RestoreResult, String> {
     let backup = checked_backup_dir(&id)?;
     let saves = saves_dir(prefix.as_deref())?;
@@ -508,7 +508,7 @@ pub fn restore_save_backup(id: String, prefix: Option<String>) -> Result<Restore
 }
 
 /// Permanently delete one stored snapshot.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_save_backup(id: String) -> Result<(), String> {
     let dir = checked_backup_dir(&id)?;
     std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to delete backup {id}: {e}"))

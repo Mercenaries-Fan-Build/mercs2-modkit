@@ -11,7 +11,7 @@ const ROUTINE: &[&str] = &["lua", "pool"];
 const SIGNALS: &[&str] = &["###!", "###", "!!!", "##@", "@@@", "***", "=-="];
 
 /// Analyze a `pmc_blackbox.log` and return loadprobe's full forensic report.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn analyze_log(path: String) -> Result<report::Report, String> {
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("Cannot read {path}: {e}"))?;
@@ -33,7 +33,7 @@ pub fn analyze_log(path: String) -> Result<report::Report, String> {
 }
 
 /// Try to locate `pmc_blackbox.log` near a game install (root, then scripts/).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn locate_log(game_root: String) -> Option<String> {
     let root = PathBuf::from(&game_root);
     let candidates = [root.join("pmc_blackbox.log"), root.join("scripts/pmc_blackbox.log")];
