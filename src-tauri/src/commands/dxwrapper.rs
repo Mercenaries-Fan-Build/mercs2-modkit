@@ -46,6 +46,7 @@ const PROXY_DLL: &str = "d3d9.dll";
 /// dx9.games.zip) with just the two keys the modkit owns:
 ///   - `LoadCustomDllPath = pmc_bb.dll` — side-load the logging bridge;
 ///   - `LoadPlugins = 0` — pmc_bb is the sole loader, dxwrapper's scanner stays off.
+///
 /// Every other setting the release ships is preserved verbatim. Used in preference
 /// to the hand-written `dxwrapper_ini()` fallback, whose sparse shape isn't proven.
 fn patch_ini(bundled: &str) -> String {
