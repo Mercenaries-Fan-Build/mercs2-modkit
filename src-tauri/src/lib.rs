@@ -11,11 +11,13 @@ use commands::conflict_resolver::build_conflict_graph;
 use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
 use commands::deploy_wad::{deploy_patch_wad, list_patch_wad_backups, restore_patch_wad};
+use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
 use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::language::{scan_languages, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
+use commands::license::detect_license;
 use commands::logprobe::{analyze_log, locate_log};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::model_view::{model_geometry, model_variants, texture_parts};
@@ -25,7 +27,7 @@ use commands::save_backup::{
     backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
     set_saves_dir,
 };
-use commands::setup::{crack_game, install_pmc_bb};
+use commands::setup::{crack_game, install_pmc_bb, install_pmc_bb_log, update_game};
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
     uninstall_tool, ToolProcesses,
@@ -96,7 +98,11 @@ pub fn run() {
             deploy_asi,
             trash_paths,
             install_pmc_bb,
+            install_pmc_bb_log,
             crack_game,
+            update_game,
+            detect_license,
+            install_dxwrapper,
             launch_game,
             discover_runtime,
             is_game_running,

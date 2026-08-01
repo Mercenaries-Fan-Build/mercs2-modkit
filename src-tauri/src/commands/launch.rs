@@ -149,12 +149,18 @@ pub fn discover_runtime(overrides: Option<LaunchOverrides>) -> RuntimeInfo {
     }
 }
 
-/// Pick the executable to actually launch: prefer the cracked build (de-DRM'd,
-/// imports the ASI loader) over the detected/stock exe. Shares
-/// `game::resolve_exes` with detection so what we launch is exactly what Game
-/// Info reports as `launch_exe_path` — including a crack written to a
-/// non-default filename.
+/// Pick the executable to actually launch.
+///
+/// Licensed (dxwrapper) path: if `dxwrapper.dll` is installed, the copy loads
+/// mods without touching the exe, so we launch the **stock** exe and never a
+/// cracked sibling — even if one happens to be lying around. Otherwise (crack
+/// path) prefer the cracked build (de-DRM'd, imports the ASI loader) over the
+/// detected/stock exe. Shares `game::resolve_exes` with detection so what we
+/// launch matches what Game Info reports as `launch_exe_path`.
 fn launch_exe(game_dir: &Path, detected: &Path) -> PathBuf {
+    if game_dir.join("dxwrapper.dll").is_file() {
+        return detected.to_path_buf();
+    }
     match crate::commands::game::resolve_exes(game_dir) {
         Some((_, Some(cracked))) => PathBuf::from(cracked.path),
         _ => detected.to_path_buf(),

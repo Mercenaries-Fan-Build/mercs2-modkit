@@ -25,8 +25,14 @@ pub struct GameInfo {
     /// The exe `launch_game` will actually run: the cracked sibling when one is
     /// present, else `exe_path`.
     pub launch_exe_path: String,
-    /// `pmc_bb.dll` present in the install (the DRM-spoof / debug DLL).
+    /// `pmc_bb.dll` present in the install (the ASI loader / logging bridge —
+    /// the DRM-spoofing build on the crack path, or the logging-only build on
+    /// the licensed dxwrapper path; both live at this name).
     pub has_pmc_bb: bool,
+    /// `dxwrapper.dll` present in the install — the non-destructive loader used
+    /// for licensed copies. When set, the modkit launches the stock exe and
+    /// never the cracked one.
+    pub has_dxwrapper: bool,
     /// Name of the Ultimate ASI Loader proxy DLL present, if any
     /// (e.g. `dinput8.dll`). `None` means no loader is installed.
     pub asi_loader_proxy: Option<String>,
@@ -308,11 +314,17 @@ pub fn detect_game(path: String) -> Result<GameInfo, String> {
 
     let (base, cracked) = resolve_exes(&root)
         .ok_or_else(|| "No Mercenaries2.exe found in that folder".to_string())?;
-    // What we launch, mirroring `launch::launch_exe`: the cracked build wins.
-    let launch_exe_path = cracked
-        .as_ref()
-        .map(|c| c.path.clone())
-        .unwrap_or_else(|| base.path.clone());
+    // What we launch, mirroring `launch::launch_exe`: on the licensed dxwrapper
+    // path the stock exe is launched untouched; otherwise the cracked build wins.
+    let has_dxwrapper = root.join("dxwrapper.dll").is_file();
+    let launch_exe_path = if has_dxwrapper {
+        base.path.clone()
+    } else {
+        cracked
+            .as_ref()
+            .map(|c| c.path.clone())
+            .unwrap_or_else(|| base.path.clone())
+    };
 
     let data_dir = find_data_dir(&root);
     let deployed_patches = data_dir
@@ -329,6 +341,7 @@ pub fn detect_game(path: String) -> Result<GameInfo, String> {
         cracked_exe: cracked,
         launch_exe_path,
         has_pmc_bb: root.join("pmc_bb.dll").is_file(),
+        has_dxwrapper,
         asi_loader_proxy: find_asi_loader(&root),
         data_dir: data_dir.map(|d| d.to_string_lossy().to_string()),
         deployed_patches,
