@@ -148,6 +148,44 @@ pub async fn install_pmc_bb(game_root: String) -> Result<InstallDllResult, Strin
     })
 }
 
+/// Download the logging-only `pmc_bb_log.dll` (the pmc-blackbox build with the
+/// SecuROM event compiled out — it keeps the ASI loader) and install it into the
+/// game root **as `pmc_bb.dll`** — the name dxwrapper's `LoadCustomDllPath` and
+/// every ASI plugin (`GetModuleHandle("pmc_bb.dll")`) expect. On the licensed
+/// path dxwrapper side-loads this DLL with its own `LoadPlugins = 0`, so pmc_bb
+/// is the single loader that scans `scripts/*.asi` — same loader as the crack
+/// path, minus the DRM spoof. Any existing `pmc_bb.dll` is backed up first.
+#[tauri::command]
+pub async fn install_pmc_bb_log(game_root: String) -> Result<InstallDllResult, String> {
+    let root = PathBuf::from(&game_root);
+    if !root.is_dir() {
+        return Err(format!("Game folder not found: {game_root}"));
+    }
+
+    let client = client()?;
+    // The logging-only build is published under its own asset name; fall back to
+    // a case-insensitive match so a differently-cased release still resolves.
+    let pick_log = |n: &str| n.eq_ignore_ascii_case("pmc_bb_log.dll");
+    let picks: [&(dyn Fn(&str) -> bool + Sync); 1] = [&pick_log];
+    let (tag, _name, bytes) = download_latest_asset(&client, PMC_BB_REPO, &picks)
+        .await
+        .map_err(|e| format!("{e}. The pmc-blackbox release must publish pmc_bb_log.dll (make log)."))?;
+
+    // Install under the canonical on-disk name so plugins resolve pmc_log().
+    let dest = root.join("pmc_bb.dll");
+    if dest.exists() {
+        let backup = dest.with_extension("dll.bak");
+        let _ = std::fs::rename(&dest, &backup);
+    }
+    std::fs::write(&dest, &bytes)
+        .map_err(|e| format!("Failed to write pmc_bb.dll (logging build): {e}"))?;
+
+    Ok(InstallDllResult {
+        path: dest.to_string_lossy().to_string(),
+        version: tag,
+    })
+}
+
 #[derive(Debug, Serialize)]
 pub struct CrackResult {
     pub ok: bool,
@@ -159,20 +197,10 @@ pub struct CrackResult {
     pub tool_version: String,
 }
 
-/// Download `apply_crack` and run it on the exe to apply the SecuROM bypass,
-/// optionally first updating v1.0 → v1.1. Writes a new cracked exe.
-#[tauri::command]
-pub async fn crack_game(
-    exe_path: String,
-    output_path: Option<String>,
-    update_to_v11: bool,
-) -> Result<CrackResult, String> {
-    let exe = PathBuf::from(&exe_path);
-    if !exe.is_file() {
-        return Err(format!("Game exe not found: {exe_path}"));
-    }
-
-    let client = client()?;
+/// Download the `apply_crack` build matching this host and cache it as an
+/// executable in the app-data bin dir. Returns `(release_tag, binary_path)`.
+/// Shared by [`crack_game`] and [`update_game`].
+async fn cache_apply_crack(client: &reqwest::Client) -> Result<(String, PathBuf), String> {
     let os = platform_token();
     let arch = arch_token();
     // Prefer the build matching our exact OS+arch (the release ships all four
@@ -190,7 +218,7 @@ pub async fn crack_game(
     };
     let os_only = |n: &str| n.starts_with("apply_crack") && n.contains(os);
     let picks: [&(dyn Fn(&str) -> bool + Sync); 2] = [&exact, &os_only];
-    let (tag, name, bytes) = download_latest_asset(&client, CRACK_REPO, &picks)
+    let (tag, name, bytes) = download_latest_asset(client, CRACK_REPO, &picks)
         .await
         .map_err(|e| {
             format!(
@@ -199,7 +227,6 @@ pub async fn crack_game(
             )
         })?;
 
-    // Cache the tool binary and make it executable.
     let bindir = app_data_dir()?.join("bin");
     std::fs::create_dir_all(&bindir).map_err(|e| e.to_string())?;
     let bin = bindir.join(&name);
@@ -211,16 +238,33 @@ pub async fn crack_game(
         perms.set_mode(0o755);
         std::fs::set_permissions(&bin, perms).map_err(|e| e.to_string())?;
     }
+    Ok((tag, bin))
+}
+
+/// Download `apply_crack` and run it on the exe to apply the SecuROM bypass,
+/// writing a new cracked exe. apply_crack auto-detects the version and always
+/// brings a v1.0 input up to v1.1 before cracking (a v1.1 input skips that
+/// itself) — there is no skip-update, so this always yields cracked v1.1.
+#[tauri::command]
+pub async fn crack_game(
+    exe_path: String,
+    output_path: Option<String>,
+) -> Result<CrackResult, String> {
+    let exe = PathBuf::from(&exe_path);
+    if !exe.is_file() {
+        return Err(format!("Game exe not found: {exe_path}"));
+    }
+
+    let client = client()?;
+    let (tag, bin) = cache_apply_crack(&client).await?;
 
     let out = output_path
         .unwrap_or_else(|| exe.with_file_name("Mercenaries2.cracked.exe").to_string_lossy().to_string());
 
-    let mut cmd = Command::new(&bin);
-    cmd.arg(&exe_path).arg("--output").arg(&out);
-    if !update_to_v11 {
-        cmd.arg("--skip-update");
-    }
-    let output = cmd
+    let output = Command::new(&bin)
+        .arg(&exe_path)
+        .arg("--output")
+        .arg(&out)
         .output()
         .map_err(|e| format!("Failed to run apply_crack: {e}"))?;
 
@@ -229,6 +273,71 @@ pub async fn crack_game(
         output_path: out,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        tool_version: tag,
+    })
+}
+
+/// Update the game exe to the official **v1.1 without cracking**
+/// (`apply_crack --update-only`): produces the retail, still-SecuROM v1.1 and
+/// installs it in place as the game's exe, backing the original up to `BACKUP/`
+/// first. For LICENSED copies — SecuROM stays intact, the activation carries
+/// over, and mods load via dxwrapper + pmc_bb. The exe is replaced (this is an
+/// update), but the original is always recoverable from `BACKUP/`.
+#[tauri::command]
+pub async fn update_game(exe_path: String) -> Result<CrackResult, String> {
+    let exe = PathBuf::from(&exe_path);
+    if !exe.is_file() {
+        return Err(format!("Game exe not found: {exe_path}"));
+    }
+
+    let client = client()?;
+    let (tag, bin) = cache_apply_crack(&client).await?;
+
+    // Stage the updated exe next to the original, then swap it in only on success.
+    let staged = exe.with_file_name("Mercenaries2.v1.1.staged.exe");
+    let output = Command::new(&bin)
+        .arg(&exe_path)
+        .arg("--update-only")
+        .arg("--output")
+        .arg(&staged)
+        .output()
+        .map_err(|e| format!("Failed to run apply_crack: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&staged);
+        return Ok(CrackResult {
+            ok: false,
+            output_path: exe_path,
+            stdout,
+            stderr,
+            tool_version: tag,
+        });
+    }
+
+    // Back up the original once (never clobber an existing backup — it holds the
+    // true pre-update exe), mirroring the official patch's BACKUP/ convention.
+    if let Some(root) = exe.parent() {
+        let backup_dir = root.join("BACKUP");
+        std::fs::create_dir_all(&backup_dir)
+            .map_err(|e| format!("Failed to create BACKUP dir: {e}"))?;
+        let backup = backup_dir.join(exe.file_name().unwrap_or_default());
+        if !backup.exists() {
+            std::fs::copy(&exe, &backup)
+                .map_err(|e| format!("Failed to back up original exe: {e}"))?;
+        }
+    }
+    // Install the update in place (copy over, then drop the staged file). `copy`
+    // overwrites the destination on every platform, unlike `rename` on Windows.
+    std::fs::copy(&staged, &exe)
+        .map_err(|e| format!("Failed to install updated exe: {e}"))?;
+    let _ = std::fs::remove_file(&staged);
+
+    Ok(CrackResult {
+        ok: true,
+        output_path: exe_path,
+        stdout,
+        stderr,
         tool_version: tag,
     })
 }

@@ -5,13 +5,23 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
 
 const store = useProjectStore();
-const { gameInfo, busy, error, pmcBbVersion, componentUpdates, vcRedist, region } =
-  storeToRefs(store);
+const {
+  gameInfo,
+  busy,
+  error,
+  pmcBbVersion,
+  dxwrapperVersion,
+  componentUpdates,
+  vcRedist,
+  region,
+} = storeToRefs(store);
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
+const dxwrapperUpdate = computed(() => componentUpdates.value["dxwrapper"]);
 const checking = ref(false);
 const stage = ref("");
 const pmcMsg = ref<string | null>(null);
+const dxMsg = ref<string | null>(null);
 const vcMsg = ref<string | null>(null);
 const regionMsg = ref<string | null>(null);
 
@@ -63,6 +73,21 @@ async function installPmcBb() {
   try {
     const res = await store.installPmcBb();
     pmcMsg.value = `Installed pmc_bb.dll ${res.version} → ${res.path}`;
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    stage.value = "";
+  }
+}
+
+async function setupDxwrapper() {
+  stage.value = "Downloading dxwrapper + logging pmc_bb…";
+  dxMsg.value = null;
+  try {
+    const res = await store.setupDxwrapper();
+    dxMsg.value = res.ok
+      ? `Installed dxwrapper ${res.version} → ${res.proxyPath}`
+      : "dxwrapper install failed — see the error above.";
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -158,15 +183,38 @@ async function normalizeRegion() {
           "
         >
           <template v-if="store.gameFullySetUp">
-            v1.1, cracked, and pmc_bb.dll installed — launching
-            <span class="font-mono text-xs">{{
-              store.crackedBuild?.name
-            }}</span
-            >.
+            <template v-if="store.setupPath === 'licensed'">
+              Licensed — dxwrapper + logging pmc_bb.dll installed, exe untouched.
+              Launching
+              <span class="font-mono text-xs">{{ gameInfo.launch_exe_path }}</span
+              >.
+            </template>
+            <template v-else-if="store.setupPath === 'drm_free'">
+              DRM-free exe + pmc_bb.dll installed — no crack or wrapper needed.
+              Launching
+              <span class="font-mono text-xs">{{ gameInfo.launch_exe_path }}</span
+              >.
+            </template>
+            <template v-else>
+              v1.1, cracked, and pmc_bb.dll installed — launching
+              <span class="font-mono text-xs">{{ store.crackedBuild?.name }}</span
+              >.
+            </template>
           </template>
           <template v-else>
-            Needs v1.1 + cracked exe + pmc_bb.dll. Finish in
-            <RouterLink to="/setup" class="underline">Setup</RouterLink>.
+            <template v-if="store.setupPath === 'licensed'">
+              Licensed copy — install dxwrapper + pmc_bb.dll below (or in
+              <RouterLink to="/setup" class="underline">Setup</RouterLink>). Your
+              exe is never modified.
+            </template>
+            <template v-else-if="store.setupPath === 'drm_free'">
+              DRM-free exe — just install pmc_bb.dll below (or in
+              <RouterLink to="/setup" class="underline">Setup</RouterLink>).
+            </template>
+            <template v-else>
+              Needs v1.1 + cracked exe + pmc_bb.dll. Finish in
+              <RouterLink to="/setup" class="underline">Setup</RouterLink>.
+            </template>
           </template>
         </p>
         <p
@@ -257,8 +305,12 @@ async function normalizeRegion() {
         </dl>
       </section>
 
-      <!-- pmc_bb.dll -->
-      <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
+      <!-- pmc_bb.dll (crack / DRM-free paths; on the licensed path it's the
+           logging build installed by the dxwrapper section below) -->
+      <section
+        v-if="store.setupPath !== 'licensed'"
+        class="guilloche mt-4 rounded-xl border border-zinc-800 p-5"
+      >
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
             <h3 class="plate-title text-sm">pmc_bb.dll (ASI loader)</h3>
@@ -355,6 +407,79 @@ async function normalizeRegion() {
               pmcBbUpdate?.available
                 ? "Update"
                 : gameInfo.has_pmc_bb
+                  ? "Reinstall"
+                  : "Install"
+            }}
+          </button>
+        </div>
+      </section>
+
+      <!-- dxwrapper -->
+      <section
+        v-if="store.setupPath === 'licensed' || gameInfo.has_dxwrapper"
+        class="guilloche mt-4 rounded-xl border border-zinc-800 p-5"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <h3 class="plate-title text-sm">dxwrapper</h3>
+            <p class="mt-1 text-sm text-zinc-400">
+              DirectX wrapper (elishacloud/dxwrapper) — modkit installs and keeps it up to date.
+            </p>
+
+            <dl class="mt-3 space-y-2 text-sm">
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Status</dt>
+                <dd>
+                  <span
+                    class="stamp"
+                    :class="gameInfo.has_dxwrapper ? 'text-emerald-300' : 'text-zinc-500'"
+                    >{{ gameInfo.has_dxwrapper ? "Installed ✓" : "Not installed" }}</span
+                  >
+                </dd>
+              </div>
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Installed version</dt>
+                <dd class="text-zinc-300">
+                  {{ gameInfo.has_dxwrapper ? (dxwrapperVersion ?? "unknown") : "—" }}
+                </dd>
+              </div>
+              <div class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Latest release</dt>
+                <dd class="text-zinc-300">{{ dxwrapperUpdate?.latest ?? "—" }}</dd>
+              </div>
+            </dl>
+
+            <p
+              v-if="dxwrapperUpdate?.available"
+              class="mt-3 flex items-center gap-1.5 text-sm font-medium text-amber-300"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              Update available → {{ dxwrapperUpdate.latest }}
+            </p>
+
+            <p
+              v-if="dxMsg"
+              class="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300"
+            >
+              {{ dxMsg }}
+            </p>
+            <p v-if="stage" class="mt-2 text-xs text-zinc-500">{{ stage }}</p>
+          </div>
+
+          <button
+            class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium disabled:opacity-50"
+            :class="
+              dxwrapperUpdate?.available
+                ? 'bg-amber-500 text-zinc-900 hover:bg-amber-400'
+                : 'bg-emerald-600 text-white hover:bg-emerald-500'
+            "
+            :disabled="busy"
+            @click="setupDxwrapper"
+          >
+            {{
+              dxwrapperUpdate?.available
+                ? "Update"
+                : gameInfo.has_dxwrapper
                   ? "Reinstall"
                   : "Install"
             }}

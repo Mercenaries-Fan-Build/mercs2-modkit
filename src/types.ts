@@ -415,6 +415,8 @@ export interface GameInfo {
   /** The exe launch_game actually runs: the cracked one when present. */
   launch_exe_path: string;
   has_pmc_bb: boolean;
+  /** dxwrapper.dll present — the non-destructive loader for licensed copies. */
+  has_dxwrapper: boolean;
   asi_loader_proxy: string | null; // e.g. "pmc_bb.dll", or null if none
   data_dir: string | null;
   deployed_patches: string[];
@@ -616,6 +618,30 @@ export interface CrackResult {
   stdout: string;
   stderr: string;
   tool_version: string; // apply_crack release tag that was downloaded & run
+}
+
+/**
+ * Whether this machine holds a SecuROM activation for the game. When `licensed`,
+ * Setup offers the non-destructive dxwrapper path instead of cracking the exe.
+ */
+export interface LicenseStatus {
+  applicable: boolean; // false on non-Windows (activation lives in the Wine prefix)
+  licensed: boolean; // legally owned: CD-Key registered OR SecuROM-activated
+  cdKeyPresent: boolean; // EA ergc CD-Key present (Mercs2-specific proof of purchase)
+  licenseKeyPresent: boolean; // "License information - Do not delete!" present
+  userDataPresent: boolean; // UserData holds securom_v7_* activation data (main signal)
+  keysFound: string[]; // the exact registry keys that matched
+  detail: string;
+}
+
+/** Outcome of installing dxwrapper as the licensed-copy mod loader. */
+export interface DxwrapperResult {
+  ok: boolean;
+  version: string; // dxwrapper release tag installed
+  proxyPath: string; // the stub proxy DLL written (e.g. …/dsound.dll)
+  dxwrapperPath: string;
+  iniPath: string;
+  notes: string[];
 }
 
 /** Whether the 32-bit Microsoft Visual C++ 2008 runtime is installed. */

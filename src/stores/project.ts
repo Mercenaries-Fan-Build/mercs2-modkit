@@ -12,6 +12,8 @@ import type {
   ComponentUpdate,
   ConflictGraph,
   CrackResult,
+  LicenseStatus,
+  DxwrapperResult,
   DeployedAsi,
   DeployResult,
   DeployWadResult,
@@ -66,6 +68,7 @@ const LIBRARY_KEY = "mercs2-modkit:library";
 // release of either can be flagged as an available update.
 const PMC_BB_VERSION_KEY = "mercs2-modkit:pmcBbVersion";
 const CRACK_VERSION_KEY = "mercs2-modkit:crackVersion";
+const DXWRAPPER_VERSION_KEY = "mercs2-modkit:dxwrapperVersion";
 const REGION_KEY = "mercs2-modkit:preferredRegion";
 
 function slugify(name: string): string {
@@ -124,6 +127,7 @@ let pendingUpdate: Update | null = null;
 /** Repos publishing the core components modkit installs (release-checked too). */
 const PMC_BB_REPO = "https://github.com/Mercenaries-Fan-Build/pmc-blackbox";
 const CRACK_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-securom-bypass";
+const DXWRAPPER_REPO = "https://github.com/elishacloud/dxwrapper";
 
 interface ProjectState {
   // Base game
@@ -151,6 +155,8 @@ interface ProjectState {
   // Versions of the core components modkit last installed (null = unknown).
   pmcBbVersion: string | null;
   crackVersion: string | null;
+  /** dxwrapper release tag last installed (licensed path); null = unknown. */
+  dxwrapperVersion: string | null;
   // Release-update status per core component, keyed "pmc_bb" / "apply_crack".
   componentUpdates: Record<string, ComponentUpdate>;
   // Workshop toolset (the mercs2-wad-simulator release binaries modkit manages).
@@ -163,6 +169,9 @@ interface ProjectState {
   vcRedist: VcRedistStatus | null;
   // Matchmaking region registry status (null = not yet checked / N/A).
   region: RegionStatus | null;
+  // SecuROM activation / licensing status (null = not yet checked / N/A). When
+  // licensed, Setup uses the dxwrapper path and leaves the exe untouched.
+  license: LicenseStatus | null;
   // The Region the user picked (persisted; null = the community pool default).
   preferredRegion: string | null;
   // Player saves + stored snapshots (Save backups view).
@@ -208,12 +217,14 @@ export const useProjectStore = defineStore("project", {
     updateProgress: null,
     pmcBbVersion: null,
     crackVersion: null,
+    dxwrapperVersion: null,
     componentUpdates: {},
     toolset: null,
     toolsetProgress: null,
     runningTools: [],
     vcRedist: null,
     region: null,
+    license: null,
     preferredRegion: null,
     savesInfo: null,
     saveBackups: [],
@@ -284,9 +295,62 @@ export const useProjectStore = defineStore("project", {
       }
       return null;
     },
-    /** Fully prepared for modding: v1.1, cracked, with the ASI loader installed. */
+    /**
+     * A legitimately licensed copy (SecuROM activation present). Setup steers
+     * such installs to the dxwrapper path and never touches the exe.
+     */
+    isLicensed(state): boolean {
+      return state.license?.applicable === true && state.license.licensed;
+    },
+
+    /**
+     * The exe we'd launch is already DRM-free — an apply_crack output OR a
+     * legitimately-owned DRM-free build (e.g. mercs2_nodrm_v3.exe). Such an exe
+     * imports pmc_bb.dll itself, so it needs neither a crack (done) nor dxwrapper
+     * (not the loader) — just pmc_bb.dll present. `crackedBuild` already captures
+     * "a v1.1 DRM-free build is the base or a sibling", by size class.
+     */
+    exeDrmFree(): boolean {
+      return !!this.crackedBuild;
+    },
+
+    /**
+     * Which of the three setup paths applies, ordered by what would actually
+     * launch (mirrors `launch::launch_exe`):
+     *   1. dxwrapper installed → "licensed": it launches the stock exe untouched,
+     *      so respect that even if a DRM-free sibling is also lying around;
+     *   2. else a DRM-free exe would launch → "drm_free": just install pmc_bb.dll;
+     *   3. else SecuROM retail exe with an activation → "licensed": set up dxwrapper;
+     *   4. else → "crack": apply the bypass.
+     */
+    setupPath(state): "drm_free" | "licensed" | "crack" {
+      if (state.gameInfo?.has_dxwrapper) return "licensed";
+      if (this.exeDrmFree) return "drm_free";
+      if (this.isLicensed) return "licensed";
+      return "crack";
+    },
+
+    /** Licensed path ready: dxwrapper + the logging pmc_bb bridge are installed. */
+    dxwrapperReady(state): boolean {
+      return !!state.gameInfo?.has_dxwrapper && !!state.gameInfo?.has_pmc_bb;
+    },
+
+    /**
+     * Fully prepared for modding, per path:
+     *   - drm_free: pmc_bb.dll present (the exe imports it);
+     *   - licensed: dxwrapper + pmc_bb (logging) installed, exe untouched;
+     *   - crack:    not set up yet — cracking produces a DRM-free exe, which
+     *               flips the path to "drm_free".
+     */
     gameFullySetUp(state): boolean {
-      return !!state.gameInfo?.has_pmc_bb && !!this.crackedBuild;
+      switch (this.setupPath) {
+        case "drm_free":
+          return !!state.gameInfo?.has_pmc_bb;
+        case "licensed":
+          return this.dxwrapperReady;
+        default:
+          return false;
+      }
     },
     /** Filenames of ASI plugins currently present in the game install. */
     deployedAsiNames(state): Set<string> {
@@ -404,6 +468,7 @@ export const useProjectStore = defineStore("project", {
       this.asiTarget = localStorage.getItem(ASI_TARGET_KEY) ?? "scripts";
       this.pmcBbVersion = localStorage.getItem(PMC_BB_VERSION_KEY);
       this.crackVersion = localStorage.getItem(CRACK_VERSION_KEY);
+      this.dxwrapperVersion = localStorage.getItem(DXWRAPPER_VERSION_KEY);
       this.preferredRegion = localStorage.getItem(REGION_KEY);
 
       // Restore the library (WAD mods, ASI plugins, enable flags, wardrobe picks).
@@ -802,6 +867,12 @@ export const useProjectStore = defineStore("project", {
           repo: CRACK_REPO,
           current: this.crackVersion,
         },
+        {
+          key: "dxwrapper",
+          name: "dxwrapper",
+          repo: DXWRAPPER_REPO,
+          current: this.dxwrapperVersion,
+        },
       ];
       for (const { key, name, repo, current } of checks) {
         try {
@@ -1028,10 +1099,20 @@ export const useProjectStore = defineStore("project", {
         this.error = String(e);
         throw e;
       }
-      // Probe the host runtime + matchmaking region alongside detection
-      // (non-fatal if either fails).
+      // Probe the host runtime + matchmaking region + license alongside
+      // detection (non-fatal if any fails).
       void this.checkVcRedist();
       void this.checkRegion();
+      void this.checkLicense();
+    },
+
+    /** Detect a SecuROM activation so Setup can offer the dxwrapper path. */
+    async checkLicense() {
+      try {
+        this.license = await invoke<LicenseStatus>("detect_license");
+      } catch {
+        /* leave any prior result in place */
+      }
     },
 
     /** Check whether the host has the 32-bit VC++ 2008 runtime the game needs. */
@@ -1583,11 +1664,52 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /** Crack the exe (and optionally update v1.0 → v1.1) via apply_crack. */
-    async crackGame(opts: {
-      updateToV11: boolean;
-      outputPath: string | null;
-    }): Promise<CrackResult> {
+    /**
+     * Set up the licensed (non-destructive) mod path: install the logging-only
+     * pmc_bb.dll and dxwrapper, leaving the exe untouched. One action so the
+     * Setup page can offer it as a single step. Order matters only cosmetically
+     * (both land before launch); pmc_bb first so the loader it needs exists.
+     */
+    async setupDxwrapper(): Promise<DxwrapperResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        // Install dxwrapper FIRST, so it (and its tracked version) land even if the
+        // logging pmc_bb download isn't available yet.
+        const res = await invoke<DxwrapperResult>("install_dxwrapper", {
+          gameRoot: this.gameInfo.root,
+        });
+        if (res.version) {
+          this.dxwrapperVersion = res.version;
+          localStorage.setItem(DXWRAPPER_VERSION_KEY, res.version);
+        }
+        // Then the logging bridge (installed as pmc_bb.dll). If that download fails
+        // (e.g. the release hasn't published pmc_bb_log.dll yet) but a pmc_bb.dll is
+        // already present, keep going — only a total absence of the loader is fatal.
+        try {
+          const log = await invoke<InstallDllResult>("install_pmc_bb_log", {
+            gameRoot: this.gameInfo.root,
+          });
+          this.pmcBbVersion = log.version;
+          localStorage.setItem(PMC_BB_VERSION_KEY, log.version);
+        } catch (e) {
+          await this.refreshGame().catch(() => {});
+          if (!this.gameInfo?.has_pmc_bb) throw e;
+          this.error = `dxwrapper installed, but the logging pmc_bb.dll couldn't be downloaded (${e}). Keeping the pmc_bb.dll already present.`;
+        }
+        await this.refreshGame().catch(() => {});
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Crack the exe via apply_crack (auto-updates v1.0 → v1.1, then bypasses). */
+    async crackGame(opts: { outputPath: string | null }): Promise<CrackResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.busy = true;
       this.error = null;
@@ -1595,10 +1717,37 @@ export const useProjectStore = defineStore("project", {
         const res = await invoke<CrackResult>("crack_game", {
           exePath: this.gameInfo.exe_path,
           outputPath: opts.outputPath,
-          updateToV11: opts.updateToV11,
         });
         // Remember the apply_crack build we ran so a later release shows as an
         // available update.
+        if (res.tool_version) {
+          this.crackVersion = res.tool_version;
+          localStorage.setItem(CRACK_VERSION_KEY, res.tool_version);
+          void this.checkComponentUpdates();
+        }
+        await this.refreshGame().catch(() => {});
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /**
+     * Update the exe to the official v1.1 WITHOUT cracking (apply_crack
+     * --update-only): installs the retail, still-DRM'd v1.1 in place, backing the
+     * original up to BACKUP/. For a licensed v1.0 copy — activation carries over.
+     */
+    async updateGame(): Promise<CrackResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<CrackResult>("update_game", {
+          exePath: this.gameInfo.exe_path,
+        });
         if (res.tool_version) {
           this.crackVersion = res.tool_version;
           localStorage.setItem(CRACK_VERSION_KEY, res.tool_version);
