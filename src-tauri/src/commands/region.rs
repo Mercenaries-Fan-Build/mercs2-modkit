@@ -18,6 +18,9 @@
 
 use serde::Serialize;
 
+#[cfg(target_os = "windows")]
+use super::proc::NoWindow;
+
 /// The default `Region` for the community pool — what you get without picking
 /// one. Matchmaking only works between installs that share a value, so the UI
 /// must make clear that choosing a different region moves you to that region's
@@ -283,6 +286,7 @@ fn build_reg_file(region: &str, install_dir: &str) -> String {
 fn reg_query_value(key: &str, name: &str) -> Option<String> {
     let out = std::process::Command::new("reg")
         .args(["query", key, "/v", name])
+        .no_window()
         .output()
         .ok()?;
     if !out.status.success() {
@@ -321,6 +325,7 @@ fn import_reg_elevated(path: &std::path::Path) -> Result<(), String> {
             SCRIPT,
         ])
         .env("MERCS2_REG_FILE", path)
+        .no_window()
         .output()
         .map_err(|e| format!("Failed to run PowerShell: {e}"))?;
 

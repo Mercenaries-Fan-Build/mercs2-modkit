@@ -14,6 +14,7 @@ use std::process::Command;
 use serde::Serialize;
 use tauri::Window;
 
+use super::proc::NoWindow;
 use super::toolchain::ensure_tool;
 
 /// Outcome of running the simulator against a WAD.
@@ -45,6 +46,7 @@ pub fn validate_wad(
     let output = Command::new(&bin)
         .arg("--wad")
         .arg(&wad_path)
+        .no_window()
         .output()
         .map_err(|e| {
             format!(

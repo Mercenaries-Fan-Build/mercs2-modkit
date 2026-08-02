@@ -17,6 +17,9 @@ use serde::Serialize;
 #[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
+use super::proc::NoWindow;
+
 /// Official Microsoft permalink for the Visual C++ 2008 SP1 (x86) redistributable.
 /// SP1 ships publisher-policy redirects, so manifests that reference the original
 /// 9.0.21022 CRT (as game-shipped binkw32 builds do) resolve against it.
@@ -235,6 +238,7 @@ fn powershell(script: &str, path: &Path) -> Result<std::process::Output, String>
             script,
         ])
         .env("VCREDIST_PATH", path)
+        .no_window()
         .output()
         .map_err(|e| format!("Failed to run PowerShell: {e}"))
 }

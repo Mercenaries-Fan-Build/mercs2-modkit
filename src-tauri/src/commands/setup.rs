@@ -9,6 +9,7 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::commands::paths::app_data_dir;
+use crate::commands::proc::NoWindow;
 
 /// Repo publishing `pmc_bb.dll` (ASI loader + SecuROM spoof).
 const PMC_BB_REPO: &str = "Mercenaries-Fan-Build/pmc-blackbox";
@@ -265,6 +266,7 @@ pub async fn crack_game(
         .arg(&exe_path)
         .arg("--output")
         .arg(&out)
+        .no_window()
         .output()
         .map_err(|e| format!("Failed to run apply_crack: {e}"))?;
 
@@ -300,6 +302,7 @@ pub async fn update_game(exe_path: String) -> Result<CrackResult, String> {
         .arg("--update-only")
         .arg("--output")
         .arg(&staged)
+        .no_window()
         .output()
         .map_err(|e| format!("Failed to run apply_crack: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

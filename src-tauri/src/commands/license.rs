@@ -23,6 +23,9 @@
 
 use serde::Serialize;
 
+#[cfg(target_os = "windows")]
+use super::proc::NoWindow;
+
 /// The SecuROM subkey holding a title's per-machine activation blobs. Value
 /// names look like `securom_v7_01.dat`; we treat any `securom_v7` value here as
 /// activation data.
@@ -215,6 +218,7 @@ fn detect_license_windows() -> LicenseStatus {
 fn reg_key_exists(key: &str) -> bool {
     std::process::Command::new("reg")
         .args(["query", key])
+        .no_window()
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -229,6 +233,7 @@ fn reg_read_value(key: &str, selector: &[&str]) -> Option<String> {
         .arg("query")
         .arg(key)
         .args(selector)
+        .no_window()
         .output()
         .ok()?;
     if !out.status.success() {
@@ -262,7 +267,7 @@ fn reg_default_value(key: &str) -> Option<String> {
 /// to tell `securom_v7_01.dat` apart from an empty/unrelated key.
 #[cfg(target_os = "windows")]
 fn reg_key_has_value_with_prefix(key: &str, prefix: &str) -> bool {
-    let out = match std::process::Command::new("reg").args(["query", key]).output() {
+    let out = match std::process::Command::new("reg").args(["query", key]).no_window().output() {
         Ok(o) if o.status.success() => o,
         _ => return false,
     };
