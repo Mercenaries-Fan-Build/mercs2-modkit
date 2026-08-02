@@ -1842,9 +1842,14 @@ export const useProjectStore = defineStore("project", {
       this.busy = true;
       this.error = null;
       try {
+        // Hand the simulator the retail vz.wad so cross-references into the base game resolve
+        // instead of showing as "unresolved". It lives beside the patch we deploy, at
+        // <gamePath>/data/vz.wad; null when no game folder is set (the sim then runs base-less).
+        const baseWad = this.gamePath ? `${this.gamePath}/data/vz.wad` : null;
         this.validation = await invoke<ValidationResult>("validate_wad", {
           wadPath,
           simulatorPath,
+          baseWad,
         });
         return this.validation;
       } catch (e) {

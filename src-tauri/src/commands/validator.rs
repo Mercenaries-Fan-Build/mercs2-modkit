@@ -37,15 +37,27 @@ pub async fn fetch_wad_simulator(window: Window) -> Result<String, String> {
 
 /// Run the simulator against a WAD. `simulator_path` defaults to `wad_simulator`
 /// on `PATH` when omitted (e.g. after `cargo install wad_simulator`).
+///
+/// `base_wad` is the game's retail `vz.wad`. We already know where it is (it's where the patch is
+/// deployed), so pass it: without `--base-wad` the simulator can't see the base game and reports
+/// every cross-reference into it — a model's donor/shared textures, engine defaults — as
+/// "unresolved", which reads as a defect when it is nothing of the kind. Passed only when the file
+/// actually exists, so a mis-set game path degrades to the old no-base run rather than erroring.
 #[tauri::command(async)]
 pub fn validate_wad(
     wad_path: String,
     simulator_path: Option<String>,
+    base_wad: Option<String>,
 ) -> Result<ValidationResult, String> {
     let bin = simulator_path.unwrap_or_else(|| "wad_simulator".to_string());
-    let output = Command::new(&bin)
-        .arg("--wad")
-        .arg(&wad_path)
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--wad").arg(&wad_path);
+    if let Some(base) = base_wad.as_deref().filter(|s| !s.is_empty()) {
+        if std::path::Path::new(base).is_file() {
+            cmd.arg("--base-wad").arg(base);
+        }
+    }
+    let output = cmd
         .no_window()
         .output()
         .map_err(|e| {
