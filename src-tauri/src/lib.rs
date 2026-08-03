@@ -28,6 +28,7 @@ use commands::save_backup::{
     set_saves_dir,
 };
 use commands::setup::{crack_game, install_pmc_bb, install_pmc_bb_log, update_game};
+use commands::shipment::{inspect_shipment, take_pending_shipment, PendingShipment};
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
     uninstall_tool, ToolProcesses,
@@ -43,21 +44,72 @@ use commands::texture_swap::{
 };
 use commands::wardrobe::{list_wardrobe_models, preview_wardrobe_lua};
 
+/// Route a `mercs2-modkit://ship?path=…` URL to the frontend: buffer it (for a cold start whose
+/// webview isn't listening yet) and emit a live event (for an already-open window).
+fn dispatch_deep_link(app: &tauri::AppHandle, url: &str) {
+    use tauri::{Emitter, Manager};
+    if let Some(path) = commands::shipment::parse_ship_url(url) {
+        if let Some(state) = app.try_state::<PendingShipment>() {
+            if let Ok(mut slot) = state.0.lock() {
+                *slot = Some(path.clone());
+            }
+        }
+        let _ = app.emit("deep-link-shipment", path);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance MUST be registered first (Tauri's guidance): it intercepts a second launch —
+    // which on Windows/Linux is how a deep link arrives — focuses the existing window, and forwards
+    // any `mercs2-modkit://` URL from that launch's argv into the running app.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
+            for arg in &argv {
+                if arg.starts_with("mercs2-modkit://") {
+                    dispatch_deep_link(app, arg);
+                }
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             // The updater only exists on desktop targets.
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+
+            // Register the URL scheme at runtime (covers dev builds and Linux/Windows; the installer
+            // registers it for packaged builds), and deliver the launching URL — macOS routes deep
+            // links here rather than through argv, as does the initial process on every platform.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let _ = app.deep_link().register("mercs2-modkit");
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        dispatch_deep_link(&handle, url.as_str());
+                    }
+                });
+            }
             Ok(())
         })
         .manage(GameProcess::default())
         .manage(ToolProcesses::default())
+        .manage(PendingShipment::default())
         .invoke_handler(tauri::generate_handler![
             load_mod,
             validate_manifest,
@@ -126,6 +178,8 @@ pub fn run() {
             restore_save_backup,
             delete_save_backup,
             set_saves_dir,
+            inspect_shipment,
+            take_pending_shipment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

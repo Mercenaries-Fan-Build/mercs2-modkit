@@ -1,16 +1,30 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
-import { RouterLink, RouterView } from "vue-router";
+import { RouterLink, RouterView, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useProjectStore } from "./stores/project";
 import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
 
 const store = useProjectStore();
+const router = useRouter();
 const { mods, asiMods, conflictCount, modkitUpdate, componentUpdates, toolset } =
   storeToRefs(store);
+
+// Receiving end of the Workshop's "Send to Modkit" deep link: stage the handed-off Shipment and
+// jump to the build/export page so it's in front of the user. Errors surface via store.error.
+async function ingestShipment(path: string) {
+  try {
+    await store.importShipment(path);
+    router.push({ name: "export" });
+  } catch {
+    /* store.error is shown in the shell */
+  }
+}
 
 // Core components (pmc_bb, apply_crack) with a newer release than what's installed.
 const componentUpdatesAvailable = computed(() =>
@@ -26,13 +40,21 @@ const padName = computed(
   () => controllerId.value?.split(" (")[0]?.trim() || "Controller"
 );
 
-onMounted(() => {
-  store.init();
+onMounted(async () => {
+  // Await init first so restoring the saved library can't clobber a Shipment we're about to add
+  // from a cold-start deep link.
+  await store.init();
   store.checkModkitUpdate();
   store.checkComponentUpdates();
   // Surfaces the nav dot when the toolset has a newer release. One API call for
   // all 11 binaries — they ship in a single release.
   store.refreshToolset();
+
+  // Deep link: drain a cold-start handoff (the link that launched us), then listen for live ones
+  // that arrive while the window is already open.
+  const pending = await invoke<string | null>("take_pending_shipment").catch(() => null);
+  if (pending) await ingestShipment(pending);
+  await listen<string>("deep-link-shipment", (e) => ingestShipment(e.payload));
 });
 </script>
 

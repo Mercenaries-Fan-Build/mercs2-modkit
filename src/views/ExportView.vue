@@ -16,6 +16,7 @@ const {
   wadBackups,
   wardrobe,
   prebuilt,
+  shipments,
   textures,
 } = storeToRefs(store);
 
@@ -32,6 +33,7 @@ const nothingToBuild = computed(
     store.enabledMods.length === 0 &&
     wardrobe.value.length === 0 &&
     prebuilt.value.length === 0 &&
+    shipments.value.length === 0 &&
     textures.value.length === 0,
 );
 
@@ -214,6 +216,38 @@ function outcomeText(o: GroupOutcome): string {
         <p v-else class="mt-3 text-xs text-zinc-600">None added.</p>
       </section>
 
+      <!-- Shipments handed over from the Workshop's "Send to Modkit". Source projects, not finished
+           WADs: modkit builds and Lua-links them through Quartermaster at build time, so several
+           script-touching Shipments reconcile instead of one clobbering another. -->
+      <section
+        v-if="shipments.length"
+        class="guilloche mt-6 rounded-xl border border-zinc-800 p-5"
+      >
+        <div>
+          <h3 class="plate-label">Workshop Shipments</h3>
+          <p class="mt-1 text-xs text-zinc-500">
+            Sent from the Workshop. Built and script-linked through Quartermaster when you build
+            below — no need to add them by hand.
+          </p>
+        </div>
+        <ul class="mt-4 space-y-2">
+          <li
+            v-for="(s, i) in shipments"
+            :key="s.id"
+            class="engraved flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+          >
+            <span class="w-6 text-right text-xs text-zinc-600">{{ i + 1 }}</span>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm text-zinc-200">{{ s.name }}</p>
+              <p class="truncate font-mono text-xs text-zinc-500">{{ s.path }}</p>
+            </div>
+            <button class="btn-secondary px-2 py-1" @click="store.removeShipment(s.id)">
+              ✕
+            </button>
+          </li>
+        </ul>
+      </section>
+
       <!-- Load order. Later mods override earlier ones — same rule as the engine. -->
       <section
         v-if="store.enabledMods.length"
@@ -306,6 +340,14 @@ function outcomeText(o: GroupOutcome): string {
             sha256 {{ buildResult.sha256.slice(0, 32) }}…
           </p>
         </div>
+
+        <p
+          v-for="(w, i) in buildResult.warnings ?? []"
+          :key="`warn-${i}`"
+          class="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+        >
+          {{ w }}
+        </p>
 
         <ul class="mt-3 space-y-1">
           <li

@@ -29,6 +29,7 @@ import type {
   PrebuiltWad,
   ReleaseInfo,
   Resolution,
+  ShipmentRef,
   RuntimeInfo,
   RuntimeOverrides,
   SaveBackupInfo,
@@ -192,6 +193,8 @@ interface ProjectState {
   wardrobe: WardrobeOutfit[];
   /** Imported community patch WADs, in load order (later wins). */
   prebuilt: PrebuiltWad[];
+  /** Workshop Shipments (qm source projects) staged for the next build, in load order. */
+  shipments: ShipmentRef[];
   /** Texture replacements queued for the next build. */
   textures: TextureSwap[];
   /** Every nameable texture in this install (browsable). Not persisted — cheap to rebuild. */
@@ -237,6 +240,7 @@ export const useProjectStore = defineStore("project", {
     wardrobeModels: [],
     wardrobe: [],
     prebuilt: [],
+    shipments: [],
     textures: [],
     textureCatalog: [],
     validation: null,
@@ -481,6 +485,7 @@ export const useProjectStore = defineStore("project", {
           this.enabled = lib.enabled ?? {};
           this.wardrobe = lib.wardrobe ?? [];
           this.prebuilt = lib.prebuilt ?? [];
+          this.shipments = lib.shipments ?? [];
           this.textures = lib.textures ?? [];
         }
       } catch {
@@ -497,6 +502,7 @@ export const useProjectStore = defineStore("project", {
             enabled: state.enabled,
             wardrobe: state.wardrobe,
             prebuilt: state.prebuilt,
+            shipments: state.shipments,
             textures: state.textures,
           })
         );
@@ -1408,6 +1414,7 @@ export const useProjectStore = defineStore("project", {
         game_path: this.gamePath,
         wardrobe: this.wardrobe,
         prebuilt: this.prebuilt,
+        shipments: this.shipments,
         textures: this.textures,
       };
     },
@@ -1593,6 +1600,34 @@ export const useProjectStore = defineStore("project", {
 
     removePrebuilt(id: string) {
       this.prebuilt = this.prebuilt.filter((p) => p.id !== id);
+    },
+
+    /**
+     * Stage a Workshop **Shipment** (a Quartermaster source project) in the load order.
+     *
+     * This is the receiving end of the Workshop's "Send to Modkit" deep link. Unlike
+     * {@link importPatchWad}, the Shipment is *source*: it gets built and Lua-linked through `qm`
+     * at assemble time, so several script-touching Shipments compose instead of clobbering.
+     */
+    async importShipment(path: string): Promise<ShipmentRef> {
+      this.busy = true;
+      this.error = null;
+      try {
+        const info = await invoke<ShipmentRef>("inspect_shipment", { path });
+        if (!this.shipments.some((s) => s.path === info.path)) {
+          this.shipments = [...this.shipments, info];
+        }
+        return info;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    removeShipment(id: string) {
+      this.shipments = this.shipments.filter((s) => s.id !== id);
     },
 
     /** Move an imported WAD earlier/later. Later = overrides the ones above it. */

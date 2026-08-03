@@ -23,6 +23,14 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Deep link (`mercs2-modkit://ship?path=…`) so the Workshop's "Send to Modkit" hands a Shipment
+# straight into the app. On Windows/Linux a deep link relaunches the exe with the URL in argv, so
+# single-instance forwards that argv to the running window (its callback scans it) instead of
+# opening a second copy; the initial/cold-start launch is delivered via the deep-link plugin's
+# `on_open_url`. Kept without the single-instance `deep-link` feature so the two paths don't both
+# fire for one URL.
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

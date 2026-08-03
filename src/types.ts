@@ -95,6 +95,8 @@ export interface BuildResult {
   /** sha256 of the bytes written — the only trustworthy way to verify a deploy. */
   sha256: string;
   outcomes: GroupOutcome[];
+  /** Non-fatal advisories from assembly (e.g. a Shipment's scripts override the wardrobe's). */
+  warnings?: string[];
 }
 
 /**
@@ -365,6 +367,19 @@ export interface PrebuiltWad {
   /** Ships a compiled scripts_vz block — cannot be composed with another that does. */
   has_scripts: boolean;
   warnings: string[];
+}
+
+/**
+ * A Workshop **Shipment** (a Quartermaster source project) staged in the load order.
+ *
+ * Unlike {@link PrebuiltWad}, this is source, not a finished WAD: modkit builds and Lua-links it
+ * through `qm` at assemble time, so several script-touching Shipments reconcile instead of one
+ * clobbering another.
+ */
+export interface ShipmentRef {
+  id: string;
+  name: string;
+  path: string;
 }
 
 /** A snapshot of a `vz-patch.wad` that a deploy displaced. */

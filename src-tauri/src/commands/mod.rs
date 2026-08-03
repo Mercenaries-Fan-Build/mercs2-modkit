@@ -52,6 +52,7 @@ pub mod region;
 pub mod registry;
 pub mod save_backup;
 pub mod setup;
+pub mod shipment;
 pub mod texture_swap;
 pub mod texture_usage;
 pub mod toolchain;

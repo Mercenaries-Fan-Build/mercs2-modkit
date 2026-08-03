@@ -22,8 +22,10 @@ use std::path::PathBuf;
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::types::*;
 use serde::{Deserialize, Serialize};
+use tauri::Window;
 
 use crate::commands::prebuilt::{self, PrebuiltWad};
+use crate::commands::shipment::{self, ShipmentRef};
 use crate::commands::texture_swap::{self, TextureSwap};
 use crate::commands::wardrobe::{self, WardrobeOutfit};
 use crate::models::claim::{self, ClaimConflict, ClaimGroup, GroupOutcome};
@@ -56,6 +58,11 @@ pub struct BuildOptions {
     /// Texture replacements (donor BODY-swaps against the user's own `vz.wad`).
     #[serde(default)]
     pub textures: Vec<TextureSwap>,
+    /// Workshop **Shipments** (qm source projects), **in load order** (later wins). Built and Lua-
+    /// linked through `qm` so their scripts reconcile instead of clobbering — see
+    /// [`crate::commands::shipment`].
+    #[serde(default)]
+    pub shipments: Vec<ShipmentRef>,
 }
 
 /// Result of an [`assemble_patch_wad`] call.
@@ -68,6 +75,10 @@ pub struct BuildResult {
     pub sha256: String,
     /// Per-group report: what applied, what was cleanly overridden.
     pub outcomes: Vec<GroupOutcome>,
+    /// Non-fatal advisories surfaced to the user (e.g. a Shipment's scripts and the wardrobe both
+    /// rebuild `scripts_vz`, so only one can win — see the known limitation in `shipment`).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// A build refused because the load order is incoherent.
@@ -196,9 +207,36 @@ fn all_groups(options: &BuildOptions) -> Result<Vec<ClaimGroup>, String> {
     Ok(groups)
 }
 
-#[tauri::command(async)]
-pub fn assemble_patch_wad(options: BuildOptions) -> Result<BuildResult, String> {
-    let groups = all_groups(&options)?;
+#[tauri::command]
+pub async fn assemble_patch_wad(
+    window: Window,
+    options: BuildOptions,
+) -> Result<BuildResult, String> {
+    let mut groups = all_groups(&options)?;
+
+    // Shipments are built and Lua-linked through qm, then appended so the linker's reconciled
+    // scripts_vz is the LAST script producer and wins the block. (This is why a Shipment's scripts
+    // beat the wardrobe's when both are present — warned below.)
+    let mut warnings: Vec<String> = Vec::new();
+    if !options.shipments.is_empty() {
+        let game_path = options
+            .game_path
+            .as_deref()
+            .ok_or("Set the game folder before building Shipments.")?;
+        let ship_groups =
+            shipment::shipment_groups(window, &options.shipments, game_path, None).await?;
+        if !options.wardrobe.is_empty() && ship_groups.iter().any(|g| g.mod_id == "qm-link:scripts")
+        {
+            warnings.push(
+                "A Shipment changes the game's scripts, and so does the wardrobe. Only one \
+                 scripts block can win — the Shipment's does here, so wardrobe outfits added in \
+                 modkit won't apply while this Shipment is installed."
+                    .into(),
+            );
+        }
+        groups.extend(ship_groups);
+    }
+
     let resolved = claim::resolve(&groups);
 
     if !resolved.conflicts.is_empty() {
@@ -234,6 +272,7 @@ pub fn assemble_patch_wad(options: BuildOptions) -> Result<BuildResult, String> 
         byte_size: wad_bytes.len(),
         sha256: loadprobe::sha256::sha256_hex(&wad_bytes),
         outcomes: resolved.outcomes,
+        warnings,
     })
 }
 
@@ -273,5 +312,7 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
         byte_size: 0,
         sha256: String::new(),
         outcomes: resolved.outcomes,
+        // Preview covers the in-memory kinds; Shipment conflicts surface at assemble (they need qm).
+        warnings: Vec::new(),
     })
 }
