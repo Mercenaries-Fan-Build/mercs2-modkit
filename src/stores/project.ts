@@ -888,7 +888,12 @@ export const useProjectStore = defineStore("project", {
             current,
             latest: rel.tag,
             url: rel.url,
-            available: !!current && semverGt(rel.tag, current),
+            // apply_crack is re-downloaded from its latest release every time the exe is
+            // cracked/updated (crack_game -> cache_apply_crack), so it auto-updates on use —
+            // there is nothing for the user to install. Never surface it as an actionable
+            // update; only pmc_bb and dxwrapper are real manual installs.
+            available:
+              key !== "apply_crack" && !!current && semverGt(rel.tag, current),
           };
         } catch {
           /* offline or no releases yet — keep any prior result */
