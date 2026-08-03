@@ -212,6 +212,54 @@ fn run_qm(qm: &Path, args: &[&std::ffi::OsStr], what: &str) -> Result<(), String
     ))
 }
 
+/// Write a throwaway qm Shipment expressing the wardrobe as `add_outfit` contributions with no model
+/// file — the "wear an existing in-game model" form. Routing the wardrobe through qm (instead of
+/// modkit's own compiled `scripts_vz` block) is what lets it reconcile with script-touching Shipments
+/// via `qm link` instead of clobbering, or being clobbered by, them.
+///
+/// Returns `Ok(None)` when there are no outfits. The dir is a `ShipmentRef` the caller folds into the
+/// set handed to [`shipment_groups`].
+pub fn synthesize_wardrobe_shipment(
+    outfits: &[crate::commands::wardrobe::WardrobeOutfit],
+) -> Result<Option<ShipmentRef>, String> {
+    if outfits.is_empty() {
+        return Ok(None);
+    }
+    let dir = work_dir("wardrobe-shipment")?;
+
+    let contributions: Vec<serde_json::Value> = outfits
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "kind": "add_outfit",
+                // No `model` file → qm treats `name` as an existing engine model and only adds the
+                // wardrobe row. `slug` = the model name so the (wearer, slug) merge key is unique
+                // per skin, matching modkit's own dedupe-by-model.
+                "name": o.model,
+                "slug": o.model,
+                "display": o.label,
+                "wearer": o.hero,
+            })
+        })
+        .collect();
+
+    let manifest = serde_json::json!({
+        "format": 1,
+        "shipment": { "name": "modkit-wardrobe", "version": "1.0.0", "target": "retail" },
+        "contributions": contributions,
+    });
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("building the wardrobe manifest: {e}"))?;
+    std::fs::write(dir.join("manifest.json"), json)
+        .map_err(|e| format!("writing the wardrobe manifest: {e}"))?;
+
+    Ok(Some(ShipmentRef {
+        id: "shipment:modkit-wardrobe".into(),
+        name: "Wardrobe".into(),
+        path: dir.to_string_lossy().to_string(),
+    }))
+}
+
 /// Build each staged Shipment with `qm`, link their Lua across the whole set, and return the claim
 /// groups to fold into `vz-patch.wad`. See the module docs for the collapse rules.
 ///

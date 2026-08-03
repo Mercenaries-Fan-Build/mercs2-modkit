@@ -162,7 +162,7 @@ fn groups_for(mods: &[LoadedMod]) -> Result<Vec<ClaimGroup>, String> {
 /// deliberately: it rebuilds `scripts_vz` from the user's own `vz.wad`, so if a pre-built
 /// mod also ships that block, modkit's version — which actually contains the user's
 /// outfits — is the one that survives.
-fn all_groups(options: &BuildOptions) -> Result<Vec<ClaimGroup>, String> {
+fn all_groups(options: &BuildOptions, include_wardrobe: bool) -> Result<Vec<ClaimGroup>, String> {
     let mut groups = Vec::new();
 
     for w in &options.prebuilt {
@@ -188,7 +188,7 @@ fn all_groups(options: &BuildOptions) -> Result<Vec<ClaimGroup>, String> {
         }
     }
 
-    if !options.wardrobe.is_empty() {
+    if include_wardrobe && !options.wardrobe.is_empty() {
         let game_path = options
             .game_path
             .as_deref()
@@ -212,28 +212,29 @@ pub async fn assemble_patch_wad(
     window: Window,
     options: BuildOptions,
 ) -> Result<BuildResult, String> {
-    let mut groups = all_groups(&options)?;
+    let warnings: Vec<String> = Vec::new();
 
-    // Shipments are built and Lua-linked through qm, then appended so the linker's reconciled
-    // scripts_vz is the LAST script producer and wins the block. (This is why a Shipment's scripts
-    // beat the wardrobe's when both are present — warned below.)
-    let mut warnings: Vec<String> = Vec::new();
+    // When any Shipment is staged, qm runs — so route the WARDROBE through qm too (as add_outfit
+    // contributions with no model file), and drop modkit's own compiled scripts_vz block. That way
+    // `qm link` reconciles wardrobe outfits AND every Shipment's Lua into ONE scripts_vz, instead of
+    // one clobbering the other. With no Shipments, qm never runs and the wardrobe keeps its proven
+    // standalone Rust path.
+    let route_wardrobe_through_qm = !options.shipments.is_empty() && !options.wardrobe.is_empty();
+
+    let mut groups = all_groups(&options, !route_wardrobe_through_qm)?;
+
     if !options.shipments.is_empty() {
         let game_path = options
             .game_path
             .as_deref()
             .ok_or("Set the game folder before building Shipments.")?;
-        let ship_groups =
-            shipment::shipment_groups(window, &options.shipments, game_path, None).await?;
-        if !options.wardrobe.is_empty() && ship_groups.iter().any(|g| g.mod_id == "qm-link:scripts")
-        {
-            warnings.push(
-                "A Shipment changes the game's scripts, and so does the wardrobe. Only one \
-                 scripts block can win — the Shipment's does here, so wardrobe outfits added in \
-                 modkit won't apply while this Shipment is installed."
-                    .into(),
-            );
+        let mut ship_refs = options.shipments.clone();
+        if route_wardrobe_through_qm {
+            if let Some(wr) = shipment::synthesize_wardrobe_shipment(&options.wardrobe)? {
+                ship_refs.push(wr);
+            }
         }
+        let ship_groups = shipment::shipment_groups(window, &ship_refs, game_path, None).await?;
         groups.extend(ship_groups);
     }
 
@@ -280,7 +281,9 @@ pub async fn assemble_patch_wad(
 /// unresolvable overlap — without writing anything.
 #[tauri::command(async)]
 pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConflicts> {
-    let groups = match all_groups(&options) {
+    // Preview covers the in-memory kinds (including the wardrobe on its Rust path); Shipment groups
+    // and any qm-routed wardrobe need qm and are resolved at assemble.
+    let groups = match all_groups(&options, true) {
         Ok(g) => g,
         // A missing asset file or an invalid outfit isn't a claim conflict; report it as
         // one entry so the UI shows the message rather than failing silently.
