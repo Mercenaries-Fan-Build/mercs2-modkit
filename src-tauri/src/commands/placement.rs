@@ -259,6 +259,53 @@ pub fn staged_files(
     Ok(out)
 }
 
+/// modkit's own staged-build record, written next to `vz-patch.wad` by
+/// [`super::wad_builder::assemble_patch_wad`] and read by [`super::deploy_wad::deploy_patch_wad`].
+///
+/// Distinct from qm's record on purpose: qm describes ONE Shipment's output in ITS scratch
+/// directory, while this describes the whole load order's staged files with their sources already
+/// re-pointed into the build directory. Reusing qm's shape would have meant a file called
+/// `placement.json` that means one thing in one directory and another thing in another.
+#[derive(Debug, Clone, Deserialize)]
+struct StagedRecord {
+    format: u32,
+    #[serde(default)]
+    files: Vec<StagedFile>,
+}
+
+/// Read the staged-build record from a build output directory.
+///
+/// `Ok(vec![])` when there is no record — a build with no Shipments places no files, and every
+/// build made before this feature existed has no record either. That is genuinely nothing to
+/// install, unlike a malformed record, which is refused.
+pub fn read_staged(build_dir: &Path) -> Result<Vec<StagedFile>, String> {
+    let path = build_dir.join(PLACEMENT_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    let record: StagedRecord = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not a staged-build record: {e}", path.display()))?;
+    if record.format != SUPPORTED_FORMAT {
+        return Err(format!(
+            "{} is format {} — this modkit understands format {SUPPORTED_FORMAT}.",
+            path.display(),
+            record.format
+        ));
+    }
+    for file in &record.files {
+        if let Some(why) = refuse_unsafe_relative(&file.relative) {
+            return Err(format!(
+                "{} names the destination {:?}, which modkit refuses: {why}.",
+                path.display(),
+                file.relative
+            ));
+        }
+    }
+    Ok(record.files)
+}
+
 /// Read a qm output directory whole: its overlay WAD and its loose files, in one pass.
 pub fn read_output(dir: &Path, shipment: &str) -> Result<(Option<PathBuf>, Vec<StagedFile>), String> {
     let record = read_placement(dir)?;
