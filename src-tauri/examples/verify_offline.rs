@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = manifest_path.display().to_string();
 
     println!("verifying {} against {source}…", root.display());
-    let r = verify_install(&root, manifest, source);
+    let r = verify_install(&root, manifest, source)?;
 
     println!("\n--- report ---");
     println!("ok (matched files): {}", r.ok);

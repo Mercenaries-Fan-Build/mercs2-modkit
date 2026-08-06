@@ -3,13 +3,14 @@
 //!
 //! A *manifest* describes a known-good install in three parts:
 //!   - `files` — every shared, version-independent file as
-//!     `relative_path → { size, md5 }`. The main exe, runtime caches
+//!     `relative_path → { size, hash }`, digested under the manifest's declared
+//!     `algo`. The main exe, runtime caches
 //!     (`Precache/`), per-user config (`*.ini`), logs, and modkit-managed files
 //!     are excluded, so the same set is valid for every version and crack.
 //!   - `exes`  — a catalog of known-good `Mercenaries2.exe` builds (signed/
 //!     unsigned, v1.1 patched, the cracks), each keyed by hash so same-size
 //!     builds are told apart.
-//!   - `wads`  — for each base WAD, the md5 of every contained block (an FFCS
+//!   - `wads`  — for each base WAD, the digest of every contained block (an FFCS
 //!     archive is a set of SGES blocks indexed by INDX, named by PTHS, and
 //!     referenced by ASET-entry `asset_hash`). This is what lets verify say
 //!     *which* asset inside a WAD changed, not merely that the WAD differs.
@@ -52,7 +53,7 @@ type Progress<'a> = &'a (dyn Fn(usize, usize) + Sync);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub size: u64,
-    /// Lowercase hex MD5.
+    /// Lowercase hex digest under the manifest's [`Manifest::algo`].
     pub hash: String,
 }
 
@@ -124,7 +125,7 @@ impl ExeEntry {
     }
 }
 
-/// One block inside a WAD: its PTHS name and the md5 of its stored bytes.
+/// One block inside a WAD: its PTHS name and the digest of its stored bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockFp {
     pub path: String,
@@ -154,6 +155,8 @@ pub struct WadManifest {
 /// A known-good baseline: shared files, the exe catalog, and per-WAD blocks.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Which digest `hash` fields carry — see [`HashAlgo`]. Read, not decorative:
+    /// a manifest is verified with the function it was written with.
     pub algo: String,
     pub files: BTreeMap<String, ManifestEntry>,
     #[serde(default)]
@@ -180,7 +183,7 @@ pub struct ExeReport {
     pub file: String,
     pub size: u64,
     pub hash: String,
-    /// The matched entry's [`ExeEntry::id`]. `None` means no catalogue entry has this md5 —
+    /// The matched entry's [`ExeEntry::id`]. `None` means no catalogue entry has this digest —
     /// a real answer, and a triage signal in its own right, not a prompt to fall back on the
     /// nearest size. Two different binaries share a size here, so a size-based guess would pool
     /// crashes from a build that is not the one being counted.
@@ -321,41 +324,104 @@ pub fn collect_files(root: &Path) -> (Vec<(String, PathBuf)>, usize) {
 // Hashing
 // ----------------------------------------------------------------------------
 
-/// Stream a file through MD5, returning `(size, lowercase_hex)`.
-fn md5_file(path: &Path) -> std::io::Result<(u64, String)> {
-    use md5::{Digest, Md5};
-    let mut file = File::open(path)?;
-    let mut hasher = Md5::new();
+/// Which digest a manifest's hashes were produced with.
+///
+/// The `algo` field existed from the start and was written as `"md5"` on every generated
+/// manifest — but nothing ever read it, so it documented an assumption rather than enforcing
+/// one. Honouring it is what makes changing the digest a regeneration instead of a migration:
+/// a manifest states its own function, and a verifier that meets an older one keeps verifying
+/// it correctly rather than declaring every file in the install corrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashAlgo {
+    /// Original generated manifests. Still read, never written.
+    Md5,
+    /// What generation produces now, and what the crash-report pipeline speaks.
+    Sha256,
+}
+
+impl HashAlgo {
+    /// Parse a manifest's declared `algo`. An unrecognised value is an error, never a
+    /// silent fallback: guessing would compare digests from two different functions and
+    /// report a pristine install as wholly corrupt.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "md5" => Ok(Self::Md5),
+            "sha256" => Ok(Self::Sha256),
+            other => Err(format!(
+                "manifest declares hash algorithm {other:?}, which this build cannot compute \
+                 (known: md5, sha256)"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Md5 => "md5",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
+
+/// The digest generation writes. Reading still accepts [`HashAlgo::Md5`].
+pub const GENERATED_ALGO: HashAlgo = HashAlgo::Sha256;
+
+/// Feed `read` into `algo` and return the lowercase hex digest.
+fn hash_stream(
+    algo: HashAlgo,
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+) -> std::io::Result<(u64, String)> {
+    use md5::Md5;
+    use sha2::{Digest, Sha256};
+
     let mut buf = vec![0u8; 1 << 16];
     let mut size = 0u64;
+    // Two concrete hashers rather than a boxed `dyn Digest`: the trait is not object-safe
+    // without erasure gymnastics, and this loop runs over every file in a 6 GB tree.
+    let mut md5 = Md5::new();
+    let mut sha = Sha256::new();
     loop {
-        let n = file.read(&mut buf)?;
+        let n = read(&mut buf)?;
         if n == 0 {
             break;
         }
         size += n as u64;
-        hasher.update(&buf[..n]);
+        match algo {
+            HashAlgo::Md5 => md5.update(&buf[..n]),
+            HashAlgo::Sha256 => sha.update(&buf[..n]),
+        }
     }
-    Ok((size, format!("{:x}", hasher.finalize())))
+    let hex = match algo {
+        HashAlgo::Md5 => format!("{:x}", md5.finalize()),
+        HashAlgo::Sha256 => format!("{:x}", sha.finalize()),
+    };
+    Ok((size, hex))
 }
 
-/// MD5 a byte range `[start, start+len)` of an already-open file.
-fn md5_range(file: &mut File, start: u64, len: u64) -> std::io::Result<String> {
-    use md5::{Digest, Md5};
+/// Stream a whole file, returning `(size, lowercase_hex)`.
+fn hash_file(algo: HashAlgo, path: &Path) -> std::io::Result<(u64, String)> {
+    let mut file = File::open(path)?;
+    hash_stream(algo, move |buf| file.read(buf))
+}
+
+/// Digest a byte range `[start, start+len)` of an already-open file.
+fn hash_range(
+    algo: HashAlgo,
+    file: &mut File,
+    start: u64,
+    len: u64,
+) -> std::io::Result<String> {
     file.seek(SeekFrom::Start(start))?;
-    let mut hasher = Md5::new();
     let mut remaining = len;
-    let mut buf = vec![0u8; 1 << 16];
-    while remaining > 0 {
+    hash_stream(algo, |buf| {
+        if remaining == 0 {
+            return Ok(0);
+        }
         let want = remaining.min(buf.len() as u64) as usize;
         let n = file.read(&mut buf[..want])?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
         remaining -= n as u64;
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+        Ok(n)
+    })
+    .map(|(_, hex)| hex)
 }
 
 /// Shared progress counter that emits throttled `(done, total)` on each tick.
@@ -385,10 +451,14 @@ impl<'a> Ticker<'a> {
     }
 }
 
-/// Read every block of a WAD and md5 its stored bytes. `ticker` advances once
-/// per block. Returns the block catalogue, or `None` if the file isn't an FFCS
+/// Read every block of a WAD and digest its stored bytes under `algo`. `ticker` advances
+/// once per block. Returns the block catalogue, or `None` if the file isn't an FFCS
 /// archive (caller treats it as an ordinary file).
-fn read_wad_blocks(wad_path: &Path, ticker: Option<&Ticker>) -> Option<WadManifest> {
+fn read_wad_blocks(
+    algo: HashAlgo,
+    wad_path: &Path,
+    ticker: Option<&Ticker>,
+) -> Option<WadManifest> {
     let mut file = File::open(wad_path).ok()?;
     let file_size = file.metadata().ok()?.len();
     let arc = load_ffcs_archive(&mut file, file_size).ok()?;
@@ -412,7 +482,7 @@ fn read_wad_blocks(wad_path: &Path, ticker: Option<&Ticker>) -> Option<WadManife
         .par_iter()
         .map(|(path, start, len)| {
             let hash = File::open(wad_path)
-                .and_then(|mut f| md5_range(&mut f, *start, *len))
+                .and_then(|mut f| hash_range(algo, &mut f, *start, *len))
                 .unwrap_or_default();
             if let Some(t) = ticker {
                 t.tick();
@@ -475,7 +545,7 @@ pub fn build_manifest(
     let hashes: Vec<std::io::Result<(u64, String)>> = files
         .par_iter()
         .map(|(_, path)| {
-            let r = md5_file(path);
+            let r = hash_file(GENERATED_ALGO, path);
             ticker.tick();
             r
         })
@@ -492,7 +562,7 @@ pub fn build_manifest(
     // Per-WAD block catalogues.
     let mut wads = BTreeMap::new();
     for (key, path) in &wad_keys {
-        if let Some(wm) = read_wad_blocks(path, Some(&ticker)) {
+        if let Some(wm) = read_wad_blocks(GENERATED_ALGO, path, Some(&ticker)) {
             wads.insert(key.clone(), wm);
         }
     }
@@ -503,7 +573,7 @@ pub fn build_manifest(
         if !spec.path.is_file() {
             continue;
         }
-        let (size, hash) = md5_file(&spec.path).map_err(|e| e.to_string())?;
+        let (size, hash) = hash_file(GENERATED_ALGO, &spec.path).map_err(|e| e.to_string())?;
         exes.push(ExeEntry {
             id: spec.id.clone(),
             version: spec.version.clone(),
@@ -516,7 +586,10 @@ pub fn build_manifest(
         });
     }
 
-    Ok((Manifest { algo: "md5".into(), files: file_map, exes, wads }, total_bytes))
+    Ok((
+        Manifest { algo: GENERATED_ALGO.as_str().into(), files: file_map, exes, wads },
+        total_bytes,
+    ))
 }
 
 /// Sum the INDX block counts of the given WAD files (header-only parse).
@@ -624,6 +697,9 @@ pub async fn verify_game(
             (parse_manifest(&bytes)?, "bundled".to_string())
         }
     };
+    // Already validated by `parse_manifest`; resolved again here because the diff needs the
+    // value, and a user-picked older manifest is verified with the digest it was written with.
+    let algo = HashAlgo::parse(&manifest.algo)?;
 
     let report = tauri::async_runtime::spawn_blocking(move || {
         let status_win = window.clone();
@@ -633,7 +709,7 @@ pub async fn verify_game(
         let status = move |m: &str| {
             let _ = status_win.emit("verify-status", m.to_string());
         };
-        run_verify(&root, manifest, source, &progress, &status)
+        run_verify(&root, manifest, algo, source, &progress, &status)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -642,8 +718,13 @@ pub async fn verify_game(
 
 /// Verify an install against a manifest with no UI plumbing — used by the
 /// offline `verify_offline` example and any non-Tauri caller.
-pub fn verify_install(root: &Path, manifest: Manifest, source: String) -> VerifyReport {
-    run_verify(root, manifest, source, &|_, _| {}, &|_| {})
+pub fn verify_install(
+    root: &Path,
+    manifest: Manifest,
+    source: String,
+) -> Result<VerifyReport, String> {
+    let algo = HashAlgo::parse(&manifest.algo)?;
+    Ok(run_verify(root, manifest, algo, source, &|_, _| {}, &|_| {}))
 }
 
 /// The CPU/IO-bound diff: file-level pass, then block drill-down on mismatched
@@ -652,6 +733,7 @@ pub fn verify_install(root: &Path, manifest: Manifest, source: String) -> Verify
 fn run_verify(
     root: &Path,
     manifest: Manifest,
+    algo: HashAlgo,
     source: String,
     progress: Progress,
     status: &dyn Fn(&str),
@@ -684,7 +766,7 @@ fn run_verify(
     let hashes: Vec<std::io::Result<(u64, String)>> = to_check
         .par_iter()
         .map(|(_, path)| {
-            let r = md5_file(path);
+            let r = hash_file(algo, path);
             ticker.tick();
             r
         })
@@ -724,7 +806,7 @@ fn run_verify(
     let mut wad_details: Vec<WadDiff> = Vec::new();
     for key in &corrupt_wads {
         status(&format!("Inspecting blocks in {key}…"));
-        if let Some(d) = diff_wad(root, key, &manifest.wads[key]) {
+        if let Some(d) = diff_wad(algo, root, key, &manifest.wads[key]) {
             wad_details.push(d);
         }
     }
@@ -733,7 +815,7 @@ fn run_verify(
 
     let mut exes = Vec::new();
     for name in [MAIN_EXE, CRACKED_EXE] {
-        if let Some(rep) = identify_exe(root, name, &manifest.exes) {
+        if let Some(rep) = identify_exe(algo, root, name, &manifest.exes) {
             exes.push(rep);
         }
     }
@@ -751,8 +833,13 @@ fn run_verify(
 }
 
 /// Diff one WAD's on-disk blocks against its manifest catalogue.
-fn diff_wad(root: &Path, key: &str, expected: &WadManifest) -> Option<WadDiff> {
-    let disk = read_wad_blocks(&root.join(key), None)?;
+fn diff_wad(
+    algo: HashAlgo,
+    root: &Path,
+    key: &str,
+    expected: &WadManifest,
+) -> Option<WadDiff> {
+    let disk = read_wad_blocks(algo, &root.join(key), None)?;
 
     let want: BTreeMap<&str, &str> =
         expected.blocks.iter().map(|b| (b.path.as_str(), b.hash.as_str())).collect();
@@ -798,12 +885,17 @@ fn diff_wad(root: &Path, key: &str, expected: &WadManifest) -> Option<WadDiff> {
 
 /// Hash `root/name` (if present) and match it against the exe catalog, noting
 /// any missing sidecar DLL it needs to start and any build-level caveat.
-fn identify_exe(root: &Path, name: &str, catalog: &[ExeEntry]) -> Option<ExeReport> {
+fn identify_exe(
+    algo: HashAlgo,
+    root: &Path,
+    name: &str,
+    catalog: &[ExeEntry],
+) -> Option<ExeReport> {
     let path = root.join(name);
     if !path.is_file() {
         return None;
     }
-    let (size, hash) = md5_file(&path).ok()?;
+    let (size, hash) = hash_file(algo, &path).ok()?;
 
     let mut notes = Vec::new();
     // Identification is by content hash against the catalogue. Not by size — two catalogued
@@ -843,13 +935,22 @@ fn identify_exe(root: &Path, name: &str, catalog: &[ExeEntry]) -> Option<ExeRepo
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
-    serde_json::from_slice(bytes).map_err(|e| format!("Manifest isn't valid JSON: {e}"))
+    let m: Manifest =
+        serde_json::from_slice(bytes).map_err(|e| format!("Manifest isn't valid JSON: {e}"))?;
+    // Reject an algorithm this build cannot compute *here*, where a manifest becomes data,
+    // rather than letting it reach the diff and surface as "every file in your install is
+    // corrupt" — the most alarming possible way to report a version skew.
+    HashAlgo::parse(&m.algo)?;
+    Ok(m)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// sha256("abc"), the content every exe fixture below writes.
+    const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     fn exe(version: &str, variant: &str, label: Option<&str>, requires: Option<&str>, hash: &str) -> ExeEntry {
         ExeEntry {
@@ -915,36 +1016,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("a");
         std::fs::write(&f, b"abc").unwrap();
-        let (size, hash) = md5_file(&f).unwrap();
+        // Both algorithms, against published vectors for "abc" and the empty input. The md5
+        // arm is not legacy ballast: manifests generated before the switch declare `md5`, and
+        // a user can still point verify at one, so that path must keep producing md5.
+        let (size, hash) = hash_file(HashAlgo::Md5, &f).unwrap();
         assert_eq!(size, 3);
         assert_eq!(hash, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            hash_file(HashAlgo::Sha256, &f).unwrap().1,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
 
         std::fs::write(&f, b"").unwrap();
-        assert_eq!(md5_file(&f).unwrap().1, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(hash_file(HashAlgo::Md5, &f).unwrap().1, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(
+            hash_file(HashAlgo::Sha256, &f).unwrap().1,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn identifies_exe_and_warns_on_missing_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap();
-        // md5("abc") = 900150983cd24fb0d6963f7d28e17f72
+        // sha256("abc") — the digest generation now writes, so the fixture speaks it too.
         let catalog = vec![exe(
             "v1.1",
             "cracked",
             Some("cruise.dll crack"),
             Some("cruise.dll"),
-            "900150983cd24fb0d6963f7d28e17f72",
+            SHA256_ABC,
         )];
 
         // Sidecar absent → identified, plus a missing-DLL warning and the caveat.
-        let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
+        let r = identify_exe(HashAlgo::Sha256, dir.path(), "Mercenaries2.exe", &catalog).unwrap();
         assert_eq!(r.identified_as.as_deref(), Some("v1.1 cracked — cruise.dll crack"));
         assert_eq!(r.notes.len(), 2);
         assert!(r.notes.iter().any(|n| n.contains("cruise.dll") && n.contains("game folder")));
 
         // Sidecar present → only the caveat note.
         std::fs::write(dir.path().join("cruise.dll"), b"x").unwrap();
-        let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
+        let r = identify_exe(HashAlgo::Sha256, dir.path(), "Mercenaries2.exe", &catalog).unwrap();
         assert_eq!(r.notes, vec!["caveat".to_string()]);
     }
 
@@ -959,16 +1071,10 @@ mod tests {
         let mut cruise = exe("v1.1", "cracked", None, Some("cruise.dll"), "deadbeef");
         cruise.id = Some("v11-cracked-cruise".into());
         cruise.size = 3; // same size as the entry below — the collision the id exists to break
-        let mut pmcbb = exe(
-            "v1.1",
-            "cracked",
-            None,
-            Some("pmc_bb.dll"),
-            "900150983cd24fb0d6963f7d28e17f72",
-        );
+        let mut pmcbb = exe("v1.1", "cracked", None, Some("pmc_bb.dll"), SHA256_ABC);
         pmcbb.id = Some("v11-cracked-pmcbb".into());
 
-        let r = identify_exe(dir.path(), "Mercenaries2.exe", &[cruise, pmcbb]).unwrap();
+        let r = identify_exe(HashAlgo::Sha256, dir.path(), "Mercenaries2.exe", &[cruise, pmcbb]).unwrap();
         assert_eq!(r.identified_id.as_deref(), Some("v11-cracked-pmcbb"));
     }
 
@@ -982,7 +1088,7 @@ mod tests {
         let mut neighbour = exe("v1.1", "cracked", None, None, "deadbeef"); // size 3, wrong hash
         neighbour.id = Some("v11-cracked-pmcbb".into());
 
-        let r = identify_exe(dir.path(), "Mercenaries2.exe", &[neighbour]).unwrap();
+        let r = identify_exe(HashAlgo::Sha256, dir.path(), "Mercenaries2.exe", &[neighbour]).unwrap();
         assert_eq!(r.identified_id, None);
         assert!(r.notes[0].contains("Unrecognized"));
     }
@@ -1061,7 +1167,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap(); // size 3
         let catalog = vec![exe("v1.1", "cracked", None, None, "deadbeef")]; // size 3, wrong hash
-        let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
+        let r = identify_exe(HashAlgo::Sha256, dir.path(), "Mercenaries2.exe", &catalog).unwrap();
         assert!(r.identified_as.is_none());
         assert_eq!(r.notes.len(), 1);
         assert!(r.notes[0].contains("Unrecognized"));

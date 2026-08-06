@@ -75,8 +75,8 @@ pub async fn build_debug_zip(
 
         // 1. Fresh integrity check (reuses the verify engine, no UI plumbing).
         let _ = window.emit("debug-status", "Verifying game files…");
-        let verify = match manifest {
-            Ok(m) => Some(verify_install(&root, m, "bundled".to_string())),
+        let verify = match manifest.and_then(|m| verify_install(&root, m, "bundled".to_string())) {
+            Ok(r) => Some(r),
             Err(e) => {
                 notes.push(format!("Integrity check skipped: {e}"));
                 None

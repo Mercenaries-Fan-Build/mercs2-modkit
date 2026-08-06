@@ -79,6 +79,7 @@ zip = "2"
 
 # Game-file integrity verification: MD5 hashing, parallelized across files
 md-5 = "0.10"
+sha2 = "0.10"
 rayon = "1"
 
 # Texture swapping: decode the user's PNG/JPG and resize it to the donor's exact
