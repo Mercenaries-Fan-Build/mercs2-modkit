@@ -17,6 +17,8 @@ import type {
   DeployedAsi,
   DeployResult,
   DeployWadResult,
+  DeployedWadRecord,
+  Origin,
   ExeCandidate,
   GameInfo,
   InstallDllResult,
@@ -79,6 +81,40 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * The provenance of a catalog install, captured while the {@link CatalogMod} is still in hand.
+ *
+ * This is the only moment it is knowable. Nothing the installer returns points back at the
+ * catalogue entry: a WAD-kind install keeps no repository, slug or tag, and an ASI keeps the
+ * pair only inside `slugify(\`${repo_name}-${slug}\`)`, which is lossy and cannot be parsed
+ * back. That is why `catalogModBlockedBy` and `catalogModState` below re-associate an installed
+ * plugin with its catalogue entry by matching `.asi` filenames — a guess this replaces for
+ * everything installed from here on.
+ *
+ * The id is the `"repo-url#slug"` composite modkit already addresses cross-repo mods by (see
+ * `CatalogMod.incompatible`), not a new format. A bare slug would not do: it is unique only
+ * within its repository.
+ *
+ * Version prefers the author-declared one over the release tag, matching what the Library shows
+ * and what update checks compare. Null when neither exists — an unreleased mod is the expected
+ * state for one being actively worked on, so it is a bucket, not missing data.
+ */
+function catalogOrigin(item: CatalogMod, releaseTag: string | null): Origin {
+  return {
+    source: "catalog",
+    id: catalogRef(item),
+    version: item.version ?? releaseTag,
+  };
+}
+
+/**
+ * How modkit addresses a mod across repositories — the same `"repo-url#slug"` composite
+ * `CatalogMod.incompatible` uses. A bare slug is unique only inside one repository.
+ */
+function catalogRef(c: CatalogMod): string {
+  return `${c.repository}#${c.slug}`;
+}
+
 /** The `.asi` asset basenames a catalog mod deploys. */
 function catalogAsiNames(item: CatalogMod): string[] {
   return item.assets
@@ -108,11 +144,38 @@ function semverGt(a: string, b: string): boolean {
   return false;
 }
 
-/** The catalog mod backing a Library ASI mod, matched by `.asi` filename. */
+/**
+ * The Library entry backing a catalog mod.
+ *
+ * Prefers the origin captured at install, which is an exact answer. Falls back to matching
+ * `.asi` basenames — how every one of these lookups worked before origins existed, and still
+ * the only thing available for a row installed back then. The fallback is a guess: two mods
+ * shipping a plugin of the same name are indistinguishable to it, and a mod that renames its
+ * plugin between releases loses its own Library entry.
+ */
+function libEntryFor(asiMods: AsiMod[], item: CatalogMod): AsiMod | undefined {
+  const ref = catalogRef(item);
+  const exact = asiMods.find(
+    (m) => m.origin?.source === "catalog" && m.origin.id === ref
+  );
+  if (exact) return exact;
+
+  const asis = catalogAsiNames(item);
+  return asiMods.find((m) =>
+    m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
+  );
+}
+
+/** The catalog mod backing a Library ASI mod — the reverse of {@link libEntryFor}. */
 function findCatalogForLib(
   catalog: CatalogMod[],
   mod: AsiMod
 ): CatalogMod | undefined {
+  const ref = mod.origin?.source === "catalog" ? mod.origin.id : null;
+  if (ref) {
+    const exact = catalog.find((c) => catalogRef(c) === ref);
+    if (exact) return exact;
+  }
   const asis = mod.asiFiles.map((f) => f.split(/[\\/]/).pop() ?? f);
   return catalog.find((c) => catalogAsiNames(c).some((a) => asis.includes(a)));
 }
@@ -187,6 +250,15 @@ interface ProjectState {
   buildResult: BuildResult | null;
   /** Snapshots of every vz-patch.wad a deploy has displaced — the undo list. */
   wadBackups: WadBackup[];
+  /**
+   * The patch WAD deployed right now, or null when none is.
+   *
+   * Read back from disk on start rather than persisted here: the ledger is written by the
+   * deploy, so it is already durable, and mirroring it into localStorage would give two answers
+   * that can disagree. Null is the honest state for an ASI-only setup that has never built a
+   * WAD, not a "not loaded yet" placeholder.
+   */
+  deployedWad: DeployedWadRecord | null;
   /** Wearable models verified present in THIS install. */
   wardrobeModels: WardrobeModel[];
   /** Outfits the user has queued for the next build. */
@@ -237,6 +309,7 @@ export const useProjectStore = defineStore("project", {
     resolutions: {},
     buildResult: null,
     wadBackups: [],
+    deployedWad: null,
     wardrobeModels: [],
     wardrobe: [],
     prebuilt: [],
@@ -386,14 +459,9 @@ export const useProjectStore = defineStore("project", {
           m.asiFiles.some((f) => (f.split(/[\\/]/).pop() ?? f) === name)
         );
     },
-    /** The Library mod backing a catalog mod, matched by `.asi` filename. */
+    /** The Library mod backing a catalog mod — by captured origin, else by `.asi` filename. */
     catalogLibMod(state) {
-      return (item: CatalogMod): AsiMod | undefined => {
-        const asis = catalogAsiNames(item);
-        return state.asiMods.find((m) =>
-          m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
-        );
-      };
+      return (item: CatalogMod): AsiMod | undefined => libEntryFor(state.asiMods, item);
     },
     /**
      * The newer version string when this catalog mod offers a release newer
@@ -402,10 +470,7 @@ export const useProjectStore = defineStore("project", {
      */
     catalogUpdate(state) {
       return (item: CatalogMod): string | null => {
-        const asis = catalogAsiNames(item);
-        const lib = state.asiMods.find((m) =>
-          m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
-        );
+        const lib = libEntryFor(state.asiMods, item);
         if (
           lib &&
           item.version &&
@@ -431,19 +496,15 @@ export const useProjectStore = defineStore("project", {
      */
     catalogModBlockedBy(state) {
       return (item: CatalogMod): CatalogMod | undefined => {
-        const key = (c: CatalogMod) => `${c.repository}#${c.slug}`;
-        const itemKey = key(item);
+        const itemKey = catalogRef(item);
         return state.catalog.find((other) => {
           if (other.repository === item.repository && other.slug === item.slug) return false;
           const crossRef =
-            item.incompatible.includes(key(other)) ||
+            item.incompatible.includes(catalogRef(other)) ||
             other.incompatible.includes(itemKey);
           if (!crossRef) return false;
           // Only blocks if the other mod is currently enabled in the library.
-          const asis = catalogAsiNames(other);
-          const lib = state.asiMods.find((m) =>
-            m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
-          );
+          const lib = libEntryFor(state.asiMods, other);
           return !!lib && state.enabled[lib.id] !== false;
         });
       };
@@ -457,9 +518,7 @@ export const useProjectStore = defineStore("project", {
           (state.gameInfo?.deployed_asi ?? []).map((a) => a.name)
         );
         if (asis.every((a) => deployed.has(a))) return "deployed";
-        const lib = state.asiMods.find((m) =>
-          m.asiFiles.some((f) => asis.includes(f.split(/[\\/]/).pop() ?? f))
-        );
+        const lib = libEntryFor(state.asiMods, item);
         if (lib) return state.enabled[lib.id] !== false ? "enabled" : "downloaded";
         return "none";
       };
@@ -509,6 +568,13 @@ export const useProjectStore = defineStore("project", {
       });
 
       await this.loadCustomSources().catch(() => {});
+      // What is deployed outlives the process, which is exactly why it is on disk and not in
+      // the slice above. A read failure is surfaced rather than dropped: leaving `deployedWad`
+      // null would be indistinguishable from "no patch is deployed", and those are opposite
+      // answers to the only question this record exists to settle.
+      await this.loadDeployedWad().catch((e) => {
+        this.error = String(e);
+      });
 
       const saved = localStorage.getItem(GAME_PATH_KEY);
       if (saved) {
@@ -575,8 +641,9 @@ export const useProjectStore = defineStore("project", {
         const res = await invoke<InstallResult>("install_catalog_mod", {
           item,
         });
+        const origin = catalogOrigin(item, res.version);
         if (res.kind === "wad") {
-          await this.loadModFromDir(res.mod_root);
+          await this.loadModFromDir(res.mod_root, origin);
         } else {
           const id = slugify(`${item.repo_name}-${item.slug}`);
           if (!this.asiMods.some((m) => m.id === id)) {
@@ -589,6 +656,7 @@ export const useProjectStore = defineStore("project", {
               version: item.version ?? res.version,
               modRoot: res.mod_root,
               asiFiles: res.asi_files,
+              origin,
             });
             // Downloaded != enabled. The user enables it explicitly.
             this.enabled[id] = false;
@@ -624,6 +692,9 @@ export const useProjectStore = defineStore("project", {
             version: res.version,
             modRoot: res.mod_root,
             asiFiles: res.asi_files,
+            // A file the user picked and named. `res.version` is the literal string "local",
+            // not a version anyone can compare, so the origin carries none.
+            origin: { source: "imported", id: null, version: null },
           });
           this.enabled[id] = true;
         }
@@ -1300,7 +1371,15 @@ export const useProjectStore = defineStore("project", {
       });
     },
 
-    async loadModFromDir(path: string) {
+    /**
+     * Load a WAD-asset mod from a staged directory.
+     *
+     * `origin` is supplied by the caller because `load_mod` reads a folder and knows nothing
+     * about where it came from. A folder the user picked themselves gets `local` with a null id
+     * — it is neither a registry install nor a catalogue one, and its directory name is not an
+     * identity, so there is nothing to fill in.
+     */
+    async loadModFromDir(path: string, origin?: Origin) {
       this.busy = true;
       this.error = null;
       try {
@@ -1308,6 +1387,12 @@ export const useProjectStore = defineStore("project", {
         if (this.mods.some((m) => m.id === mod.id)) {
           throw new Error(`Mod "${mod.id}" is already loaded`);
         }
+        mod.origin = origin ?? {
+          source: "local",
+          id: null,
+          // A blank version declares no more than a missing one, so it reports as null.
+          version: mod.manifest.version || null,
+        };
         this.mods.push(mod);
         this.enabled[mod.id] = true;
         await this.refreshConflicts();
@@ -1553,6 +1638,7 @@ export const useProjectStore = defineStore("project", {
         });
         await this.refreshGame();
         await this.loadWadBackups();
+        await this.loadDeployedWad();
         return res;
       } catch (e) {
         this.error = String(e);
@@ -1564,6 +1650,15 @@ export const useProjectStore = defineStore("project", {
 
     async loadWadBackups() {
       this.wadBackups = await invoke<WadBackup[]>("list_patch_wad_backups");
+    },
+
+    /**
+     * Read back which patch WAD is deployed. The backend errors on a ledger it cannot parse
+     * rather than reporting "nothing deployed", and that distinction is the point of the
+     * record — so it is not swallowed here either.
+     */
+    async loadDeployedWad() {
+      this.deployedWad = await invoke<DeployedWadRecord | null>("deployed_wad_record");
     },
 
     /**
@@ -1591,6 +1686,9 @@ export const useProjectStore = defineStore("project", {
       this.error = null;
       try {
         const info = await invoke<PrebuiltWad>("inspect_patch_wad", { path });
+        // A finished WAD off the user's disk: no manifest, no repository, and a filename they
+        // chose. `imported` with no id is all there is to say, and all that may be said.
+        info.origin = { source: "imported", id: null, version: null };
         if (!this.prebuilt.some((p) => p.path === info.path)) {
           this.prebuilt = [...this.prebuilt, info];
         }
@@ -1671,6 +1769,7 @@ export const useProjectStore = defineStore("project", {
         });
         await this.refreshGame();
         await this.loadWadBackups();
+        await this.loadDeployedWad();
         return res;
       } catch (e) {
         this.error = String(e);
