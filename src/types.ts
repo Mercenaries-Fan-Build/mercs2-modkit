@@ -30,11 +30,64 @@ export interface DetectedAsset {
   target_patch: string;
 }
 
+/**
+ * The kind of place an entry in the load order came from. Closed vocabulary — mirrors Rust's
+ * `models::origin::OriginSource`.
+ */
+export type OriginSource =
+  /** Installed through mercs.ink; carries a full public id. */
+  | "registry"
+  /** Installed from a mod-source repository index (a {@link CatalogMod}). */
+  | "catalog"
+  /** A hand-built source folder staged from disk. User-named, so no id. */
+  | "local"
+  /** A local file the user picked (a prebuilt WAD, a loose `.asi`). User-named, so no id. */
+  | "imported"
+  /** Something modkit synthesizes rather than installs — the wardrobe, the texture queue. */
+  | "modkit";
+
+/**
+ * Where an entry came from, captured at ingest/install time.
+ *
+ * It has to be captured *then* because it cannot be recovered later. A catalog install used to
+ * keep nothing that pointed back at its {@link CatalogMod} — for a WAD mod not the repository,
+ * the slug or the release tag, and for an ASI only a lossy `slugify("{repo}-{slug}")` that
+ * cannot be parsed back into the pair. Re-associating an installed plugin with its catalogue
+ * entry was done by matching `.asi` filenames, which is a guess.
+ *
+ * **`id` is comparable only against another id with the same `source`.** No slug identifies a
+ * mod on its own: a registry slug is the Shipment's declared name, which every fork of it
+ * shares, and a catalog slug is unique only within its repository. Both namespaces are
+ * composite. `version` splits the same way — a GitHub release tag for `catalog`, a manifest
+ * version for `registry`/`local`.
+ *
+ * `null` on either field is a bucket with a meaning (an unreleased mod, a folder the user
+ * named), not missing data to be filled in with a guess.
+ */
+export interface Origin {
+  source: OriginSource;
+  /** Source-scoped identity, or null when the entry has no public one. */
+  id: string | null;
+  /** Release tag or manifest version; null is meaningful. */
+  version: string | null;
+}
+
+/** The wardrobe's fixed origin id — modkit synthesizes one outfit Shipment from every pick. */
+export const MODKIT_WARDROBE_ID = "modkit:wardrobe";
+/** The texture queue's fixed origin id — swaps enter the WAD like any other asset claim. */
+export const MODKIT_TEXTURES_ID = "modkit:textures";
+
 export interface LoadedMod {
   id: string;
   root: string;
   manifest: Manifest;
   assets: DetectedAsset[];
+  /**
+   * Captured by the store at install time; the `load_mod` command that builds the rest of this
+   * object never sees a catalogue. Absent on rows persisted before origins existed — and left
+   * absent, because a heuristic backfill would assert a provenance nothing recorded.
+   */
+  origin?: Origin;
 }
 
 export interface AssetConflict {
@@ -127,7 +180,13 @@ export interface WardrobeModel {
   in_base_wardrobe: boolean;
 }
 
-/** An outfit to add to the PMC wardrobe. */
+/**
+ * An outfit to add to the PMC wardrobe.
+ *
+ * Origin is per-collection, not per-row: every pick is folded into one synthesized Shipment, so
+ * the whole `wardrobe` array contributes as a single `modkit` entry under
+ * {@link MODKIT_WARDROBE_ID}.
+ */
 export interface WardrobeOutfit {
   hero: string; // "mattias" | "chris" | "jennifer"
   model: string;
@@ -345,7 +404,13 @@ export interface TextureTarget {
   reason: string | null;
 }
 
-/** Replace `name` with the image at `image_path` (resized to the game's dimensions). */
+/**
+ * Replace `name` with the image at `image_path` (resized to the game's dimensions).
+ *
+ * Swaps feed the WAD build like every other collection, so one can collide with any other claim
+ * on the same asset — the queue is a load-order contributor in its own right, under
+ * {@link MODKIT_TEXTURES_ID}. Origin is per-collection, not per-row.
+ */
 export interface TextureSwap {
   name: string;
   image_path: string;
@@ -367,6 +432,8 @@ export interface PrebuiltWad {
   /** Ships a compiled scripts_vz block — cannot be composed with another that does. */
   has_scripts: boolean;
   warnings: string[];
+  /** Always `imported` with a null id: a file the user picked and named. */
+  origin?: Origin;
 }
 
 /**
@@ -377,9 +444,25 @@ export interface PrebuiltWad {
  * clobbering another.
  */
 export interface ShipmentRef {
+  /**
+   * Local dedupe key and load-order row id, derived from the folder name. Deliberately *not*
+   * the Shipment's identity: it has to tell two checkouts of the same Shipment apart, which a
+   * slug — shared by every fork — cannot. It never leaves the machine.
+   */
   id: string;
+  /** The Shipment's declared name once the manifest is read; the folder name only if it wasn't. */
   name: string;
   path: string;
+  /**
+   * `shipment.name` from the qm manifest — the Shipment's declared slug, and **half** its
+   * identity. The other half is the repository, which a folder staged from disk cannot know.
+   * `null` when the manifest could not be parsed.
+   */
+  slug: string | null;
+  /** `shipment.version` from the manifest. `null` is meaningful — an unreleased mod. */
+  version: string | null;
+  /** `local` with a null id for anything staged from disk. */
+  origin: Origin;
 }
 
 /** A snapshot of a `vz-patch.wad` that a deploy displaced. */
@@ -395,6 +478,26 @@ export interface DeployWadResult {
   sha256: string;
   byte_size: number;
   backed_up: WadBackup | null;
+}
+
+/**
+ * The `vz-patch.wad` modkit currently has installed — a durable record that survives a restart,
+ * unlike {@link DeployWadResult}, which was returned and discarded.
+ *
+ * Distinct from {@link WadBackup}: a backup describes a WAD that was **displaced**, this
+ * describes the live one. `null` from `deployed_wad_record` means no patch is deployed, which is
+ * a real state (an ASI-only setup has never deployed one) and not an error.
+ *
+ * It states what modkit last wrote. A user can replace `vz-patch.wad` behind modkit's back, so
+ * anything needing certainty re-hashes the file at `installed_at`.
+ */
+export interface DeployedWadRecord {
+  installed_at: string;
+  /** sha256 of the deployed bytes. */
+  sha256: string;
+  byte_size: number;
+  /** Unix epoch seconds at deploy time. Ordering only; never an identifier. */
+  deployed_at: number;
 }
 
 export interface ValidationResult {
@@ -485,12 +588,19 @@ export interface InstallResult {
 
 /** An installed ASI-plugin mod staged on disk, ready to deploy. */
 export interface AsiMod {
+  /** Local row id. Lossy — `slugify("{repo}-{slug}")` cannot be parsed back; see {@link origin}. */
   id: string;
   name: string;
   description: string;
   version: string;
   modRoot: string;
   asiFiles: string[];
+  /**
+   * `catalog` for a catalogue download, `imported` for a locally-picked `.asi`. This is the gap
+   * that mattered most: an ASI mod kept nothing else pointing back at its {@link CatalogMod},
+   * which is why re-association is still done by matching `.asi` basenames.
+   */
+  origin?: Origin;
 }
 
 export interface DeployResult {
@@ -738,6 +848,17 @@ export interface ExeReport {
   file: string;
   size: number;
   hash: string;
+  /**
+   * The catalogue's stable id for the matched build (`v11-cracked-pmcbb`, …), or null when no
+   * entry has this md5.
+   *
+   * Null is a real answer, not a prompt to fall back on the nearest size: two catalogued builds
+   * are byte-for-byte the same length, so a size guess would pool one build's records with
+   * another's. This is also why the id exists at all — `(version, variant)` cannot separate
+   * those two, and neither can any other descriptive tuple, since each one guesses at whichever
+   * attributes happen to differ among today's builds.
+   */
+  identifiedId: string | null;
   identifiedAs: string | null; // catalog description when the hash matched
   notes: string[]; // unrecognized hint, missing sidecar DLL, modding caveat
 }
