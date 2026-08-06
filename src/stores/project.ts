@@ -1542,14 +1542,27 @@ export const useProjectStore = defineStore("project", {
       });
     },
 
-    /** Install a built WAD into the game, snapshotting whatever it replaces. */
-    async deployPatchWad(wadPath: string): Promise<DeployWadResult> {
+    /**
+     * Install a build into the game, snapshotting whatever it replaces.
+     *
+     * "A build" is both halves: the WAD, and the loose files a Shipment places into the game folder
+     * (`native_hook` plugins, `place_file` companions). Passing the whole {@link BuildResult} is
+     * what makes the second half reachable — its `staging_dir` is where the placement record lives,
+     * and it is the only handle that survives a build with no WAD in it at all.
+     */
+    async deployPatchWad(build: BuildResult): Promise<DeployWadResult> {
       if (!this.gameInfo?.data_dir) throw new Error("Set the game folder first");
       this.busy = true;
       this.error = null;
       try {
         const res = await invoke<DeployWadResult>("deploy_patch_wad", {
-          args: { wad_path: wadPath, data_dir: this.gameInfo.data_dir },
+          args: {
+            wad_path: build.path,
+            data_dir: this.gameInfo.data_dir,
+            staging_dir: build.staging_dir,
+            game_root: this.gameInfo.root,
+            asi_target: this.asiTarget,
+          },
         });
         await this.refreshGame();
         await this.loadWadBackups();
