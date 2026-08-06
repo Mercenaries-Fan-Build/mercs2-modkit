@@ -46,6 +46,7 @@ pub mod logprobe;
 pub mod mod_loader;
 pub mod model_view;
 pub mod paths;
+pub mod placement;
 pub mod prebuilt;
 pub mod proc;
 pub mod region;
