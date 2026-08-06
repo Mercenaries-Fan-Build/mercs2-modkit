@@ -56,9 +56,48 @@ pub struct ManifestEntry {
     pub hash: String,
 }
 
+/// The closed set of catalogue-assigned exe identifiers.
+///
+/// A build is identified by a **slug the catalogue assigns**, not by a tuple describing it.
+/// Every descriptive tuple that has been tried collides:
+///
+/// * `(version, variant)` collides *today* — two entries below are both `v1.1 cracked`, and
+///   they are the same byte size, because swapping the `cruise.dll` import for `pmc_bb.dll`
+///   is length-preserving. Ten characters either way.
+/// * `(version, variant, requires)` collides on the next build — a DRM-free `v1.1 patched`
+///   imports no sidecar, exactly like the SecuROM one.
+///
+/// The pattern is the problem: each such tuple is a guess about which attributes happen to
+/// differ among the builds that exist right now, and it fails as soon as one differs along an
+/// axis the tuple does not carry. An assigned slug cannot collide by construction.
+///
+/// Ids are permanent. Renaming one re-buckets every record already filed under the old name,
+/// with no way to notice — so extend this list, never edit it.
+pub const EXE_IDS: &[&str] = &[
+    "v10-ea-signed",
+    "v10-unsigned",
+    "v11-cracked-cruise",
+    "v11-cracked-pmcbb",
+    "v11-patched-securom",
+    // Reserved, not yet catalogued: a DRM-free v1.1 patched build. No copy of one has been
+    // hashed, and an entry without a real md5 would mis-identify whatever it collided with, so
+    // the id is declared here and the catalogue stays at five entries until an artifact exists.
+    "v11-patched-drmfree",
+];
+
 /// One known-good `Mercenaries2.exe` build.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExeEntry {
+    /// Catalogue-assigned identifier from [`EXE_IDS`] — the stable key for this build.
+    ///
+    /// `label` cannot serve: it is prose written for a human ("cruise.dll crack (archive.org)")
+    /// and rewording it would silently split one build's history in two.
+    ///
+    /// `None` for a manifest generated before ids existed, and for one a user generated from
+    /// their own install — assigning ids is the catalogue's job, and a local generator has no
+    /// standing to mint one.
+    #[serde(default)]
+    pub id: Option<String>,
     pub version: String,
     pub variant: String,
     #[serde(default)]
@@ -140,6 +179,11 @@ pub struct ExeReport {
     pub file: String,
     pub size: u64,
     pub hash: String,
+    /// The matched entry's [`ExeEntry::id`]. `None` means no catalogue entry has this md5 —
+    /// a real answer, and a triage signal in its own right, not a prompt to fall back on the
+    /// nearest size. Two different binaries share a size here, so a size-based guess would pool
+    /// crashes from a build that is not the one being counted.
+    pub identified_id: Option<String>,
     pub identified_as: Option<String>,
     /// Caveats/warnings: an unrecognized-build hint, a missing sidecar DLL the
     /// exe needs to start, or a build's modding limitation.
@@ -190,6 +234,8 @@ pub struct GenerateManifestResult {
 /// A `Mercenaries2.exe` build to catalogue during generation.
 pub struct ExeSpec {
     pub path: PathBuf,
+    /// Catalogue id to assign (see [`ExeEntry::id`]). `None` outside the maintainer generator.
+    pub id: Option<String>,
     pub version: String,
     pub variant: String,
     pub label: Option<String>,
@@ -458,6 +504,7 @@ pub fn build_manifest(
         }
         let (size, hash) = md5_file(&spec.path).map_err(|e| e.to_string())?;
         exes.push(ExeEntry {
+            id: spec.id.clone(),
             version: spec.version.clone(),
             variant: spec.variant.clone(),
             label: spec.label.clone(),
@@ -514,6 +561,10 @@ pub async fn generate_manifest(
             };
             let specs = vec![ExeSpec {
                 path: root.join(MAIN_EXE),
+                // No id: this catalogues *this user's* exe, and the ids in `EXE_IDS` are the
+                // shared catalogue's to assign. Minting one here would put a locally-invented
+                // key in the same namespace as the real ones.
+                id: None,
                 version,
                 variant,
                 label: None,
@@ -754,7 +805,12 @@ fn identify_exe(root: &Path, name: &str, catalog: &[ExeEntry]) -> Option<ExeRepo
     let (size, hash) = md5_file(&path).ok()?;
 
     let mut notes = Vec::new();
-    let identified_as = match catalog.iter().find(|e| e.hash == hash) {
+    // Identification is by content hash against the catalogue. Not by size — two catalogued
+    // builds share a size — and not by `classify(size)` in `game.rs`, which is a cruder path
+    // that predates this one and cannot tell those two apart at all.
+    let matched = catalog.iter().find(|e| e.hash == hash);
+    let identified_id = matched.and_then(|e| e.id.clone());
+    let identified_as = match matched {
         Some(e) => {
             // The crack's bypass DLL must sit beside the exe or it won't load —
             // the same class of failure as the binkw32.dll case.
@@ -782,7 +838,7 @@ fn identify_exe(root: &Path, name: &str, catalog: &[ExeEntry]) -> Option<ExeRepo
         }
     };
 
-    Some(ExeReport { file: name.to_string(), size, hash, identified_as, notes })
+    Some(ExeReport { file: name.to_string(), size, hash, identified_id, identified_as, notes })
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
@@ -796,6 +852,7 @@ mod tests {
 
     fn exe(version: &str, variant: &str, label: Option<&str>, requires: Option<&str>, hash: &str) -> ExeEntry {
         ExeEntry {
+            id: None,
             version: version.into(),
             variant: variant.into(),
             label: label.map(Into::into),
@@ -888,6 +945,81 @@ mod tests {
         std::fs::write(dir.path().join("cruise.dll"), b"x").unwrap();
         let r = identify_exe(dir.path(), "Mercenaries2.exe", &catalog).unwrap();
         assert_eq!(r.notes, vec!["caveat".to_string()]);
+    }
+
+    /// The catalogue id travels with the identification, and it comes from the **hash** match.
+    /// The two builds this matters for are the same size, so nothing size-derived could produce
+    /// it.
+    #[test]
+    fn identification_carries_the_catalogue_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap();
+
+        let mut cruise = exe("v1.1", "cracked", None, Some("cruise.dll"), "deadbeef");
+        cruise.id = Some("v11-cracked-cruise".into());
+        cruise.size = 3; // same size as the entry below — the collision the id exists to break
+        let mut pmcbb = exe(
+            "v1.1",
+            "cracked",
+            None,
+            Some("pmc_bb.dll"),
+            "900150983cd24fb0d6963f7d28e17f72",
+        );
+        pmcbb.id = Some("v11-cracked-pmcbb".into());
+
+        let r = identify_exe(dir.path(), "Mercenaries2.exe", &[cruise, pmcbb]).unwrap();
+        assert_eq!(r.identified_id.as_deref(), Some("v11-cracked-pmcbb"));
+    }
+
+    /// An exe nothing in the catalogue matches reports **no** id. Snapping it to the same-size
+    /// neighbour — which the human-readable note does offer as a hint — would pool its crashes
+    /// with a binary it is not.
+    #[test]
+    fn an_unmatched_exe_has_no_id_even_when_a_size_neighbour_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap(); // size 3
+        let mut neighbour = exe("v1.1", "cracked", None, None, "deadbeef"); // size 3, wrong hash
+        neighbour.id = Some("v11-cracked-pmcbb".into());
+
+        let r = identify_exe(dir.path(), "Mercenaries2.exe", &[neighbour]).unwrap();
+        assert_eq!(r.identified_id, None);
+        assert!(r.notes[0].contains("Unrecognized"));
+    }
+
+    /// The shipped catalogue must stay inside the closed vocabulary, and every entry must be
+    /// separable from every other. This is the test that would have caught `(version, variant)`:
+    /// two entries there are identical on both fields *and* on size.
+    #[test]
+    fn the_bundled_catalogue_ids_are_known_unique_and_complete() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../manifests/mercs2.manifest.json");
+        let bytes = std::fs::read(&path).expect("the bundled manifest is in the repo");
+        let manifest = parse_manifest(&bytes).expect("it parses");
+
+        let mut seen = std::collections::BTreeSet::new();
+        for e in &manifest.exes {
+            let id = e.id.as_deref().unwrap_or_else(|| {
+                panic!("catalogued build {} {} has no id", e.version, e.variant)
+            });
+            assert!(EXE_IDS.contains(&id), "{id} is not in EXE_IDS");
+            assert!(seen.insert(id), "{id} is used by two entries");
+        }
+
+        // The pair the descriptive tuple could not tell apart: same version, same variant, same
+        // size, different id.
+        let cruise = manifest.exes.iter().find(|e| e.id.as_deref() == Some("v11-cracked-cruise"));
+        let pmcbb = manifest.exes.iter().find(|e| e.id.as_deref() == Some("v11-cracked-pmcbb"));
+        let (cruise, pmcbb) = (cruise.expect("cruise entry"), pmcbb.expect("pmc_bb entry"));
+        assert_eq!((&cruise.version, &cruise.variant), (&pmcbb.version, &pmcbb.variant));
+        assert_eq!(cruise.size, pmcbb.size);
+        assert_ne!(cruise.hash, pmcbb.hash);
+    }
+
+    /// A manifest written before ids existed still loads; its entries simply have none.
+    #[test]
+    fn a_pre_id_manifest_entry_deserializes() {
+        let old = r#"{"version":"v1.1","variant":"patched","size":1,"hash":"aa"}"#;
+        let e: ExeEntry = serde_json::from_str(old).unwrap();
+        assert_eq!(e.id, None);
     }
 
     #[test]

@@ -3,4 +3,5 @@
 pub mod claim;
 pub mod conflict;
 pub mod manifest;
+pub mod origin;
 pub mod project;

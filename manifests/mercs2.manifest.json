@@ -11256,6 +11256,7 @@
   },
   "exes": [
     {
+      "id": "v10-ea-signed",
       "version": "v1.0",
       "variant": "ea-signed",
       "label": "retail EA-signed",
@@ -11265,6 +11266,7 @@
       "hash": "596efbf5e6c88924acef1fd8b0891012"
     },
     {
+      "id": "v10-unsigned",
       "version": "v1.0",
       "variant": "unsigned",
       "label": "retail unsigned",
@@ -11274,6 +11276,7 @@
       "hash": "7d9b8debfdd033d599073d69f9c6b29a"
     },
     {
+      "id": "v11-cracked-cruise",
       "version": "v1.1",
       "variant": "cracked",
       "label": "cruise.dll crack (archive.org)",
@@ -11283,6 +11286,7 @@
       "hash": "857b3387d54774a32c1328effb5de4d4"
     },
     {
+      "id": "v11-cracked-pmcbb",
       "version": "v1.1",
       "variant": "cracked",
       "label": "pmc_bb crack (modkit)",
@@ -11292,6 +11296,7 @@
       "hash": "535e2ea8fe6e3dae2d273e7b3ade2b1d"
     },
     {
+      "id": "v11-patched-securom",
       "version": "v1.1",
       "variant": "patched",
       "label": "v1.1 patched (uncracked)",

@@ -26,44 +26,59 @@ fn classify(size: u64) -> (&'static str, &'static str) {
     }
 }
 
-/// Per-build metadata keyed by storage filename: a distinguishing label, the
-/// sidecar DLL the exe imports (must be present to start), and a caveat.
+/// Per-build metadata keyed by storage filename: the catalogue id, a distinguishing
+/// label, the sidecar DLL the exe imports (must be present to start), and a caveat.
+///
+/// The **id** is the part that must not drift. It is the stable key every per-build
+/// record is filed under, so a regenerated manifest has to reproduce the same id for
+/// the same build — which is why it lives in this table beside the label rather than
+/// being derived from the filename, the size, or the (version, variant) pair. All
+/// three of those change; the id may not. Ids come from `verify::EXE_IDS`.
 struct ExeMeta {
+    id: Option<String>,
     label: Option<String>,
     requires: Option<String>,
     note: Option<String>,
 }
 
 fn meta_for(name: &str) -> ExeMeta {
-    let (label, requires, note): (&str, Option<&str>, Option<&str>) = match name {
+    let (id, label, requires, note): (&str, &str, Option<&str>, Option<&str>) = match name {
         "Mercenaries2 (v1.0 unsigned).exe" => (
+            "v10-unsigned",
             "retail unsigned",
             None,
             Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
         ),
         "Mercenaries2 (v1.0 signed).exe" => (
+            "v10-ea-signed",
             "retail EA-signed",
             None,
             Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
         ),
         "Mercenaries2(v1.1).exe" => (
+            "v11-patched-securom",
             "v1.1 patched (uncracked)",
             None,
             Some("Stock patched exe — still SecuROM; crack it in Setup before modding."),
         ),
         "Mercenaries2 (v1.1 cracked).exe" => (
+            "v11-cracked-pmcbb",
             "pmc_bb crack (modkit)",
             Some("pmc_bb.dll"),
             Some("Loads ASI mods via the pmc_bb.dll loader — modkit's supported crack."),
         ),
         "Mercenaries2(v1.1 cruise.dll).exe" => (
+            "v11-cracked-cruise",
             "cruise.dll crack (archive.org)",
             Some("cruise.dll"),
             Some("SecuROM bypass only — does NOT load ASI mods; use modkit's pmc_bb crack for modding."),
         ),
-        _ => ("", None, None),
+        // An exe this table doesn't know gets no id. It is not the catalogue's build, and
+        // inventing a key for it would put an unrecognised binary in a real build's bucket.
+        _ => ("", "", None, None),
     };
     ExeMeta {
+        id: (!id.is_empty()).then(|| id.to_string()),
         label: (!label.is_empty()).then(|| label.to_string()),
         requires: requires.map(str::to_string),
         note: note.map(str::to_string),
@@ -97,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let meta = meta_for(&name);
         specs.push(ExeSpec {
             path,
+            id: meta.id,
             version: version.into(),
             variant: variant.into(),
             label: meta.label,

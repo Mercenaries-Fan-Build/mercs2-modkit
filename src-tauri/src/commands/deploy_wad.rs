@@ -10,6 +10,21 @@
 //! `restore_patch_wad` puts it back. Nothing here ever hard-deletes.
 //!
 //! Everything is verified by **sha256**, never by size or mtime.
+//!
+//! # The deploy ledger
+//!
+//! Snapshots answer "what did we displace"; they cannot answer "what is deployed **now**".
+//! Nothing did: the [`DeployWadResult`] carrying the installed hash is returned to the
+//! frontend and discarded, the build's own `sha256` lives only in unpersisted store state, and
+//! `GameInfo.deployed_patches` is filenames. So after a restart modkit knew a patch WAD existed
+//! and nothing about which one.
+//!
+//! That gap makes it impossible to tell whether a `pmc_blackbox.log` came from the setup the
+//! user currently has — the log records the WAD attribution it loaded, but there was nothing on
+//! this side to compare it against. [`DeployedWadRecord`] is that missing left-hand side: one
+//! durable row, rewritten on every deploy and restore, deleted when the patch is uninstalled.
+//! **Absent is a meaningful state** ("no patch is deployed"), which is why it is a file that
+//! gets removed rather than a row that gets blanked.
 
 use std::path::{Path, PathBuf};
 
@@ -40,11 +55,93 @@ pub struct DeployWadResult {
     pub backed_up: Option<WadBackup>,
 }
 
+/// A durable record of the `vz-patch.wad` modkit currently has installed.
+///
+/// Distinct from [`WadBackup`], which describes a **displaced** WAD. This describes the live
+/// one, and it survives a restart — that is the whole point of it.
+///
+/// It states what modkit last wrote and where. It is not a live reading of the game folder: a
+/// user can delete or replace `vz-patch.wad` behind modkit's back, so a caller that needs
+/// certainty re-hashes the file at `installed_at` and treats a mismatch as "not ours".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployedWadRecord {
+    /// Absolute path the WAD was installed to, inside the game's data dir.
+    pub installed_at: String,
+    /// sha256 of the deployed bytes — what a log's build attribution is compared against.
+    pub sha256: String,
+    pub byte_size: u64,
+    /// Unix epoch seconds at deploy time. Ordering/staleness only; never an identifier.
+    pub deployed_at: u64,
+}
+
 /// Snapshots of replaced patch WADs.
 fn backups_dir() -> Result<PathBuf, String> {
     let dir = deployed_dir()?.join("wad-backups");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create WAD backup dir: {e}"))?;
     Ok(dir)
+}
+
+/// The single-row ledger file.
+fn ledger_path() -> Result<PathBuf, String> {
+    Ok(deployed_dir()?.join("deployed-wad.json"))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+// The three ledger operations are written against an explicit path so they are unit-testable
+// without reaching for the process-wide env vars `app_data_dir` resolves.
+
+fn write_ledger_at(path: &Path, rec: &DeployedWadRecord) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(rec)
+        .map_err(|e| format!("serializing the deploy record: {e}"))?;
+    std::fs::write(path, json)
+        .map_err(|e| format!("Failed to record the deployed WAD at {}: {e}", path.display()))
+}
+
+fn clear_ledger_at(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to clear the deploy record: {e}")),
+    }
+}
+
+fn read_ledger_at(path: &Path) -> Result<Option<DeployedWadRecord>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| format!("The deploy record at {} is unreadable: {e}", path.display()))
+}
+
+/// Record what we just installed. A deploy that succeeded but whose ledger write failed would
+/// leave modkit unable to say what is deployed, so this error is propagated rather than logged.
+fn write_ledger(rec: &DeployedWadRecord) -> Result<(), String> {
+    write_ledger_at(&ledger_path()?, rec)
+}
+
+/// Forget the deployed WAD — the patch is gone and the game is stock again.
+fn clear_ledger() -> Result<(), String> {
+    clear_ledger_at(&ledger_path()?)
+}
+
+/// What modkit currently has deployed, or `None` when no patch WAD is installed.
+///
+/// A corrupt ledger is an **error**, not a `None`. "No record" is a load-bearing answer — it is
+/// what makes an ASI-only setup (which has never deployed a WAD) compare equal to a log with no
+/// build attribution — so quietly returning it for an unreadable file would turn a broken ledger
+/// into a false match.
+#[tauri::command(async)]
+pub fn deployed_wad_record() -> Result<Option<DeployedWadRecord>, String> {
+    read_ledger_at(&ledger_path()?)
 }
 
 fn sha256_of(path: &Path) -> Result<String, String> {
@@ -122,8 +219,16 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
         .map_err(|e| format!("stat installed WAD: {e}"))?
         .len();
 
+    let installed_at = dest.to_string_lossy().to_string();
+    write_ledger(&DeployedWadRecord {
+        installed_at: installed_at.clone(),
+        sha256: got.clone(),
+        byte_size,
+        deployed_at: now_unix(),
+    })?;
+
     Ok(DeployWadResult {
-        installed_at: dest.to_string_lossy().to_string(),
+        installed_at,
         sha256: got,
         byte_size,
         backed_up,
@@ -202,9 +307,18 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
                 format!("Failed to restore {file}: {e} — is the game still running?")
             })?;
             let got = sha256_of(&dest)?;
+            let byte_size = std::fs::metadata(&dest).map_err(|e| format!("stat: {e}"))?.len();
+            let installed_at = dest.to_string_lossy().to_string();
+            // A restore *is* a deploy as far as "what is running" is concerned.
+            write_ledger(&DeployedWadRecord {
+                installed_at: installed_at.clone(),
+                sha256: got.clone(),
+                byte_size,
+                deployed_at: now_unix(),
+            })?;
             Ok(DeployWadResult {
-                installed_at: dest.to_string_lossy().to_string(),
-                byte_size: std::fs::metadata(&dest).map_err(|e| format!("stat: {e}"))?.len(),
+                installed_at,
+                byte_size,
                 sha256: got,
                 backed_up,
             })
@@ -215,6 +329,8 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
                 std::fs::remove_file(&dest)
                     .map_err(|e| format!("Failed to remove the patch WAD: {e} — is the game running?"))?;
             }
+            // Nothing is deployed now, and that is a state to record by absence.
+            clear_ledger()?;
             Ok(DeployWadResult {
                 installed_at: String::new(),
                 byte_size: 0,
@@ -222,5 +338,66 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
                 backed_up,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(sha: &str) -> DeployedWadRecord {
+        DeployedWadRecord {
+            installed_at: "/game/data/vz-patch.wad".into(),
+            sha256: sha.into(),
+            byte_size: 4096,
+            deployed_at: 1_754_400_000,
+        }
+    }
+
+    /// The headline: what is deployed survives being written and read back by a later session.
+    /// This is the left-hand side a log's build attribution gets compared against, and before
+    /// the ledger existed there was none.
+    #[test]
+    fn the_deployed_hash_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deployed-wad.json");
+
+        assert!(read_ledger_at(&path).unwrap().is_none(), "nothing deployed yet");
+
+        write_ledger_at(&path, &rec("aa11")).unwrap();
+        let got = read_ledger_at(&path).unwrap().expect("a record");
+        assert_eq!(got.sha256, "aa11");
+        assert_eq!(got.byte_size, 4096);
+        assert_eq!(got.installed_at, "/game/data/vz-patch.wad");
+
+        // A second deploy replaces the row rather than appending: there is only ever one live WAD.
+        write_ledger_at(&path, &rec("bb22")).unwrap();
+        assert_eq!(read_ledger_at(&path).unwrap().unwrap().sha256, "bb22");
+    }
+
+    /// Uninstalling the patch must leave *no* record, not a blank one — "no deploy record" is
+    /// the state an ASI-only setup is legitimately in, and it has to be expressible.
+    #[test]
+    fn uninstall_clears_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deployed-wad.json");
+        write_ledger_at(&path, &rec("aa11")).unwrap();
+
+        clear_ledger_at(&path).unwrap();
+        assert!(read_ledger_at(&path).unwrap().is_none());
+        // Clearing an already-clear ledger is not an error (restore-to-stock is idempotent).
+        clear_ledger_at(&path).unwrap();
+    }
+
+    /// A ledger we cannot parse is an error, never a silent "nothing is deployed" — that
+    /// confusion would make a stale convoy look like a fresh one.
+    #[test]
+    fn a_corrupt_ledger_is_not_mistaken_for_an_empty_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deployed-wad.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        let err = read_ledger_at(&path).unwrap_err();
+        assert!(err.contains("unreadable"), "got: {err}");
     }
 }

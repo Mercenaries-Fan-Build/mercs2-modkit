@@ -10,7 +10,9 @@ use commands::asset_catalog::detect_asset_type;
 use commands::conflict_resolver::build_conflict_graph;
 use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
-use commands::deploy_wad::{deploy_patch_wad, list_patch_wad_backups, restore_patch_wad};
+use commands::deploy_wad::{
+    deploy_patch_wad, deployed_wad_record, list_patch_wad_backups, restore_patch_wad,
+};
 use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
 use commands::human_skins::human_skins;
@@ -120,6 +122,7 @@ pub fn run() {
             deploy_patch_wad,
             list_patch_wad_backups,
             restore_patch_wad,
+            deployed_wad_record,
             list_wardrobe_models,
             preview_wardrobe_lua,
             human_skins,
