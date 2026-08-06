@@ -79,9 +79,10 @@ pub const EXE_IDS: &[&str] = &[
     "v11-cracked-cruise",
     "v11-cracked-pmcbb",
     "v11-patched-securom",
-    // Reserved, not yet catalogued: a DRM-free v1.1 patched build. No copy of one has been
-    // hashed, and an entry without a real md5 would mis-identify whatever it collided with, so
-    // the id is declared here and the catalogue stays at five entries until an artifact exists.
+    // A v1.1 patched exe with SecuROM removed: import table rebuilt into an appended
+    // `reloaded` section, `.securom` left inert, and no sidecar import at all. It is the
+    // build that makes size classification indefensible — a rebuild of the *patched* exe
+    // that lands at exactly the *cracked* size, so `classify` names it `cracked`.
     "v11-patched-drmfree",
 ];
 
@@ -1012,6 +1013,39 @@ mod tests {
         assert_eq!((&cruise.version, &cruise.variant), (&pmcbb.version, &pmcbb.variant));
         assert_eq!(cruise.size, pmcbb.size);
         assert_ne!(cruise.hash, pmcbb.hash);
+    }
+
+    /// The entry that makes size classification indefensible, pinned so nobody "corrects" it.
+    ///
+    /// `v11-patched-drmfree` is a rebuild of the **patched** exe with SecuROM stripped, and it
+    /// lands at exactly the **cracked** size — so `classify(size)` calls it `cracked` while the
+    /// catalogue calls it `patched`, and the catalogue is right. The disagreement is the point:
+    /// were it ever resolved in `classify`'s favour, this build's crash offsets would pool with
+    /// two unrelated binaries that merely weigh the same.
+    #[test]
+    fn the_drm_free_build_is_catalogued_against_what_its_size_claims() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../manifests/mercs2.manifest.json");
+        let bytes = std::fs::read(&path).expect("the bundled manifest is in the repo");
+        let manifest = parse_manifest(&bytes).expect("it parses");
+
+        let drmfree = manifest
+            .exes
+            .iter()
+            .find(|e| e.id.as_deref() == Some("v11-patched-drmfree"))
+            .expect("the DRM-free entry is catalogued");
+
+        assert_eq!(drmfree.variant, "patched");
+        assert_eq!(crate::commands::game::classify(drmfree.size).1, "cracked");
+        // It imports no sidecar — which it shares with the SecuROM build, so `requires` cannot
+        // distinguish the two either. Only the id does.
+        assert_eq!(drmfree.requires, None);
+        let securom = manifest
+            .exes
+            .iter()
+            .find(|e| e.id.as_deref() == Some("v11-patched-securom"))
+            .expect("the SecuROM entry is catalogued");
+        assert_eq!(securom.requires, None);
+        assert_ne!(drmfree.hash, securom.hash);
     }
 
     /// A manifest written before ids existed still loads; its entries simply have none.

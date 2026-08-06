@@ -11304,6 +11304,16 @@
       "note": "Stock patched exe — still SecuROM; crack it in Setup before modding.",
       "size": 53944080,
       "hash": "5b9976f162e050f4adcc51bb997ba97f"
+    },
+    {
+      "id": "v11-patched-drmfree",
+      "version": "v1.1",
+      "variant": "patched",
+      "label": "v1.1 patched, DRM removed",
+      "requires": null,
+      "note": "DRM-free rebuild of the v1.1 patched exe; imports no sidecar DLL.",
+      "size": 53482288,
+      "hash": "8addfab7027114639750835bb1a44497"
     }
   ],
   "wads": {

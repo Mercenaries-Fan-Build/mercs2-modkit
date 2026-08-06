@@ -181,7 +181,7 @@ const SIZE_V10_EA_SIGNED: u64 = 17_122_568;
 const SIZE_V11_PATCHED: u64 = 53_944_080;
 const SIZE_V11_CRACKED: u64 = 53_482_288;
 
-fn classify(size: u64) -> (&'static str, &'static str) {
+pub(crate) fn classify(size: u64) -> (&'static str, &'static str) {
     match size {
         SIZE_V10_UNSIGNED => ("v1.0", "unsigned"),
         SIZE_V10_EA_SIGNED => ("v1.0", "ea-signed"),

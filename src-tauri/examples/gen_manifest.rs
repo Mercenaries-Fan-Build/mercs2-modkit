@@ -39,9 +39,23 @@ struct ExeMeta {
     label: Option<String>,
     requires: Option<String>,
     note: Option<String>,
+    /// Overrides `classify(size)` for a build whose size misidentifies it.
+    ///
+    /// `classify` maps a byte size to a `(version, variant)` pair, which works only while
+    /// each build has its own size. It does not hold: the DRM-free v1.1 build is a rebuild
+    /// of the *patched* exe that lands at exactly the *cracked* size, so `classify` calls it
+    /// `cracked` with confidence. The catalogue is hash-keyed precisely so size does not have
+    /// to be trusted; this is where that stops being an argument and starts being a value.
+    classified: Option<(&'static str, &'static str)>,
 }
 
 fn meta_for(name: &str) -> ExeMeta {
+    // The DRM-free build is the only entry needing a `classified` override today. Adding one
+    // is the correct response to a size collision — never renaming the id to match `classify`.
+    let classified = match name {
+        "Mercenaries2(v1.1 DRM-free).exe" => Some(("v1.1", "patched")),
+        _ => None,
+    };
     let (id, label, requires, note): (&str, &str, Option<&str>, Option<&str>) = match name {
         "Mercenaries2 (v1.0 unsigned).exe" => (
             "v10-unsigned",
@@ -73,6 +87,15 @@ fn meta_for(name: &str) -> ExeMeta {
             Some("cruise.dll"),
             Some("SecuROM bypass only — does NOT load ASI mods; use modkit's pmc_bb crack for modding."),
         ),
+        "Mercenaries2(v1.1 DRM-free).exe" => (
+            "v11-patched-drmfree",
+            "v1.1 patched, DRM removed",
+            None,
+            // Deliberately silent on ASI capability. Whether plugins load is decided by a
+            // separate loader — dxwrapper's, pmc_bb's, or another proxy DLL — and by that
+            // loader's own config, none of which is a property of this executable.
+            Some("DRM-free rebuild of the v1.1 patched exe; imports no sidecar DLL."),
+        ),
         // An exe this table doesn't know gets no id. It is not the catalogue's build, and
         // inventing a key for it would put an unrecognised binary in a real build's bucket.
         _ => ("", "", None, None),
@@ -82,6 +105,7 @@ fn meta_for(name: &str) -> ExeMeta {
         label: (!label.is_empty()).then(|| label.to_string()),
         requires: requires.map(str::to_string),
         note: note.map(str::to_string),
+        classified,
     }
 }
 
@@ -108,8 +132,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
         let size = std::fs::metadata(&path)?.len();
-        let (version, variant) = classify(size);
         let meta = meta_for(&name);
+        let (version, variant) = meta.classified.unwrap_or_else(|| classify(size));
         specs.push(ExeSpec {
             path,
             id: meta.id,
