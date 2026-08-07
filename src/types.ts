@@ -591,7 +591,12 @@ export interface Catalog {
 // without breaking installed copies.
 // ---------------------------------------------------------------------------------------
 
-/** One downloadable file on a release. Hosted by GitHub — mercs.ink never re-hosts artifacts. */
+/**
+ * One downloadable file on a release. Hosted by GitHub — mercs.ink never re-hosts artifacts.
+ *
+ * The server also sends `download_count` for its own author dashboard; it is omitted here
+ * rather than mirrored unused.
+ */
 export interface ReleaseAsset {
   name: string;
   download_url: string;
@@ -599,6 +604,10 @@ export interface ReleaseAsset {
    * Bytes, as GitHub reported them. **Not an integrity check** — the API carries no checksum
    * for an asset, because it caches release metadata rather than the artifact and so has
    * nothing to attest to.
+   *
+   * A manifest's `load.requires` can carry a `sha256`, but that is the manifest author's claim
+   * about an external URL, not the registry's claim about this asset. Different bytes,
+   * different trust statement; they are not interchangeable.
    */
   size: number | null;
   content_type: string | null;

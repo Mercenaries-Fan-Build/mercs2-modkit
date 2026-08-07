@@ -31,6 +31,18 @@
 //! poll costs one 304. §3's rate limit (120/min/IP across all of `/api/v1/*`) and §9 step 6's
 //! "fall back to cache, surface a banner, do not block" are both handled in [`fetch`].
 //!
+//! One hazard the client cannot defend against, recorded so nobody debugs it from this side.
+//! The server's validator is **not** a hash of the response body — it is derived from a payload
+//! version, a registry token, and the path. Content changes bump the token automatically, but a
+//! change to the *shape* of a resource only invalidates if someone bumps the payload version by
+//! hand. Miss that, and a client holding a matching token is answered `304` and serves a body
+//! missing the new field, indefinitely, until an unrelated write. It has been missed once
+//! already — on `ModResource.id`, the field this module exists to read, caught and fixed before
+//! release. There is nothing correct for a client to do about it: revalidating is exactly what
+//! §4 asks for, and ignoring a `304` would defeat the cache the server is built around. So this
+//! is a note, not a workaround; if `id` is mysteriously absent against a server that sends it,
+//! this is why, and the fix is server-side.
+//!
 //! # The manifest is served already parsed
 //!
 //! Spec §6: every release carries the full parsed Quartermaster manifest as JSON. So identity
@@ -128,11 +140,23 @@ fn release_url(slug: &str, version: &str) -> String {
 
 /// One downloadable file on a release (spec §5.1, §8).
 ///
-/// **There is no checksum here, and none is invented.** mercs.ink caches release *metadata* and
-/// never re-hosts the artifact (§8), so it has nothing to attest to beyond what GitHub told it;
-/// `size` is not an integrity check. What is downloaded through this module is trusted exactly
-/// as far as GitHub's TLS and the author's account are — the same footing [`super::installer`]
-/// has always been on. A hash field nothing produces would be worse than the honest absence.
+/// The server also sends `download_count`, which feeds mercs.ink's author dashboard and means
+/// nothing here; it is left off deliberately rather than mirrored unused.
+///
+/// # There is no checksum on an asset, and none is invented
+///
+/// mercs.ink caches release *metadata* and never re-hosts the artifact (§8), so it has nothing
+/// to attest to beyond what GitHub told it; `size` is not an integrity check. What is downloaded
+/// through this module is trusted exactly as far as GitHub's TLS and the author's account are —
+/// the same footing [`super::installer`] has always been on. A hash field nothing produces would
+/// be worse than the honest absence.
+///
+/// **Do not reach for the manifest's digest to fill the gap.** Digests do exist in the API, just
+/// not here: a parsed shipment's `load.requires` may carry `{ url, sha256 }` pinning an
+/// *external* artifact. That is the **manifest author's** claim about a **third-party URL** —
+/// not mercs.ink's claim about this GitHub release asset. They are different trust statements
+/// about different bytes, and verifying one against the other would assert an integrity
+/// guarantee nobody made.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
@@ -825,7 +849,7 @@ mod tests {
             "latest_release":{
                 "version":"1.0.0","tag":"v1.0.0","published_at":"2026-08-04T15:22:00+00:00",
                 "target":"retail","format":1,
-                "assets":[{"name":"vehicle-pack.zip","download_url":"https://github.com/octocat/vehicle-pack/releases/download/v1.0.0/vehicle-pack.zip","size":12345,"content_type":"application/octet-stream"}],
+                "assets":[{"name":"vehicle-pack.zip","download_url":"https://github.com/octocat/vehicle-pack/releases/download/v1.0.0/vehicle-pack.zip","size":12345,"content_type":"application/octet-stream","download_count":42}],
                 "manifest":{"format":1,"shipment":{"name":"vehicle-pack","version":"1.0.0","target":"retail"},"load":{},"contributions":[]}
             }
         }]}"#;
@@ -838,8 +862,11 @@ mod tests {
             rel.manifest.as_ref().unwrap().shipment.version.as_deref(),
             Some("1.0.0")
         );
-        // No checksum field exists to read, and none is synthesized (§8).
+        // The wire carries five asset fields; `download_count` feeds mercs.ink's author
+        // dashboard and is skipped rather than mirrored unused. No checksum exists to read on
+        // an asset, and none is synthesized (§8).
         assert_eq!(rel.assets[0].size, Some(12345));
+        assert_eq!(rel.assets[0].content_type.as_deref(), Some("application/octet-stream"));
     }
 
     /// §10: the surface is additive-only and unknown keys must be ignored, never an error.
