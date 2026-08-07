@@ -28,7 +28,10 @@ import type {
   ModelGeometry,
   ModelVariant,
   ModkitUpdate,
+  MercsInkInstall,
   PrebuiltWad,
+  RegistryFeed,
+  RegistryMod,
   ReleaseInfo,
   Resolution,
   ShipmentRef,
@@ -208,6 +211,18 @@ interface ProjectState {
   // Mod catalog (per-mod rows expanded from repository sources)
   catalog: CatalogMod[];
   catalogSource: string | null;
+  /**
+   * The mercs.ink registry. A *separate* collection from {@link catalog}, never merged into
+   * it: a registry mod is identified by an opaque server-composed id and a catalog mod by
+   * `"repo-url#slug"`, and those namespaces are not comparable. Not persisted — it is a
+   * remote catalogue like `catalog`, and the Rust client keeps the ETag-validated copy that
+   * survives a restart.
+   */
+  registryMods: RegistryMod[];
+  /** The registry list came from the local cache because mercs.ink could not be reached. */
+  registryStale: boolean;
+  /** Why it is stale, in the user's words. Shown as a banner, not an error. */
+  registryWarning: string | null;
   // User-added custom mod-source repositories (persisted on disk via Rust).
   customSources: RepoSource[];
   // modkit self-update (vs its GitHub releases)
@@ -310,6 +325,9 @@ export const useProjectStore = defineStore("project", {
     buildResult: null,
     wadBackups: [],
     deployedWad: null,
+    registryMods: [],
+    registryStale: false,
+    registryWarning: null,
     wardrobeModels: [],
     wardrobe: [],
     prebuilt: [],
@@ -523,6 +541,38 @@ export const useProjectStore = defineStore("project", {
         return "none";
       };
     },
+
+    /**
+     * The staged Shipment installed from this registry mod, if any.
+     *
+     * Matched on the captured origin id — the registry's own opaque identifier — and never on
+     * the slug, which every fork of a mod shares and which would therefore report a fork as
+     * already installed. The slug is only consulted for rows whose origin has no id, which is
+     * what a deployment older than the identifier produces; there it is the best available
+     * evidence rather than a shortcut.
+     */
+    registryInstalled(state) {
+      return (item: RegistryMod): ShipmentRef | undefined =>
+        state.shipments.find((s) => {
+          if (s.origin?.source !== "registry") return false;
+          if (item.id && s.origin.id) return s.origin.id === item.id;
+          return !s.origin.id && s.slug === item.slug;
+        });
+    },
+
+    /**
+     * The newer version string when the registry offers a release newer than the installed
+     * Shipment, else null. Compared inside one namespace: both sides are the manifest's
+     * `shipment.version`, so this never puts a release tag next to a manifest version.
+     */
+    registryUpdate(): (item: RegistryMod) => string | null {
+      return (item: RegistryMod): string | null => {
+        const installed = this.registryInstalled(item);
+        const latest = item.latest_version ?? item.latest_release?.version ?? null;
+        if (!installed || !latest || !installed.version) return null;
+        return semverGt(latest, installed.version) ? latest : null;
+      };
+    },
   },
 
   actions: {
@@ -625,6 +675,73 @@ export const useProjectStore = defineStore("project", {
         this.catalogSource = cat.source;
       } catch (e) {
         this.error = String(e);
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /**
+     * Pull the mercs.ink registry. Safe on every launch — the read API is generously
+     * rate-limited and the Rust client revalidates with an ETag, so the steady state is a 304.
+     *
+     * A failure here is **not** an error banner and does not touch `this.error`. When
+     * mercs.ink cannot be reached the client answers from its own cache and flags the result
+     * stale; the catalogue stays usable and installing from it stays allowed, which is what
+     * the API's recommended flow asks for. Only an unreachable registry with nothing cached
+     * produces a message, and even then it is scoped to this list rather than to the app.
+     */
+    async fetchRegistry() {
+      this.busy = true;
+      try {
+        const feed = await invoke<RegistryFeed>("fetch_mercsink_registry");
+        this.registryMods = feed.mods;
+        this.registryStale = feed.stale;
+        this.registryWarning = feed.warning;
+      } catch (e) {
+        // Keep whatever is already listed. A registry that failed to refresh is not a reason
+        // to blank a list the user is looking at.
+        this.registryStale = true;
+        this.registryWarning = String(e);
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /**
+     * Install a Shipment from mercs.ink and stage it in the load order.
+     *
+     * The load-order entry this produces is the only one in the app that carries a `registry`
+     * origin: the Rust side copies mercs.ink's precomposed identifier onto it at install time,
+     * which is the one moment it is knowable. A Shipment staged from a folder can report its
+     * slug and nothing more, because every fork of a mod declares the same slug and the folder
+     * cannot say which repository it came from.
+     *
+     * `version` picks a release; omit it for the latest.
+     */
+    async installFromRegistry(
+      item: RegistryMod,
+      version?: string,
+    ): Promise<MercsInkInstall> {
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<MercsInkInstall>("install_mercsink_shipment", {
+          slug: item.slug,
+          version: version ?? null,
+        });
+        // Dedupe on the staging path, as `importShipment` does — re-installing a mod
+        // overwrites its staging directory, so the same path is the same row.
+        const existing = this.shipments.findIndex(
+          (s) => s.path === res.shipment.path,
+        );
+        this.shipments =
+          existing >= 0
+            ? this.shipments.map((s, i) => (i === existing ? res.shipment : s))
+            : [...this.shipments, res.shipment];
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
       } finally {
         this.busy = false;
       }
