@@ -67,7 +67,16 @@ fn parse_repo(url: &str) -> Result<(Host, String), String> {
     Err(format!("Unsupported repository host (need github.com or gitlab.com): {url}"))
 }
 
-async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+/// GET a release artifact and return its bytes.
+///
+/// Shared with [`super::mercsink`], which downloads from the same place: mercs.ink never
+/// re-hosts artifacts, so a registry install ends up pulling a GitHub release asset exactly as
+/// a catalog install does. Deliberately sends **no** `Authorization` header — these are public
+/// downloads on a third-party host.
+pub(crate) async fn download_bytes(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<u8>, String> {
     let resp = client
         .get(url)
         .send()
@@ -148,7 +157,9 @@ async fn gitlab_artifacts(
     Ok((tag, assets))
 }
 
-fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
+/// Unpack a downloaded archive into the staging directory. Shared with [`super::mercsink`] so
+/// both installers lay a mod out on disk the same way.
+pub(crate) fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
     let f = std::fs::File::open(archive).map_err(|e| e.to_string())?;
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("Bad zip archive: {e}"))?;
     z.extract(dest).map_err(|e| format!("Failed to extract archive: {e}"))
@@ -205,13 +216,15 @@ fn find_asi_files(dir: &Path) -> Vec<String> {
     out
 }
 
-fn count_files(dir: &Path) -> usize {
+/// How many files a staged mod root holds, recursively — the "N file(s)" the install banner
+/// reports. Shared with [`super::mercsink`].
+pub(crate) fn stage_file_count(dir: &Path) -> usize {
     let mut n = 0;
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                n += count_files(&p);
+                n += stage_file_count(&p);
             } else {
                 n += 1;
             }
@@ -351,13 +364,13 @@ pub async fn install_catalog_mod(item: CatalogMod) -> Result<InstallResult, Stri
         .iter()
         .find(|(n, _)| n.to_ascii_lowercase().ends_with(".zip"))
     {
-        let bytes = download(&client, url).await?;
+        let bytes = download_bytes(&client, url).await?;
         let archive = dl.join(name);
         std::fs::write(&archive, &bytes).map_err(|e| e.to_string())?;
         extract_zip(&archive, &stage)?;
     } else {
         for (name, url) in &assets {
-            let bytes = download(&client, url).await?;
+            let bytes = download_bytes(&client, url).await?;
             std::fs::write(stage.join(name), &bytes).map_err(|e| e.to_string())?;
         }
     }
@@ -378,7 +391,7 @@ pub async fn install_catalog_mod(item: CatalogMod) -> Result<InstallResult, Stri
     };
 
     Ok(InstallResult {
-        staged_files: count_files(&mod_root),
+        staged_files: stage_file_count(&mod_root),
         mod_root: mod_root.to_string_lossy().to_string(),
         kind: kind.to_string(),
         version: tag,

@@ -21,6 +21,10 @@ use commands::language::{scan_languages, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::license::detect_license;
 use commands::logprobe::{analyze_log, locate_log};
+use commands::mercsink::{
+    fetch_mercsink_mod, fetch_mercsink_registry, fetch_mercsink_release, fetch_mercsink_releases,
+    install_mercsink_shipment,
+};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::model_view::{model_geometry, model_variants, texture_parts};
 use commands::region::{normalize_region, read_region};
@@ -183,6 +187,11 @@ pub fn run() {
             set_saves_dir,
             inspect_shipment,
             take_pending_shipment,
+            fetch_mercsink_registry,
+            fetch_mercsink_mod,
+            fetch_mercsink_releases,
+            fetch_mercsink_release,
+            install_mercsink_shipment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

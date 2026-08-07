@@ -2497,6 +2497,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "texpresso",
+ "tokio",
  "toml 1.1.4+spec-1.1.0",
  "zip 2.4.2",
 ]

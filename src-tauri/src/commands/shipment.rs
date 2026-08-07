@@ -141,6 +141,17 @@ fn manifest_path(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Does `dir` look like a Quartermaster Shipment source tree — i.e. does `qm` have a manifest
+/// to read there?
+///
+/// A **presence** test, not a parse. [`super::mercsink`] uses it to tell a staged Shipment from
+/// a release of loose `.wad` files, which would otherwise become a load-order entry that builds
+/// nothing; the manifest's *contents* arrive from mercs.ink already parsed, so there is nothing
+/// for this to read.
+pub fn has_manifest(dir: &Path) -> bool {
+    manifest_path(dir).is_some()
+}
+
 /// Just the head of a qm manifest: the `shipment` table's identity fields.
 ///
 /// Deliberately not the whole schema. qm owns that, it grows every release, and a struct

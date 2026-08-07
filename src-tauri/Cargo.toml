@@ -77,6 +77,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Unpacking downloaded mod release artifacts
 zip = "2"
 
+# Async sleep, for one thing only: honouring mercs.ink's `Retry-After` on a 429 (API spec §3).
+# `std::thread::sleep` inside an async command would park a runtime worker rather than yield it.
+# Tauri already builds on tokio, so this names a dependency that was always linked; the `rt`
+# feature is what lets the tests drive `fetch` on a current-thread runtime without the network.
+tokio = { version = "1", default-features = false, features = ["time", "rt"] }
+
 # Game-file integrity verification: MD5 hashing, parallelized across files
 md-5 = "0.10"
 sha2 = "0.10"
