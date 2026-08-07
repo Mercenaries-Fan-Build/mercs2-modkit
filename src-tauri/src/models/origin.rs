@@ -60,15 +60,24 @@ pub const MODKIT_WARDROBE_ID: &str = "modkit:wardrobe";
 pub const MODKIT_TEXTURES_ID: &str = "modkit:textures";
 
 impl Origin {
-    /// A mercs.ink install. The id keys on the **GitHub repo id, not the owner name**: owner
-    /// names change on account rename and repo transfer, which would silently split one mod's
-    /// history into two buckets; repo ids never do.
-    pub fn registry(slug: &str, github_repo_id: u64, version: Option<String>) -> Self {
-        Self {
-            source: OriginSource::Registry,
-            id: Some(format!("{slug}-{github_repo_id}")),
-            version,
-        }
+    /// A mercs.ink install.
+    ///
+    /// `id` is the registry's own **precomposed** public identifier — `ModResource.id`, taken
+    /// verbatim and treated as **opaque**. It is deliberately not built here from a slug and a
+    /// repo id, and this signature is the enforcement: with nothing to compose from, there is
+    /// no second implementation of the format to drift from the first. The day two
+    /// implementations disagree, one mod's history splits into two aggregation buckets and the
+    /// resulting drop in reports reads as a fix.
+    ///
+    /// (For the record of *why* the registry composes it the way it does: the id keys on the
+    /// **GitHub repo id, not the owner name**, because owner names change on account rename and
+    /// repo transfer while repo ids never do. That reasoning belongs to mercs.ink; modkit's job
+    /// is to carry the string.)
+    ///
+    /// `None` when the server did not send one — an older deployment. Recorded as an absence
+    /// rather than guessed at, because an absence is legible and a guess is not.
+    pub fn registry(id: Option<String>, version: Option<String>) -> Self {
+        Self { source: OriginSource::Registry, id, version }
     }
 
     /// A catalog install, addressed as `"repo-url#slug"` — modkit's existing composite ref
@@ -111,11 +120,22 @@ impl Origin {
 mod tests {
     use super::*;
 
-    /// The registry half is `{slug}-{repo_id}`, and a rename of the *owner* must not change it.
+    /// The registry half is whatever mercs.ink sent, carried across byte for byte. Modkit has
+    /// no opinion on its shape — that is the point.
     #[test]
-    fn registry_id_keys_on_the_repo_id() {
-        let a = Origin::registry("vehicle-pack", 486_521_234, Some("2.1.0".into()));
+    fn registry_carries_the_servers_identifier_verbatim() {
+        let a = Origin::registry(Some("vehicle-pack-486521234".into()), Some("2.1.0".into()));
         assert_eq!(a.id.as_deref(), Some("vehicle-pack-486521234"));
+        assert_eq!(a.source, OriginSource::Registry);
+        assert_eq!(a.version.as_deref(), Some("2.1.0"));
+    }
+
+    /// A server that sends no identifier yields no identifier. Composing one locally is exactly
+    /// the drift the contract legislates against, so there is nothing to compose it from.
+    #[test]
+    fn registry_without_an_identifier_records_none() {
+        let a = Origin::registry(None, Some("2.1.0".into()));
+        assert_eq!(a.id, None);
         assert_eq!(a.source, OriginSource::Registry);
     }
 
