@@ -17,13 +17,14 @@
 //! * **First-wins dedupe** (`seen.insert`) kept the *earliest* mod's asset. The engine is
 //!   last-wins. See [`crate::models::claim`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::types::*;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
+use crate::commands::placement::StagedFile;
 use crate::commands::prebuilt::{self, PrebuiltWad};
 use crate::commands::shipment::{self, ShipmentRef};
 use crate::commands::texture_swap::{self, TextureSwap};
@@ -68,7 +69,13 @@ pub struct BuildOptions {
 /// Result of an [`assemble_patch_wad`] call.
 #[derive(Debug, Serialize)]
 pub struct BuildResult {
+    /// The built `vz-patch.wad`, or **empty** when the load order resolved to no blocks at all — a
+    /// Shipment whose only contributions are `native_hook` / `place_file` is a real build with
+    /// nothing to put in a WAD.
     pub path: String,
+    /// The build output directory. Deploy reads its `placement.json`, so this is the handle that
+    /// survives the WAD being absent.
+    pub staging_dir: String,
     pub block_count: usize,
     pub byte_size: usize,
     /// sha256 of the bytes written — verify deployments by hash, never size/mtime.
@@ -79,6 +86,14 @@ pub struct BuildResult {
     /// rebuild `scripts_vz`, so only one can win — see the known limitation in `shipment`).
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Loose files a Shipment places into the **game folder** — `native_hook` plugins and
+    /// `place_file` companions. These are not WAD content, so they are staged beside `vz-patch.wad`
+    /// and installed by `deploy_patch_wad`, which also writes them down so uninstall can undo them.
+    ///
+    /// Surfaced in the result so the user can see what a Shipment will drop into their game
+    /// install before they install it. An `.asi` is unrestricted native code in the game process.
+    #[serde(default)]
+    pub placed_files: Vec<StagedFile>,
 }
 
 /// A build refused because the load order is incoherent.
@@ -212,7 +227,7 @@ pub async fn assemble_patch_wad(
     window: Window,
     options: BuildOptions,
 ) -> Result<BuildResult, String> {
-    let warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     // When any Shipment is staged, qm runs — so route the WARDROBE through qm too (as add_outfit
     // contributions with no model file), and drop modkit's own compiled scripts_vz block. That way
@@ -222,6 +237,7 @@ pub async fn assemble_patch_wad(
     let route_wardrobe_through_qm = !options.shipments.is_empty() && !options.wardrobe.is_empty();
 
     let mut groups = all_groups(&options, !route_wardrobe_through_qm)?;
+    let mut placed_files: Vec<StagedFile> = Vec::new();
 
     if !options.shipments.is_empty() {
         let game_path = options
@@ -234,8 +250,10 @@ pub async fn assemble_patch_wad(
                 ship_refs.push(wr);
             }
         }
-        let ship_groups = shipment::shipment_groups(window, &ship_refs, game_path, None).await?;
-        groups.extend(ship_groups);
+        let built = shipment::shipment_groups(window, &ship_refs, game_path, None).await?;
+        groups.extend(built.groups);
+        warnings.extend(built.warnings);
+        placed_files = built.files;
     }
 
     let resolved = claim::resolve(&groups);
@@ -248,14 +266,12 @@ pub async fn assemble_patch_wad(
             .collect::<Vec<_>>()
             .join("\n\n"));
     }
-    if resolved.blocks.is_empty() {
+    // A Shipment whose only contributions are `native_hook` / `place_file` produces no WAD content
+    // at all, and it is still a build with something to install — so "nothing to build" is about the
+    // union of both outputs, not the blocks alone.
+    if resolved.blocks.is_empty() && placed_files.is_empty() {
         return Err("No assets to build (no mods loaded).".to_string());
     }
-
-    // csum_value = 0 and an explicit csum_meta = 0: correct for an assets-only patch WAD
-    // that isn't derived from an Xbox source. Passing it explicitly stops an imported block
-    // whose path ends in `\resident_p000_q3.block` from silently choosing it for us.
-    let wad_bytes = build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)?;
 
     let out_dir = match options.output_dir {
         Some(d) => PathBuf::from(d),
@@ -263,18 +279,88 @@ pub async fn assemble_patch_wad(
     };
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("Failed to create output dir {}: {e}", out_dir.display()))?;
-    let out_path = out_dir.join("vz-patch.wad");
-    std::fs::write(&out_path, &wad_bytes)
-        .map_err(|e| format!("Failed to write {}: {e}", out_path.display()))?;
+
+    // The loose files, copied out of qm's scratch dirs into the build output so the build is a
+    // self-contained artifact: `work_dir` wipes qm's output on the NEXT assemble, and deploy happens
+    // whenever the user clicks. Staging here also means one record describes the whole build.
+    let placed_files = stage_placements(&out_dir, placed_files)?;
+
+    // A native-code-only Shipment resolves to no blocks at all, and `build_patch_wad_multi` would
+    // have nothing to serialize. That is a real build with something to install, so it emits no
+    // `vz-patch.wad` rather than an empty one — deploy installs the files and leaves whatever WAD is
+    // already in the game alone.
+    let (out_path, wad_bytes) = if resolved.blocks.is_empty() {
+        (PathBuf::new(), Vec::new())
+    } else {
+        // csum_value = 0 and an explicit csum_meta = 0: correct for an assets-only patch WAD
+        // that isn't derived from an Xbox source. Passing it explicitly stops an imported block
+        // whose path ends in `\resident_p000_q3.block` from silently choosing it for us.
+        let bytes = build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)?;
+        let path = out_dir.join("vz-patch.wad");
+        std::fs::write(&path, &bytes)
+            .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+        (path, bytes)
+    };
 
     Ok(BuildResult {
         path: out_path.to_string_lossy().to_string(),
+        staging_dir: out_dir.to_string_lossy().to_string(),
         block_count: resolved.blocks.len(),
         byte_size: wad_bytes.len(),
-        sha256: loadprobe::sha256::sha256_hex(&wad_bytes),
+        sha256: if wad_bytes.is_empty() {
+            String::new()
+        } else {
+            loadprobe::sha256::sha256_hex(&wad_bytes)
+        },
         outcomes: resolved.outcomes,
         warnings,
+        placed_files,
     })
+}
+
+/// Copy the Shipments' loose files into `<out_dir>/files/<relative>` and write modkit's own
+/// `placement.json` beside them, returning the staged files re-pointed at their new sources.
+///
+/// The tree mirrors the game folder, exactly as qm's own output does, so the destination is legible
+/// from the staged path and a human can look at the build directory and see what will land where.
+/// The record is what `deploy_patch_wad` reads — build and deploy are separate steps by design, and
+/// a file with no record is a file nothing can install or take back out.
+fn stage_placements(out_dir: &Path, files: Vec<StagedFile>) -> Result<Vec<StagedFile>, String> {
+    let stage_root = out_dir.join("files");
+    // Clear first, so a file dropped from the load order since the last build cannot linger and get
+    // re-installed as though it were still staged.
+    let _ = std::fs::remove_dir_all(&stage_root);
+    let record_path = out_dir.join(crate::commands::placement::PLACEMENT_FILE);
+    let _ = std::fs::remove_file(&record_path);
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(&stage_root)
+        .map_err(|e| format!("Failed to create {}: {e}", stage_root.display()))?;
+
+    let mut staged = Vec::with_capacity(files.len());
+    for file in files {
+        let dest = stage_root.join(&file.relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&file.source, &dest)
+            .map_err(|e| format!("Failed to stage {}: {e}", file.relative))?;
+        staged.push(StagedFile {
+            source: dest.to_string_lossy().to_string(),
+            ..file
+        });
+    }
+
+    let record = serde_json::to_string_pretty(&serde_json::json!({
+        "format": 1,
+        "files": &staged,
+    }))
+    .map_err(|e| format!("Failed to describe the staged files: {e}"))?;
+    std::fs::write(&record_path, record)
+        .map_err(|e| format!("Failed to write {}: {e}", record_path.display()))?;
+    Ok(staged)
 }
 
 /// Dry-run the load order: report what would apply, what would be overridden, and any
@@ -311,11 +397,111 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
 
     Ok(BuildResult {
         path: String::new(),
+        staging_dir: String::new(),
         block_count: resolved.blocks.len(),
         byte_size: 0,
         sha256: String::new(),
         outcomes: resolved.outcomes,
         // Preview covers the in-memory kinds; Shipment conflicts surface at assemble (they need qm).
         warnings: Vec::new(),
+        // Same: the placements come out of a qm build, which preview deliberately does not run.
+        placed_files: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::placement;
+
+    /// Write the output directory a `qm build` of a `native_hook` Shipment leaves behind: the
+    /// plugin under the tree it will be copied into, and the record describing it.
+    fn qm_output(dir: &Path, wad: Option<&str>, files: &[(&str, &str)]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        if let Some(name) = wad {
+            std::fs::write(dir.join(name), b"wad bytes").unwrap();
+            entries.push(serde_json::json!({
+                "name": name,
+                "bytes": 9,
+                "sha256": loadprobe::sha256::sha256_hex(b"wad bytes"),
+                "destination": { "kind": "overlay" },
+            }));
+        }
+        for (relative, body) in files {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            entries.push(serde_json::json!({
+                "name": relative.rsplit('/').next().unwrap(),
+                "bytes": body.len(),
+                "sha256": loadprobe::sha256::sha256_hex(body.as_bytes()),
+                "destination": { "kind": "game_folder", "relative": relative },
+            }));
+        }
+        let record = serde_json::json!({ "format": 1, "placements": entries });
+        std::fs::write(
+            dir.join(placement::PLACEMENT_FILE),
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The chain from a qm output directory to an installable build: the record is read, the files
+    /// are copied into the build output mirroring the game folder, and modkit's own record round
+    /// trips. This is the link that used to be missing entirely.
+    #[test]
+    fn a_qm_output_stages_into_an_installable_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (qm_out, build) = (tmp.path().join("qm"), tmp.path().join("build"));
+        qm_output(
+            &qm_out,
+            Some("my-shipment.wad"),
+            &[
+                ("scripts/hook.asi", "MZ plugin"),
+                ("scripts/OnBoot/init.lua", "-- boot"),
+            ],
+        );
+        std::fs::create_dir_all(&build).unwrap();
+
+        let (wad, files) = placement::read_output(&qm_out, "Hooky").unwrap();
+        assert_eq!(wad.unwrap().file_name().unwrap(), "my-shipment.wad");
+        assert_eq!(files.len(), 2);
+
+        let staged = stage_placements(&build, files).unwrap();
+        // The staged tree mirrors the game folder, so the destination is legible from the path.
+        assert!(build.join("files/scripts/hook.asi").is_file());
+        assert!(build.join("files/scripts/OnBoot/init.lua").is_file());
+        for f in &staged {
+            assert!(Path::new(&f.source).starts_with(&build));
+            assert_eq!(f.shipment, "Hooky");
+        }
+
+        // And the record deploy reads describes exactly what was staged.
+        let read_back = placement::read_staged(&build).unwrap();
+        assert_eq!(read_back.len(), 2);
+        assert_eq!(
+            read_back.iter().map(|f| f.relative.clone()).collect::<Vec<_>>(),
+            vec!["scripts/hook.asi", "scripts/OnBoot/init.lua"]
+        );
+        assert_eq!(read_back[0].sha256, loadprobe::sha256::sha256_hex(b"MZ plugin"));
+    }
+
+    /// A rebuild that no longer places a file must not leave it staged: deploy reads the record,
+    /// and a stale entry would install something the load order no longer contains.
+    #[test]
+    fn restaging_clears_what_the_previous_build_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (qm_out, build) = (tmp.path().join("qm"), tmp.path().join("build"));
+        std::fs::create_dir_all(&build).unwrap();
+
+        qm_output(&qm_out, None, &[("scripts/gone.asi", "old")]);
+        let (_, files) = placement::read_output(&qm_out, "S").unwrap();
+        stage_placements(&build, files).unwrap();
+        assert!(build.join("files/scripts/gone.asi").is_file());
+
+        stage_placements(&build, Vec::new()).unwrap();
+        assert!(!build.join("files/scripts/gone.asi").exists());
+        assert!(placement::read_staged(&build).unwrap().is_empty());
+    }
 }

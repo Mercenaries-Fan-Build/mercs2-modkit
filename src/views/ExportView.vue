@@ -4,7 +4,7 @@ import { storeToRefs } from "pinia";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import ProgressBar from "../components/ProgressBar.vue";
-import type { ClaimConflict, GroupOutcome } from "../types";
+import type { ClaimConflict, GroupOutcome, PlacementOutcome } from "../types";
 
 const store = useProjectStore();
 const {
@@ -42,6 +42,9 @@ const stage = ref("");
 // Partial overlaps between mods: unresolvable automatically, so we show them and stop.
 const conflicts = ref<ClaimConflict[]>([]);
 const deployed = ref<string | null>(null);
+// The loose-file half of the last install/uninstall — what landed in the game folder, and what
+// came back out. Shown because a file dropped into the game install is not visible anywhere else.
+const placement = ref<PlacementOutcome | null>(null);
 
 onMounted(() => void store.loadWadBackups().catch(() => {}));
 
@@ -50,6 +53,7 @@ async function buildAndValidate() {
   store.error = null;
   conflicts.value = [];
   deployed.value = null;
+  placement.value = null;
 
   stage.value = "Resolving load order…";
   try {
@@ -74,6 +78,13 @@ async function buildAndValidate() {
     return;
   }
 
+  // A Shipment carrying only native_hook / place_file contributions builds no WAD at all, and
+  // there is nothing for the simulator to load. Its files are still a complete, installable build.
+  if (!result.path) {
+    stage.value = "";
+    return;
+  }
+
   stage.value = "Validating with wad_simulator…";
   try {
     let sim = simulatorPath.value;
@@ -89,16 +100,19 @@ async function buildAndValidate() {
   }
 }
 
-/** Install the built WAD. The previous one is snapshotted first — this is undoable. */
+/** Install the build. The previous WAD is snapshotted first — this is undoable. */
 async function deploy() {
   if (!buildResult.value) return;
-  const res = await store.deployPatchWad(buildResult.value.path).catch(() => null);
-  if (res) deployed.value = res.installed_at;
+  const res = await store.deployPatchWad(buildResult.value).catch(() => null);
+  if (!res) return;
+  deployed.value = res.installed_at;
+  placement.value = res.files;
 }
 
 async function restore(file: string | null) {
-  await store.restorePatchWad(file).catch(() => {});
+  const res = await store.restorePatchWad(file).catch(() => null);
   deployed.value = null;
+  placement.value = res?.files ?? null;
 }
 
 function fmtBytes(n: number): string {
@@ -330,7 +344,10 @@ function outcomeText(o: GroupOutcome): string {
       <!-- What the load order actually did. -->
       <section v-if="buildResult" class="mt-6">
         <h3 class="plate-label mb-2">Result</h3>
-        <div class="engraved rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm">
+        <div
+          v-if="buildResult.path"
+          class="engraved rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm"
+        >
           <p class="font-mono text-xs break-all text-zinc-200">{{ buildResult.path }}</p>
           <p class="mt-1 text-xs text-zinc-500">
             {{ buildResult.block_count }} block{{ buildResult.block_count === 1 ? "" : "s" }}
@@ -340,6 +357,42 @@ function outcomeText(o: GroupOutcome): string {
             sha256 {{ buildResult.sha256.slice(0, 32) }}…
           </p>
         </div>
+        <div
+          v-else
+          class="engraved rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm text-zinc-400"
+        >
+          No patch WAD — nothing in this load order carries WAD assets. The files below are the
+          whole build.
+        </div>
+
+        <!-- The game-folder half. Nothing else in the app shows what a Shipment drops into the
+             game install, and an .asi is unrestricted native code in the game process. -->
+        <template v-if="buildResult.placed_files?.length">
+          <h4 class="plate-label mt-4 mb-2">Files for the game folder</h4>
+          <ul class="space-y-1">
+            <li
+              v-for="f in buildResult.placed_files"
+              :key="f.relative"
+              class="engraved flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs"
+            >
+              <span
+                class="stamp"
+                :class="f.relative.toLowerCase().endsWith('.asi') ? 'text-amber-300' : 'text-zinc-400'"
+              >
+                {{ f.relative.toLowerCase().endsWith(".asi") ? "plugin" : "file" }}
+              </span>
+              <span class="min-w-0 flex-1 truncate font-mono text-zinc-300">{{ f.relative }}</span>
+              <span class="truncate text-zinc-600">{{ f.shipment }}</span>
+            </li>
+          </ul>
+          <p
+            v-if="buildResult.placed_files.some((f) => f.relative.toLowerCase().endsWith('.asi'))"
+            class="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300"
+          >
+            A plugin (<code>.asi</code>) is native code that runs inside the game with no
+            restrictions. Install it only from a Shipment you trust.
+          </p>
+        </template>
 
         <p
           v-for="(w, i) in buildResult.warnings ?? []"
@@ -415,13 +468,48 @@ function outcomeText(o: GroupOutcome): string {
           Installed to <span class="font-mono">{{ deployed }}</span
           >. Launch the game, then check Diagnostics if anything looks wrong.
         </p>
+
+        <!-- What went into the game folder, and what came back out to make room. -->
+        <div v-if="placement" class="mt-3 space-y-2 text-xs">
+          <p
+            v-if="placement.placed.length"
+            class="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-emerald-300"
+          >
+            Placed
+            {{ placement.placed.length }} file{{ placement.placed.length === 1 ? "" : "s" }}:
+            <span class="font-mono">{{ placement.placed.map((f) => f.relative).join(", ") }}</span>
+          </p>
+          <p
+            v-if="placement.removed.length"
+            class="rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-zinc-400"
+          >
+            Removed from a previous install (recoverable from the trash):
+            <span class="font-mono">{{ placement.removed.join(", ") }}</span>
+          </p>
+          <p
+            v-if="placement.backed_up.length"
+            class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-300"
+          >
+            Files that were already there were renamed to <code>.bak</code>:
+            <span class="font-mono">{{ placement.backed_up.join(", ") }}</span>
+          </p>
+          <p
+            v-if="placement.skipped.length"
+            class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-300"
+          >
+            Left alone because they no longer match what modkit installed — remove them by hand if
+            you meant to:
+            <span class="font-mono">{{ placement.skipped.join(", ") }}</span>
+          </p>
+        </div>
       </section>
 
       <!-- Undo. Every hazard a bad WAD can cause is recoverable from here. -->
       <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
         <h3 class="plate-label">Undo</h3>
         <p class="mt-1 text-xs text-zinc-500">
-          Restore a previous patch, or remove it entirely to go back to the unmodded game.
+          Restore a previous patch, or remove it entirely to go back to the unmodded game. Removing
+          the patch also takes out any plugins and companion files a Shipment installed.
         </p>
         <button
           class="btn-outline mt-3 w-full justify-center"

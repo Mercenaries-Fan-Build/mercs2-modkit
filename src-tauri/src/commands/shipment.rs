@@ -22,7 +22,20 @@
 //! added once, last. Dropping the per-Shipment scripts is what keeps `claim::resolve` from seeing a
 //! scripts-only group partially overriding a larger overlay group (an atomic partial-overlap
 //! conflict). Non-script overlaps across Shipments still resolve last-in-load-order-wins.
+//!
+//! # A Shipment is not only WAD blocks
+//!
+//! The blocks are one of qm's outputs, not all of them. A `native_hook` contribution lowers to an
+//! `.asi` plugin and a `place_file` to a companion, and **neither produces WAD content at all** —
+//! they are loose files in the game folder, described by the `placement.json` qm writes beside the
+//! overlay. Reading only the blocks meant such a Shipment built clean, reported success, and
+//! deployed nothing.
+//!
+//! So [`shipment_groups`] returns a [`ShipmentBuild`]: the claim groups **and** the staged files,
+//! which [`super::wad_builder`] copies into the build output and [`super::deploy_wad`] installs and
+//! records for undo. See [`super::placement`] for the record's two shapes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -31,6 +44,7 @@ use mercs2_formats::patch_wad::read_patch_wad;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
+use super::placement::{self, StagedFile};
 use super::proc::NoWindow;
 use super::toolchain::{ensure_tool, installed_tool_path};
 use crate::models::claim::ClaimGroup;
@@ -258,16 +272,6 @@ pub fn inspect_shipment(path: String) -> Result<ShipmentRef, String> {
     })
 }
 
-/// The first `*.wad` in `dir`, if any. `qm build`/`qm link` each emit exactly one overlay WAD into
-/// their `--out` dir, so this is how we recover its path without parsing stdout.
-fn first_wad(dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("wad")))
-}
-
 /// Locate the Workshop reference bundle whose `lua/` subtree is the corpus `qm` needs for
 /// script-touching Shipments. Resolution mirrors qm's own: an explicit hint, then
 /// `MERCS2_WORKSHOP_DATA`, then the `workshop_data/` companion that the toolset installs in qm's own
@@ -374,8 +378,50 @@ pub fn synthesize_wardrobe_shipment(
     }))
 }
 
+/// Everything a `qm` run over the staged Shipments produced.
+///
+/// Two halves because qm emits two kinds of artifact and both have to reach the game: the WAD
+/// blocks, resolved by [`crate::models::claim`] and folded into `vz-patch.wad`, and the loose files
+/// (`native_hook` plugins, `place_file` companions) that live in the game folder and are described
+/// by `placement.json`. Returning only the first is what made a code-layer Shipment a silent no-op.
+#[derive(Debug, Default)]
+pub struct ShipmentBuild {
+    pub groups: Vec<ClaimGroup>,
+    /// Loose files to install into the game folder, **in load order** — a later Shipment's file at
+    /// the same destination wins, matching how the blocks resolve.
+    pub files: Vec<StagedFile>,
+    /// Non-fatal advisories: currently, one per destination two Shipments both claimed.
+    pub warnings: Vec<String>,
+}
+
+/// Reduce the per-Shipment file lists to one file per destination, later-wins, warning about each
+/// collision.
+///
+/// Two Shipments placing different files at one path is a real `FileArtifact` conflict, and the
+/// alternative to naming it is one silently overwriting the other during the copy — the same class
+/// of failure as not copying at all, just later in the pipeline. Resolution matches the blocks
+/// (last in the load order wins) so a user's mental model holds across both halves of a Shipment.
+fn resolve_file_collisions(files: Vec<StagedFile>) -> (Vec<StagedFile>, Vec<String>) {
+    let mut winner: HashMap<String, usize> = HashMap::new();
+    let mut warnings = Vec::new();
+    let mut kept: Vec<Option<StagedFile>> = Vec::with_capacity(files.len());
+
+    for file in files {
+        if let Some(prev) = winner.insert(file.relative.clone(), kept.len()) {
+            let displaced = kept[prev].take().expect("a destination wins at most once");
+            warnings.push(format!(
+                "“{}” and “{}” both place {} — the later one ({}) wins, as it does for assets.",
+                displaced.shipment, file.shipment, file.relative, file.shipment
+            ));
+        }
+        kept.push(Some(file));
+    }
+    (kept.into_iter().flatten().collect(), warnings)
+}
+
 /// Build each staged Shipment with `qm`, link their Lua across the whole set, and return the claim
-/// groups to fold into `vz-patch.wad`. See the module docs for the collapse rules.
+/// groups to fold into `vz-patch.wad` plus the loose files to install alongside it. See the module
+/// docs for the collapse rules.
 ///
 /// `corpus_hint` is an optional explicit reference-bundle path; when `None`, the corpus is resolved
 /// from the environment / the installed toolset.
@@ -384,9 +430,9 @@ pub async fn shipment_groups(
     shipments: &[ShipmentRef],
     game_path: &str,
     corpus_hint: Option<&Path>,
-) -> Result<Vec<ClaimGroup>, String> {
+) -> Result<ShipmentBuild, String> {
     if shipments.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ShipmentBuild::default());
     }
     if game_path.trim().is_empty() {
         return Err("Set the game folder before building Shipments.".into());
@@ -406,8 +452,10 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
-    // 1) Build each Shipment's overlay and keep all of its blocks (the collapse drops scripts_vz).
+    // 1) Build each Shipment's overlay and keep all of its blocks (the collapse drops scripts_vz),
+    //    plus every loose file its placement record names.
     let mut overlays: Vec<(String, String, Vec<mercs2_formats::patch_wad::PatchBlock>)> = Vec::new();
+    let mut files: Vec<StagedFile> = Vec::new();
     for (i, ship) in shipments.iter().enumerate() {
         let out = work_dir(&format!("build-{i}"))?;
         let mut args: Vec<std::ffi::OsString> = vec![
@@ -422,13 +470,25 @@ pub async fn shipment_groups(
         let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
         run_qm(&qm, &arg_refs, &format!("qm build for \"{}\"", ship.name))?;
 
-        let wad = first_wad(&out)
-            .ok_or_else(|| format!("qm build for \"{}\" produced no WAD", ship.name))?;
-        let bytes =
-            std::fs::read(&wad).map_err(|e| format!("reading {}'s overlay: {e}", ship.name))?;
-        let contents = read_patch_wad(&bytes)
-            .map_err(|e| format!("{}'s overlay is not a patch WAD: {e}", ship.name))?;
-        overlays.push((ship.id.clone(), ship.name.clone(), contents.blocks));
+        let (wad, placed) = placement::read_output(&out, &ship.name)?;
+        let placed_here = placed.len();
+        files.extend(placed);
+
+        // No WAD is now a legitimate outcome, not an error: a Shipment whose only contributions are
+        // `native_hook` / `place_file` emits loose files and no overlay at all. Refusing it here
+        // would be the "narrow the feature to dodge the gap" answer to the same defect.
+        if let Some(wad) = wad {
+            let bytes =
+                std::fs::read(&wad).map_err(|e| format!("reading {}'s overlay: {e}", ship.name))?;
+            let contents = read_patch_wad(&bytes)
+                .map_err(|e| format!("{}'s overlay is not a patch WAD: {e}", ship.name))?;
+            overlays.push((ship.id.clone(), ship.name.clone(), contents.blocks));
+        } else if placed_here == 0 {
+            return Err(format!(
+                "qm build for \"{}\" produced neither a WAD nor any placed files",
+                ship.name
+            ));
+        }
     }
 
     // 2) Link the whole set's Lua into one reconciled scripts_vz, mounted last. Emits no WAD when no
@@ -448,7 +508,15 @@ pub async fn shipment_groups(
     let link_refs: Vec<&std::ffi::OsStr> = link_args.iter().map(|a| a.as_os_str()).collect();
     run_qm(&qm, &link_refs, "qm link")?;
 
-    let link_scripts = match first_wad(&link_out) {
+    // `link_installed` emits `zz-quartermaster-link.wad`, and in releases before the record was
+    // added on that path it emits NO `placement.json` — so this consumer must work either way.
+    // `read_output` handles both: with a record the WAD is named, without one the name-sorted scan
+    // picks it, and the file list is simply empty. Any `game_folder` entry a future qm does record
+    // here flows through the same path as a build's, rather than needing a second one.
+    let (link_wad, link_files) = placement::read_output(&link_out, "Quartermaster link")?;
+    files.extend(link_files);
+
+    let link_scripts = match link_wad {
         Some(wad) => {
             let bytes = std::fs::read(&wad).map_err(|e| format!("reading the link WAD: {e}"))?;
             read_patch_wad(&bytes)
@@ -458,7 +526,12 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
-    Ok(collapse(overlays, link_scripts, shipments.len()))
+    let (files, warnings) = resolve_file_collisions(files);
+    Ok(ShipmentBuild {
+        groups: collapse(overlays, link_scripts, shipments.len()),
+        files,
+        warnings,
+    })
 }
 
 /// Fold per-Shipment overlays + the linker's reconciled scripts into final claim groups.
@@ -713,6 +786,54 @@ mod tests {
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
         build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)
             .expect("the collapsed WAD assembles");
+    }
+
+    fn staged(shipment: &str, relative: &str) -> StagedFile {
+        StagedFile {
+            source: format!("/build/{shipment}/{relative}"),
+            relative: relative.into(),
+            sha256: String::new(),
+            shipment: shipment.into(),
+        }
+    }
+
+    /// Two Shipments claiming one destination resolve the way their assets do — last in the load
+    /// order wins — and the user is told. The alternative is one file silently overwriting the
+    /// other during the copy, which is the same defect as not copying at all, only later.
+    #[test]
+    fn two_shipments_claiming_one_destination_resolve_last_wins() {
+        let (files, warnings) = resolve_file_collisions(vec![
+            staged("A", "scripts/shared.ini"),
+            staged("A", "scripts/a-only.asi"),
+            staged("B", "scripts/shared.ini"),
+        ]);
+
+        let kept: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| (f.shipment.as_str(), f.relative.as_str()))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![("A", "scripts/a-only.asi"), ("B", "scripts/shared.ini")],
+            "the later Shipment's file survives, the unrelated one is untouched"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("scripts/shared.ini"), "{}", warnings[0]);
+        assert!(warnings[0].contains('B'), "names the winner: {}", warnings[0]);
+    }
+
+    /// No collision, no warning — and the load order is preserved exactly.
+    #[test]
+    fn distinct_destinations_pass_through_untouched() {
+        let (files, warnings) = resolve_file_collisions(vec![
+            staged("A", "scripts/a.asi"),
+            staged("B", "plugins/b.ini"),
+            staged("B", "scripts/OnBoot/b.lua"),
+        ]);
+        assert_eq!(files.len(), 3);
+        assert!(warnings.is_empty());
+        assert_eq!(files[0].relative, "scripts/a.asi");
+        assert_eq!(files[2].relative, "scripts/OnBoot/b.lua");
     }
 
     /// A set with no script Shipments adds no linker group and keeps every overlay block.

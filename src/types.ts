@@ -141,8 +141,27 @@ export interface ClaimConflict {
   message: string;
 }
 
+/**
+ * A loose file a Shipment places into the **game folder** — an `.asi` plugin from a `native_hook`
+ * contribution, or a companion from a `place_file` one. Not WAD content: it is staged beside
+ * `vz-patch.wad` and copied into the game install by the deploy step.
+ */
+export interface StagedFile {
+  /** Absolute path to the staged file in the build directory. */
+  source: string;
+  /** Destination under the game folder, forward-slashed. */
+  relative: string;
+  sha256: string;
+  /** Which Shipment placed it. */
+  shipment: string;
+}
+
 export interface BuildResult {
+  /** The built WAD, or `""` when the load order produced no blocks at all (a Shipment carrying
+   *  only `native_hook` / `place_file` contributions is a real build with no WAD in it). */
   path: string;
+  /** The build output directory. Deploy reads its `placement.json`. */
+  staging_dir: string;
   block_count: number;
   byte_size: number;
   /** sha256 of the bytes written — the only trustworthy way to verify a deploy. */
@@ -150,6 +169,8 @@ export interface BuildResult {
   outcomes: GroupOutcome[];
   /** Non-fatal advisories from assembly (e.g. a Shipment's scripts override the wardrobe's). */
   warnings?: string[];
+  /** Files that will be dropped into the game folder on install. An `.asi` is native code. */
+  placed_files?: StagedFile[];
 }
 
 /**
@@ -473,11 +494,32 @@ export interface WadBackup {
   sha256: string;
 }
 
+/** One loose file a deploy put into the game folder. */
+export interface PlacedFile {
+  abs_path: string;
+  relative: string;
+  sha256: string;
+  shipment: string;
+}
+
+/** What the loose-file half of a deploy (or an uninstall) did. */
+export interface PlacementOutcome {
+  placed: PlacedFile[];
+  /** Moved to the recoverable trash. */
+  removed: string[];
+  /** Left alone: the bytes no longer match what modkit wrote, so somebody replaced them by hand. */
+  skipped: string[];
+  /** Pre-existing unmanaged files displaced to `<name>.bak`. */
+  backed_up: string[];
+}
+
 export interface DeployWadResult {
+  /** Empty when the build carried no WAD — the installed patch is then left untouched. */
   installed_at: string;
   sha256: string;
   byte_size: number;
   backed_up: WadBackup | null;
+  files: PlacementOutcome;
 }
 
 /**
