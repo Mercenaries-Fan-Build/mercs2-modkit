@@ -578,6 +578,118 @@ export interface Catalog {
   source: string; // "remote" | "bundled"
 }
 
+// ---------------------------------------------------------------------------------------
+// mercs.ink — the community registry (mirrors Rust's `commands::mercsink`).
+//
+// A separate namespace from {@link CatalogMod} on purpose, and never merged with it. A
+// registry mod is identified by {@link RegistryMod.id}; a catalog mod by `"repo-url#slug"`.
+// Those are not comparable, so the two lists are shown side by side and labelled rather than
+// interleaved — putting one id next to the other invites a comparison that means nothing.
+//
+// Every interface here is a *head*: only the fields modkit uses. The API is additive-only and
+// clients are required to ignore unknown keys, which is what lets the server grow a field
+// without breaking installed copies.
+// ---------------------------------------------------------------------------------------
+
+/** One downloadable file on a release. Hosted by GitHub — mercs.ink never re-hosts artifacts. */
+export interface ReleaseAsset {
+  name: string;
+  download_url: string;
+  /**
+   * Bytes, as GitHub reported them. **Not an integrity check** — the API carries no checksum
+   * for an asset, because it caches release metadata rather than the artifact and so has
+   * nothing to attest to.
+   */
+  size: number | null;
+  content_type: string | null;
+}
+
+/** The head of a parsed Quartermaster manifest, as the registry serves it. */
+export interface ManifestHead {
+  format: number | null;
+  shipment: {
+    /** `shipment.name` — the declared slug, and half an identity: forks share it. */
+    name: string | null;
+    title: string | null;
+    /** `shipment.version` — the namespace a `registry` origin's version lives in. */
+    version: string | null;
+    target: string | null;
+  };
+}
+
+/** One synced release of a registered mod. */
+export interface RegistryRelease {
+  version: string;
+  tag: string | null;
+  published_at: string | null;
+  /**
+   * qm's `Target` — `retail` | `reimpl` | `both`. A **shipment compatibility** declaration,
+   * and not the crash report's `game.target`, which says what was actually running. A Shipment
+   * declaring `both` can appear in a convoy whose `game.target` is `retail`.
+   */
+  target: string | null;
+  /** The manifest format. A release declaring more than modkit supports is refused. */
+  format: number | null;
+  assets: ReleaseAsset[];
+  /** Served already parsed, so modkit never re-reads the YAML out of the artifact. */
+  manifest: ManifestHead | null;
+}
+
+/** One mod on mercs.ink. */
+export interface RegistryMod {
+  /**
+   * mercs.ink's stable public identifier, precomposed server-side and **opaque**. File records
+   * under it; never take it apart and never rebuild it from a slug and a repo id, because two
+   * implementations of one identity format drift, and the day they disagree a mod's history
+   * splits into two buckets where the drop reads as a fix.
+   *
+   * `null` against a deployment older than the field — an absence, not something to fill in.
+   */
+  id: string | null;
+  /** `shipment.name`. Not an identity on its own: every fork of a mod declares the same one. */
+  slug: string;
+  title: string | null;
+  description: string | null;
+  /** qm's `Target`, as on {@link RegistryRelease.target} — compatibility, not the game. */
+  target: string | null;
+  tags: string[];
+  authors: string[];
+  homepage: string | null;
+  license: string | null;
+  /** Display only. Owner-derived, so a rename or transfer changes it — never a key. */
+  repository: string | null;
+  latest_version: string | null;
+  latest_release: RegistryRelease | null;
+}
+
+/**
+ * A registry read, with the staleness the UI has to disclose.
+ *
+ * Both halves travel together because the recommended flow requires both at once: when
+ * mercs.ink cannot be reached, show the cached catalogue *and* say it is cached. Returning only
+ * the data would make "the registry is down" indistinguishable from "nothing changed".
+ */
+export interface RegistryFeed {
+  mods: RegistryMod[];
+  /** True when `mods` came from the local cache because the server could not answer. */
+  stale: boolean;
+  /** A user-facing explanation for a banner. `null` when the fetch succeeded. */
+  warning: string | null;
+}
+
+/** The outcome of installing a Shipment from mercs.ink. */
+export interface MercsInkInstall {
+  /** The load-order entry, carrying a `registry` origin with the registry's own id. */
+  shipment: ShipmentRef;
+  slug: string;
+  title: string | null;
+  release_version: string;
+  /** qm's `Target` for this release — shipment compatibility, not `game.target`. */
+  target: string | null;
+  assets: string[];
+  staged_files: number;
+}
+
 export interface InstallResult {
   mod_root: string;
   kind: string; // "wad" | "asi"
