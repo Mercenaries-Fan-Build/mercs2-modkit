@@ -34,6 +34,20 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Reading the `shipment:` head of a Quartermaster manifest at ingest, so a staged Shipment is
+# identified by its own declared name and version rather than by the folder the user happened to
+# put it in. qm accepts YAML, JSON and TOML, so all three are parsed — and these are the exact
+# crates `mercs2_quartermaster` itself parses with, so a manifest qm accepts is one modkit reads
+# the same way. Only the two-field head is deserialized: qm owns the rest of the schema, and
+# mirroring it here would make every qm release a modkit breakage.
+#
+# Deliberately NOT a dependency on `mercs2_quartermaster` itself. Linking the whole builder to
+# read two strings would drag in clap, png and wad_simulator, and would pin a library version
+# against the `qm` *binary* the toolchain downloads at runtime — two copies of qm that could
+# disagree.
+serde_norway = "0.9"
+toml = "1"
+
 # Mercenaries 2 format libraries — resolved from crates.io.
 #
 # NEVER add a `path` here. modkit is an application, not a published crate, so cargo always
@@ -63,8 +77,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Unpacking downloaded mod release artifacts
 zip = "2"
 
+# Async sleep, for one thing only: honouring mercs.ink's `Retry-After` on a 429 (API spec §3).
+# `std::thread::sleep` inside an async command would park a runtime worker rather than yield it.
+# Tauri already builds on tokio, so this names a dependency that was always linked; the `rt`
+# feature is what lets the tests drive `fetch` on a current-thread runtime without the network.
+tokio = { version = "1", default-features = false, features = ["time", "rt"] }
+
 # Game-file integrity verification: MD5 hashing, parallelized across files
 md-5 = "0.10"
+sha2 = "0.10"
 rayon = "1"
 
 # Texture swapping: decode the user's PNG/JPG and resize it to the donor's exact

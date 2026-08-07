@@ -10,7 +10,9 @@ use commands::asset_catalog::detect_asset_type;
 use commands::conflict_resolver::build_conflict_graph;
 use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
-use commands::deploy_wad::{deploy_patch_wad, list_patch_wad_backups, restore_patch_wad};
+use commands::deploy_wad::{
+    deploy_patch_wad, deployed_wad_record, list_patch_wad_backups, restore_patch_wad,
+};
 use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
 use commands::human_skins::human_skins;
@@ -19,6 +21,10 @@ use commands::language::{scan_languages, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::license::detect_license;
 use commands::logprobe::{analyze_log, locate_log};
+use commands::mercsink::{
+    fetch_mercsink_mod, fetch_mercsink_registry, fetch_mercsink_release, fetch_mercsink_releases,
+    install_mercsink_shipment,
+};
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::model_view::{model_geometry, model_variants, texture_parts};
 use commands::region::{normalize_region, read_region};
@@ -120,6 +126,7 @@ pub fn run() {
             deploy_patch_wad,
             list_patch_wad_backups,
             restore_patch_wad,
+            deployed_wad_record,
             list_wardrobe_models,
             preview_wardrobe_lua,
             human_skins,
@@ -180,6 +187,11 @@ pub fn run() {
             set_saves_dir,
             inspect_shipment,
             take_pending_shipment,
+            fetch_mercsink_registry,
+            fetch_mercsink_mod,
+            fetch_mercsink_releases,
+            fetch_mercsink_release,
+            install_mercsink_shipment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -43,6 +43,7 @@ pub mod language;
 pub mod launch;
 pub mod license;
 pub mod logprobe;
+pub mod mercsink;
 pub mod mod_loader;
 pub mod model_view;
 pub mod paths;

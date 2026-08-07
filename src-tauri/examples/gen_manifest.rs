@@ -26,47 +26,86 @@ fn classify(size: u64) -> (&'static str, &'static str) {
     }
 }
 
-/// Per-build metadata keyed by storage filename: a distinguishing label, the
-/// sidecar DLL the exe imports (must be present to start), and a caveat.
+/// Per-build metadata keyed by storage filename: the catalogue id, a distinguishing
+/// label, the sidecar DLL the exe imports (must be present to start), and a caveat.
+///
+/// The **id** is the part that must not drift. It is the stable key every per-build
+/// record is filed under, so a regenerated manifest has to reproduce the same id for
+/// the same build — which is why it lives in this table beside the label rather than
+/// being derived from the filename, the size, or the (version, variant) pair. All
+/// three of those change; the id may not. Ids come from `verify::EXE_IDS`.
 struct ExeMeta {
+    id: Option<String>,
     label: Option<String>,
     requires: Option<String>,
     note: Option<String>,
+    /// Overrides `classify(size)` for a build whose size misidentifies it.
+    ///
+    /// `classify` maps a byte size to a `(version, variant)` pair, which works only while
+    /// each build has its own size. It does not hold: the DRM-free v1.1 build is a rebuild
+    /// of the *patched* exe that lands at exactly the *cracked* size, so `classify` calls it
+    /// `cracked` with confidence. The catalogue is hash-keyed precisely so size does not have
+    /// to be trusted; this is where that stops being an argument and starts being a value.
+    classified: Option<(&'static str, &'static str)>,
 }
 
 fn meta_for(name: &str) -> ExeMeta {
-    let (label, requires, note): (&str, Option<&str>, Option<&str>) = match name {
+    // The DRM-free build is the only entry needing a `classified` override today. Adding one
+    // is the correct response to a size collision — never renaming the id to match `classify`.
+    let classified = match name {
+        "Mercenaries2(v1.1 DRM-free).exe" => Some(("v1.1", "patched")),
+        _ => None,
+    };
+    let (id, label, requires, note): (&str, &str, Option<&str>, Option<&str>) = match name {
         "Mercenaries2 (v1.0 unsigned).exe" => (
+            "v10-unsigned",
             "retail unsigned",
             None,
             Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
         ),
         "Mercenaries2 (v1.0 signed).exe" => (
+            "v10-ea-signed",
             "retail EA-signed",
             None,
             Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
         ),
         "Mercenaries2(v1.1).exe" => (
+            "v11-patched-securom",
             "v1.1 patched (uncracked)",
             None,
             Some("Stock patched exe — still SecuROM; crack it in Setup before modding."),
         ),
         "Mercenaries2 (v1.1 cracked).exe" => (
+            "v11-cracked-pmcbb",
             "pmc_bb crack (modkit)",
             Some("pmc_bb.dll"),
             Some("Loads ASI mods via the pmc_bb.dll loader — modkit's supported crack."),
         ),
         "Mercenaries2(v1.1 cruise.dll).exe" => (
+            "v11-cracked-cruise",
             "cruise.dll crack (archive.org)",
             Some("cruise.dll"),
             Some("SecuROM bypass only — does NOT load ASI mods; use modkit's pmc_bb crack for modding."),
         ),
-        _ => ("", None, None),
+        "Mercenaries2(v1.1 DRM-free).exe" => (
+            "v11-patched-drmfree",
+            "v1.1 patched, DRM removed",
+            None,
+            // Deliberately silent on ASI capability. Whether plugins load is decided by a
+            // separate loader — dxwrapper's, pmc_bb's, or another proxy DLL — and by that
+            // loader's own config, none of which is a property of this executable.
+            Some("DRM-free rebuild of the v1.1 patched exe; imports no sidecar DLL."),
+        ),
+        // An exe this table doesn't know gets no id. It is not the catalogue's build, and
+        // inventing a key for it would put an unrecognised binary in a real build's bucket.
+        _ => ("", "", None, None),
     };
     ExeMeta {
+        id: (!id.is_empty()).then(|| id.to_string()),
         label: (!label.is_empty()).then(|| label.to_string()),
         requires: requires.map(str::to_string),
         note: note.map(str::to_string),
+        classified,
     }
 }
 
@@ -93,10 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
         let size = std::fs::metadata(&path)?.len();
-        let (version, variant) = classify(size);
         let meta = meta_for(&name);
+        let (version, variant) = meta.classified.unwrap_or_else(|| classify(size));
         specs.push(ExeSpec {
             path,
+            id: meta.id,
             version: version.into(),
             variant: variant.into(),
             label: meta.label,

@@ -34,6 +34,7 @@ use tauri::Window;
 use super::proc::NoWindow;
 use super::toolchain::{ensure_tool, installed_tool_path};
 use crate::models::claim::ClaimGroup;
+use crate::models::origin::{Origin, MODKIT_WARDROBE_ID};
 
 /// A deep-link Shipment path that arrived before the frontend was listening (a cold start launched
 /// by the link). The webview drains it once via [`take_pending_shipment`]; live handoffs into an
@@ -97,12 +98,30 @@ fn percent_decode(s: &str) -> String {
 /// A Workshop Shipment staged in the load order (a qm source directory, later wins).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShipmentRef {
-    /// Stable id used in the load order and for dedupe.
+    /// Stable id used in the load order and for dedupe. Folder-derived, and therefore **local
+    /// only**: two checkouts of the same Shipment are two rows here, which is what the load
+    /// order needs and exactly why it is not an identity anyone else may be shown.
     pub id: String,
-    /// Display name (the Shipment folder's name, which the Workshop names after the Shipment).
+    /// Display name: the Shipment's own `shipment.name` once the manifest has been read, and
+    /// the folder name only when it could not be.
     pub name: String,
     /// Absolute path to the Shipment source directory.
     pub path: String,
+    /// `shipment.name` from the manifest — the Shipment's declared slug.
+    ///
+    /// This is **half** an identity, not all of it: every fork of a mod legitimately declares
+    /// the same name, and the other half is the repository it came from, which a folder staged
+    /// from disk has no way to know. `None` when the manifest could not be read.
+    #[serde(default)]
+    pub slug: Option<String>,
+    /// `shipment.version` from the manifest. `None` is a meaningful value — an unreleased mod
+    /// being actively worked on is the expected case, not missing data.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Where this Shipment came from. A folder staged from disk is [`OriginSource::Local`] with
+    /// no id; guessing a repository from a slug would merge every fork into one row.
+    #[serde(default = "Origin::local_unknown")]
+    pub origin: Origin,
 }
 
 /// The manifest filenames `qm` accepts, in the order it looks.
@@ -113,9 +132,74 @@ const MANIFEST_NAMES: [&str; 4] = [
     "manifest.toml",
 ];
 
-/// True when `dir` looks like a qm Shipment (carries one of the manifest names).
-fn has_manifest(dir: &Path) -> bool {
-    MANIFEST_NAMES.iter().any(|n| dir.join(n).is_file())
+/// The manifest file `qm` would read in `dir`, if any — the first name that exists, in qm's own
+/// lookup order.
+fn manifest_path(dir: &Path) -> Option<PathBuf> {
+    MANIFEST_NAMES
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.is_file())
+}
+
+/// Does `dir` look like a Quartermaster Shipment source tree — i.e. does `qm` have a manifest
+/// to read there?
+///
+/// A **presence** test, not a parse. [`super::mercsink`] uses it to tell a staged Shipment from
+/// a release of loose `.wad` files, which would otherwise become a load-order entry that builds
+/// nothing; the manifest's *contents* arrive from mercs.ink already parsed, so there is nothing
+/// for this to read.
+pub fn has_manifest(dir: &Path) -> bool {
+    manifest_path(dir).is_some()
+}
+
+/// Just the head of a qm manifest: the `shipment` table's identity fields.
+///
+/// Deliberately not the whole schema. qm owns that, it grows every release, and a struct
+/// mirroring it here would turn each of those releases into a modkit parse failure on manifests
+/// qm itself accepts. Everything outside `shipment` is ignored, and both fields are optional so
+/// a manifest missing them still reads as "no slug" rather than as an error.
+#[derive(Debug, Default, Deserialize)]
+struct ManifestHead {
+    #[serde(default)]
+    shipment: ShipmentHead,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ShipmentHead {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// Read `shipment.{name,version}` out of a qm manifest, dispatching on the extension the way qm
+/// does.
+///
+/// `None` on anything that does not parse. Refusing the Shipment instead would be wrong twice
+/// over: modkit is not the authority on the manifest schema — `qm build` is, and it runs later
+/// with the real parser — and a Shipment that builds fine would become un-stageable because a
+/// field modkit does not use was written in a form modkit does not know.
+fn read_manifest_head(path: &Path) -> Option<ShipmentHead> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let head: ManifestHead = match ext.as_str() {
+        "json" => serde_json::from_str(&text).ok()?,
+        "toml" => toml::from_str(&text).ok()?,
+        // qm's default, and its two spellings.
+        _ => serde_norway::from_str(&text).ok()?,
+    };
+    Some(head.shipment)
+}
+
+/// Blank a value that is present but empty. A manifest with `name: ""` declares no more identity
+/// than one with no `name` at all, and letting `""` through would put an empty slug in the load
+/// order and, later, on the wire.
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 /// A block is the Lua scripts block if its PTHS path names `scripts_vz` — same test the prebuilt
@@ -128,26 +212,49 @@ fn is_scripts_block(path_string: &str) -> bool {
 ///
 /// Contrast [`super::prebuilt::inspect_patch_wad`], which *rejects* anything that isn't already a
 /// built FFCS WAD; here we require the opposite — a source tree with a manifest.
+///
+/// The manifest is **read**, not merely counted. It used to be enough to know a manifest file
+/// existed, which left the Shipment described entirely by the directory the user dropped it in:
+/// `name` was the folder name and `id` was that same string with a prefix. A folder name is a
+/// user's private note to themselves — it can be "test2" or contain their own name — and it is
+/// not the Shipment's identity in any case, so everything downstream that wants to say *which*
+/// mod this is had nothing to work with. Reading `shipment.name` and `shipment.version` gives
+/// the Shipment's own declared identity instead.
 #[tauri::command(async)]
 pub fn inspect_shipment(path: String) -> Result<ShipmentRef, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("{path}: not a folder"));
     }
-    if !has_manifest(&root) {
+    let Some(manifest) = manifest_path(&root) else {
         return Err(format!(
             "{path}: no manifest.yaml/.yml/.json/.toml — this is not a Quartermaster Shipment. \
              (A finished vz-patch.wad goes through Import Patch WAD instead.)"
         ));
-    }
-    let name = root
+    };
+    let folder = root
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "shipment".into());
+
+    let head = read_manifest_head(&manifest).unwrap_or_default();
+    let slug = non_empty(head.name);
+    let version = non_empty(head.version);
+
     Ok(ShipmentRef {
-        id: format!("shipment:{name}"),
-        name,
+        // Stays folder-derived on purpose. This id is the load order's dedupe key and becomes a
+        // `ClaimGroup::mod_id`, so it has to distinguish two checkouts of the same Shipment —
+        // which a slug, shared by every fork, does not. `slug` carries the identity; this
+        // carries the row.
+        id: format!("shipment:{folder}"),
+        name: slug.clone().unwrap_or(folder),
         path,
+        slug,
+        // A Shipment staged from a folder cannot know its repository, so it reports its slug and
+        // no id at all rather than inventing one. Only an install through the registry can fill
+        // in the other half.
+        origin: Origin::local(version.clone()),
+        version,
     })
 }
 
@@ -257,6 +364,13 @@ pub fn synthesize_wardrobe_shipment(
         id: "shipment:modkit-wardrobe".into(),
         name: "Wardrobe".into(),
         path: dir.to_string_lossy().to_string(),
+        // Not a staged Shipment: modkit wrote this manifest a dozen lines up, so its identity is
+        // the fixed one every install shares rather than anything read back off disk. No
+        // version — the `1.0.0` above is a field qm requires, not a number that tracks the
+        // user's outfit picks, and reporting it would invite comparing two unrelated wardrobes.
+        slug: Some("modkit-wardrobe".into()),
+        version: None,
+        origin: Origin::modkit(MODKIT_WARDROBE_ID),
     }))
 }
 
@@ -411,6 +525,107 @@ mod tests {
         let info = inspect_shipment(dir.path().to_string_lossy().into()).unwrap();
         assert!(info.id.starts_with("shipment:"));
         assert_eq!(info.path, dir.path().to_string_lossy());
+    }
+
+    /// Stage a Shipment in a folder named nothing like it, and the identity that comes back is
+    /// the manifest's, not the folder's. This is the whole point: the directory name is the
+    /// user's business.
+    #[test]
+    fn identity_comes_from_the_manifest_not_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("new folder (2) FINAL");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "format: 1\nshipment:\n  name: solano-vehicle-pack\n  version: 2.1.0\n  target: retail\ncontributions: []\n",
+        )
+        .unwrap();
+
+        let info = inspect_shipment(dir.to_string_lossy().into()).unwrap();
+        assert_eq!(info.slug.as_deref(), Some("solano-vehicle-pack"));
+        assert_eq!(info.version.as_deref(), Some("2.1.0"));
+        assert_eq!(info.name, "solano-vehicle-pack");
+        // The folder name survives only in the local dedupe key, which never leaves the machine.
+        assert_eq!(info.id, "shipment:new folder (2) FINAL");
+    }
+
+    /// A slug is half an identity. A Shipment staged from a folder cannot know which repository
+    /// it came from — every fork declares the same name — so it must report no id rather than
+    /// guess one.
+    #[test]
+    fn a_staged_shipment_has_a_slug_but_no_public_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("manifest.json"),
+            r#"{"format":1,"shipment":{"name":"my-mod","version":"0.3.0"}}"#,
+        )
+        .unwrap();
+
+        let info = inspect_shipment(dir.path().to_string_lossy().into()).unwrap();
+        assert_eq!(info.slug.as_deref(), Some("my-mod"));
+        assert_eq!(info.origin.source, crate::models::origin::OriginSource::Local);
+        assert_eq!(info.origin.id, None);
+        assert_eq!(info.origin.version.as_deref(), Some("0.3.0"));
+    }
+
+    /// All four names qm accepts are read, in all three syntaxes.
+    #[test]
+    fn every_manifest_flavour_parses() {
+        let cases: [(&str, &str); 4] = [
+            ("manifest.yaml", "shipment:\n  name: a\n  version: 1.0\n"),
+            ("manifest.yml", "shipment: {name: b, version: '2.0'}\n"),
+            ("manifest.json", r#"{"shipment":{"name":"c","version":"3.0"}}"#),
+            ("manifest.toml", "[shipment]\nname = \"d\"\nversion = \"4.0\"\n"),
+        ];
+        for (file, body) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(file), body).unwrap();
+            let info = inspect_shipment(dir.path().to_string_lossy().into()).unwrap();
+            assert!(info.slug.is_some(), "{file}: no slug parsed");
+            assert!(info.version.is_some(), "{file}: no version parsed");
+        }
+    }
+
+    /// A manifest modkit cannot read must not make a Shipment un-stageable — `qm build` is the
+    /// authority on the schema, and it runs later with the real parser. The slug is simply
+    /// unknown, which is an honest answer.
+    #[test]
+    fn an_unreadable_manifest_degrades_to_no_slug_rather_than_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("mystery-mod");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("manifest.yaml"), "\t: this is not: valid: yaml\n[[[").unwrap();
+
+        let info = inspect_shipment(dir.to_string_lossy().into()).unwrap();
+        assert_eq!(info.slug, None);
+        assert_eq!(info.version, None);
+        // Falls back to the folder name for display only.
+        assert_eq!(info.name, "mystery-mod");
+    }
+
+    /// `name: ""` declares no more identity than no name at all, and an empty slug must never
+    /// reach the load order.
+    #[test]
+    fn a_blank_name_is_not_a_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("blank");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("manifest.yaml"), "shipment:\n  name: \"  \"\n").unwrap();
+
+        let info = inspect_shipment(dir.to_string_lossy().into()).unwrap();
+        assert_eq!(info.slug, None);
+        assert_eq!(info.name, "blank");
+    }
+
+    /// A Shipment row persisted before origins existed must still load — as "staged locally,
+    /// nothing known", which is the truth about it.
+    #[test]
+    fn a_pre_origin_shipment_row_deserializes() {
+        let old = r#"{"id":"shipment:x","name":"x","path":"/tmp/x"}"#;
+        let r: ShipmentRef = serde_json::from_str(old).unwrap();
+        assert_eq!(r.slug, None);
+        assert_eq!(r.origin.source, crate::models::origin::OriginSource::Local);
+        assert_eq!(r.origin.id, None);
     }
 
     #[test]
