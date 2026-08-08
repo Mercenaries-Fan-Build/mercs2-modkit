@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use tauri::Window;
 
-use crate::commands::managed::pmc_bb::{self, ExeKind};
+use crate::commands::managed::pmc_bb;
 use crate::commands::managed::{self, place, Component, Ledger, PlaceOpts};
 use crate::commands::net::{self, archive, AssetRule, ReleaseHost};
 
@@ -147,9 +147,9 @@ pub async fn install_dxwrapper(
 
     // Which pmc_bb build this install will get decides who owns plugin scanning.
     // Resolved rather than assumed — the assumption is what would silently stop
-    // mods loading.
-    let report = crate::commands::verify::identify_main_exe(&window, &root);
-    let kind = ExeKind::from_exe_id(report.as_ref().and_then(|r| r.identified_id.as_deref()));
+    // mods loading. Same resolution `install_pmc_bb` performs, so the config
+    // written here and the DLL installed there cannot disagree.
+    let kind = crate::commands::setup::exe_kind(&window, &root).await;
     let choice = pmc_bb::resolve(kind, None)?;
     let loads_plugins = !choice.features.asi;
 
@@ -265,6 +265,7 @@ pub async fn install_dxwrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::managed::pmc_bb::ExeKind;
 
     fn value_of(ini: &str, key: &str) -> Option<String> {
         ini.lines()

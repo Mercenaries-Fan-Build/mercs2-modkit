@@ -63,13 +63,28 @@ pub async fn resolve_pmc_bb(
     if !root.is_dir() {
         return Err(format!("Game folder not found: {game_root}"));
     }
-    pmc_bb::resolve(exe_kind(&window, &root), variant.as_deref())
+    pmc_bb::resolve(exe_kind(&window, &root).await, variant.as_deref())
 }
 
 /// The exe's catalogue identity, as far as the variant choice cares.
-fn exe_kind(window: &Window, root: &std::path::Path) -> ExeKind {
-    let report = crate::commands::verify::identify_main_exe(window, root);
-    ExeKind::from_exe_id(report.as_ref().and_then(|r| r.identified_id.as_deref()))
+///
+/// Identification hashes a ~20 MB executable and parses the bundled manifest, so
+/// it goes to the blocking pool rather than parking an async runtime worker —
+/// the discipline `commands::mod`'s header lays out, and what `verify_game`
+/// already does for the same work.
+///
+/// A failure to identify is [`ExeKind::Unknown`], which resolves to the build that
+/// changes nothing about how the game starts. That is the right direction to fail
+/// in: the harmful mistake is installing a SecuROM spoof where none is wanted.
+pub(crate) async fn exe_kind(window: &Window, root: &std::path::Path) -> ExeKind {
+    let window = window.clone();
+    let root = root.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = crate::commands::verify::identify_main_exe(&window, &root);
+        ExeKind::from_exe_id(report.as_ref().and_then(|r| r.identified_id.as_deref()))
+    })
+    .await
+    .unwrap_or(ExeKind::Unknown)
 }
 
 /// Every build the release publishes, for the advanced picker.
@@ -105,7 +120,7 @@ pub async fn install_pmc_bb(
         return Err(format!("Game folder not found: {game_root}"));
     }
 
-    let choice = pmc_bb::resolve(exe_kind(&window, &root), variant.as_deref())?;
+    let choice = pmc_bb::resolve(exe_kind(&window, &root).await, variant.as_deref())?;
 
     let client = net::client()?;
     let release = net::latest_release(&client, ReleaseHost::GitHub, pmc_bb::REPO).await?;
