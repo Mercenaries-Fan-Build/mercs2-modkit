@@ -895,9 +895,74 @@ export interface ToolsetProgress {
   total: number;
 }
 
+/**
+ * The three independent features a pmc_bb build may carry. Upstream publishes one
+ * subset per release asset, so these — not a filename — are what modkit selects on.
+ */
+export interface PmcBbFeatures {
+  /** SecuROM v7 event spoof. Only cracked exes that import pmc_bb.dll want this. */
+  crack: boolean;
+  /** The ASI loader. When absent, something else must scan for plugins. */
+  asi: boolean;
+  /** Log stack, crash handler, Lua hooks — what every diagnostic is built on. */
+  log: boolean;
+}
+
+/** One published pmc_bb build, for the advanced picker. */
+export interface PmcBbVariant {
+  asset: string;
+  features: PmcBbFeatures;
+  blurb: string;
+}
+
+/** Which build modkit would install here, and why. */
+export interface PmcBbChoice {
+  asset: string;
+  features: PmcBbFeatures;
+  /** Plain-language reason, safe to show verbatim. */
+  reason: string;
+  /** True when the user forced a build rather than modkit choosing. */
+  overridden: boolean;
+}
+
 export interface InstallDllResult {
   path: string;
   version: string;
+  /**
+   * The release asset installed, e.g. `pmc_bb_asi_log.dll`. Every build installs
+   * as `pmc_bb.dll` — the name the exe's import table and dxwrapper's
+   * LoadCustomDllPath resolve — so this is the only thing that says which one.
+   */
+  asset: string;
+  features: PmcBbFeatures;
+  reason: string;
+  overridden: boolean;
+}
+
+/**
+ * Install state for one artifact modkit manages, from the backend ledger.
+ *
+ * Replaces the per-component version strings that used to live in localStorage,
+ * which could not survive a cleared profile, were never checked against disk, and
+ * could not say which of six pmc_bb builds was installed.
+ */
+export interface ComponentStatus {
+  key: string; // "pmc_bb" | "dxwrapper" | "apply_crack"
+  label: string;
+  repo: string;
+  /** Release tag modkit installed; null when modkit did not install it. */
+  installedTag: string | null;
+  /** Release asset installed — which variant. */
+  installedAsset: string | null;
+  features: string[];
+  /** Latest published tag; null when the lookup was skipped or failed. */
+  latestTag: string | null;
+  updateAvailable: boolean;
+  /** Every recorded file is still on disk. */
+  present: boolean;
+  /** Still there, but no longer the bytes modkit wrote — replaced by hand. */
+  modified: boolean;
+  url: string | null;
 }
 
 export interface CrackResult {
@@ -926,9 +991,17 @@ export interface LicenseStatus {
 export interface DxwrapperResult {
   ok: boolean;
   version: string; // dxwrapper release tag installed
-  proxyPath: string; // the stub proxy DLL written (e.g. …/dsound.dll)
+  proxyPath: string; // the stub proxy DLL written (d3d9.dll)
   dxwrapperPath: string;
   iniPath: string;
+  /**
+   * Whether dxwrapper was configured to scan for plugins itself (`LoadPlugins=1`).
+   * Derived from the pmc_bb build this install gets: exactly one of the two owns
+   * scanning, so when pmc_bb has no ASI loader compiled in, dxwrapper takes over.
+   */
+  loadsPlugins: boolean;
+  /** The pmc_bb build that decision was made against. */
+  pmcBbAsset: string;
   notes: string[];
 }
 

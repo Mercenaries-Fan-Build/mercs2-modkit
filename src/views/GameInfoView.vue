@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
+import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
+import type { PmcBbChoice, PmcBbVariant } from "../types";
 
 const store = useProjectStore();
 const {
@@ -10,6 +12,8 @@ const {
   busy,
   error,
   pmcBbVersion,
+  pmcBbAsset,
+  pmcBbModified,
   dxwrapperVersion,
   componentUpdates,
   vcRedist,
@@ -18,6 +22,51 @@ const {
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
 const dxwrapperUpdate = computed(() => componentUpdates.value["dxwrapper"]);
+
+// Which pmc_bb build modkit would install here, and why. Resolved from the exe's
+// identity rather than the setup path — see managed::pmc_bb. Shown before the user
+// commits, so "why this one" never needs to be guessed at.
+const recommended = ref<PmcBbChoice | null>(null);
+const variants = ref<PmcBbVariant[]>([]);
+const showVariants = ref(false);
+const chosenVariant = ref("");
+
+/** The installed build differs from what this install should have. */
+const variantMismatch = computed(
+  () =>
+    !!pmcBbAsset.value &&
+    !!recommended.value &&
+    pmcBbAsset.value !== recommended.value.asset,
+);
+
+async function loadPmcBbChoice() {
+  if (!gameInfo.value) {
+    recommended.value = null;
+    return;
+  }
+  try {
+    recommended.value = await invoke<PmcBbChoice>("resolve_pmc_bb", {
+      gameRoot: gameInfo.value.root,
+      variant: null,
+    });
+  } catch {
+    recommended.value = null;
+  }
+  if (!variants.value.length) {
+    try {
+      variants.value = await invoke<PmcBbVariant[]>("pmc_bb_variants");
+    } catch {
+      /* leave the advanced picker empty */
+    }
+  }
+}
+
+watch(() => gameInfo.value?.root, loadPmcBbChoice, { immediate: true });
+
+function featureList(f: { crack: boolean; asi: boolean; log: boolean }): string {
+  const on = [f.crack && "SecuROM spoof", f.asi && "ASI loader", f.log && "logging"];
+  return on.filter(Boolean).join(" · ");
+}
 const checking = ref(false);
 const stage = ref("");
 const pmcMsg = ref<string | null>(null);
@@ -60,7 +109,8 @@ async function refreshAll() {
   try {
     await Promise.all([
       store.refreshGame().catch(() => {}),
-      store.checkComponentUpdates(),
+      store.refreshManaged(),
+      loadPmcBbChoice(),
     ]);
   } finally {
     checking.value = false;
@@ -68,11 +118,13 @@ async function refreshAll() {
 }
 
 async function installPmcBb() {
-  stage.value = "Downloading pmc_bb.dll…";
+  const target = chosenVariant.value || recommended.value?.asset || "pmc_bb";
+  stage.value = `Downloading ${target}…`;
   pmcMsg.value = null;
   try {
-    const res = await store.installPmcBb();
-    pmcMsg.value = `Installed pmc_bb.dll ${res.version} → ${res.path}`;
+    const res = await store.installPmcBb(chosenVariant.value || undefined);
+    pmcMsg.value = `Installed ${res.asset} ${res.version} as pmc_bb.dll (${featureList(res.features)})`;
+    await loadPmcBbChoice();
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -81,7 +133,7 @@ async function installPmcBb() {
 }
 
 async function setupDxwrapper() {
-  stage.value = "Downloading dxwrapper + logging pmc_bb…";
+  stage.value = "Downloading dxwrapper + pmc_bb…";
   dxMsg.value = null;
   try {
     const res = await store.setupDxwrapper();
@@ -184,7 +236,7 @@ async function normalizeRegion() {
         >
           <template v-if="store.gameFullySetUp">
             <template v-if="store.setupPath === 'licensed'">
-              Licensed — dxwrapper + logging pmc_bb.dll installed, exe untouched.
+              Licensed — dxwrapper + pmc_bb.dll installed, exe untouched.
               Launching
               <span class="font-mono text-xs">{{ gameInfo.launch_exe_path }}</span
               >.
@@ -305,17 +357,18 @@ async function normalizeRegion() {
         </dl>
       </section>
 
-      <!-- pmc_bb.dll (crack / DRM-free paths; on the licensed path it's the
-           logging build installed by the dxwrapper section below) -->
-      <section
-        v-if="store.setupPath !== 'licensed'"
-        class="guilloche mt-4 rounded-xl border border-zinc-800 p-5"
-      >
+      <!-- pmc_bb.dll — shown on every setup path.
+           It used to be hidden whenever dxwrapper was the loader, on the reasoning
+           that the dxwrapper section installed it. But a licensed copy runs a
+           pmc_bb.dll like everyone else, gets releases like everyone else, and had
+           no control here to update it. -->
+      <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
         <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <h3 class="plate-title text-sm">pmc_bb.dll (ASI loader)</h3>
+            <h3 class="plate-title text-sm">pmc_bb.dll</h3>
             <p class="mt-1 text-sm text-zinc-400">
-              Our ASI loader + SecuROM spoof — required to inject plugins.
+              Published as six builds over three features — SecuROM spoof, ASI
+              loader, logging. modkit picks the one your exe needs.
             </p>
 
             <dl class="mt-3 space-y-2 text-sm">
@@ -333,6 +386,12 @@ async function normalizeRegion() {
                   >
                 </dd>
               </div>
+              <div v-if="gameInfo.has_pmc_bb" class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Installed build</dt>
+                <dd class="font-mono text-xs text-zinc-300">
+                  {{ pmcBbAsset ?? "unknown (not installed by modkit)" }}
+                </dd>
+              </div>
               <div class="flex items-center gap-3">
                 <dt class="w-32 shrink-0 text-zinc-500">Installed version</dt>
                 <dd class="text-zinc-300">
@@ -345,7 +404,17 @@ async function normalizeRegion() {
               </div>
               <div class="flex items-center gap-3">
                 <dt class="w-32 shrink-0 text-zinc-500">Latest release</dt>
-                <dd class="text-zinc-300">{{ pmcBbUpdate?.latest ?? "—" }}</dd>
+                <dd class="text-zinc-300">{{ pmcBbUpdate?.latest || "—" }}</dd>
+              </div>
+              <div v-if="recommended" class="flex items-start gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Recommended</dt>
+                <dd class="min-w-0 text-zinc-300">
+                  <span class="font-mono text-xs">{{ recommended.asset }}</span>
+                  <span class="ml-1 text-xs text-zinc-500">
+                    ({{ featureList(recommended.features) }})
+                  </span>
+                  <p class="mt-1 text-xs text-zinc-500">{{ recommended.reason }}</p>
+                </dd>
               </div>
               <div
                 v-if="
@@ -371,7 +440,7 @@ async function normalizeRegion() {
               </button>
             </p>
             <p
-              v-else-if="gameInfo.has_pmc_bb && pmcBbVersion && pmcBbUpdate"
+              v-else-if="gameInfo.has_pmc_bb && pmcBbVersion && pmcBbUpdate?.latest"
               class="mt-3 text-sm text-emerald-300/80"
             >
               Up to date ✓
@@ -380,9 +449,58 @@ async function normalizeRegion() {
               v-else-if="gameInfo.has_pmc_bb && !pmcBbVersion"
               class="mt-3 text-xs text-zinc-500"
             >
-              Version unknown — reinstall through modkit to start tracking
-              updates.
+              modkit didn't install this copy, so it can't tell which build or
+              version it is. Reinstall to start tracking it.
             </p>
+
+            <p
+              v-if="variantMismatch"
+              class="mt-2 flex items-center gap-1.5 text-xs text-amber-300"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              The installed build isn't the one this exe calls for — reinstall to
+              switch to {{ recommended?.asset }}.
+            </p>
+            <p v-if="pmcBbModified" class="mt-2 text-xs text-amber-300">
+              This file has changed since modkit installed it — something replaced
+              it by hand.
+            </p>
+
+            <!-- Advanced: force a specific build. -->
+            <div v-if="variants.length" class="mt-3">
+              <button
+                class="text-xs text-zinc-500 underline hover:text-zinc-300"
+                @click="showVariants = !showVariants"
+              >
+                {{ showVariants ? "Hide" : "Choose a build manually" }}
+              </button>
+              <div v-if="showVariants" class="mt-2 space-y-1">
+                <label class="flex items-start gap-2 text-xs text-zinc-400">
+                  <input
+                    v-model="chosenVariant"
+                    type="radio"
+                    value=""
+                    class="mt-0.5"
+                  />
+                  <span>Let modkit choose (recommended)</span>
+                </label>
+                <label
+                  v-for="v in variants"
+                  :key="v.asset"
+                  class="flex items-start gap-2 text-xs text-zinc-400"
+                >
+                  <input
+                    v-model="chosenVariant"
+                    type="radio"
+                    :value="v.asset"
+                    class="mt-0.5"
+                  />
+                  <span>
+                    <span class="font-mono">{{ v.asset }}</span> — {{ v.blurb }}
+                  </span>
+                </label>
+              </div>
+            </div>
 
             <p
               v-if="pmcMsg"
@@ -396,7 +514,7 @@ async function normalizeRegion() {
           <button
             class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium disabled:opacity-50"
             :class="
-              pmcBbUpdate?.available
+              pmcBbUpdate?.available || variantMismatch
                 ? 'bg-amber-500 text-zinc-900 hover:bg-amber-400'
                 : 'bg-emerald-600 text-white hover:bg-emerald-500'
             "
@@ -406,9 +524,11 @@ async function normalizeRegion() {
             {{
               pmcBbUpdate?.available
                 ? "Update"
-                : gameInfo.has_pmc_bb
-                  ? "Reinstall"
-                  : "Install"
+                : variantMismatch
+                  ? "Switch build"
+                  : gameInfo.has_pmc_bb
+                    ? "Reinstall"
+                    : "Install"
             }}
           </button>
         </div>

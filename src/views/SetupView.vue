@@ -77,7 +77,7 @@ async function runUpdate() {
 }
 
 async function runDxwrapper() {
-  stage.value = "Downloading dxwrapper + logging pmc_bb…";
+  stage.value = "Downloading dxwrapper + pmc_bb…";
   dxResult.value = null;
   try {
     dxResult.value = await store.setupDxwrapper();
@@ -174,7 +174,7 @@ async function runDxwrapper() {
             DRM-free exe + pmc_bb.dll — mods will load. No crack, no wrapper.
           </template>
           <template v-else-if="effectivePath === 'licensed'">
-            dxwrapper + logging pmc_bb.dll installed — mods load without touching the exe.
+            dxwrapper + pmc_bb.dll installed — mods load without touching the exe.
           </template>
           <template v-else>
             v1.1, cracked, and pmc_bb.dll installed — no setup needed.
@@ -278,7 +278,7 @@ async function runDxwrapper() {
                     store.dxwrapperReady
                       ? "dxwrapper + pmc_bb.dll installed ✓"
                       : gameInfo.has_dxwrapper
-                        ? "dxwrapper present; logging pmc_bb.dll missing"
+                        ? "dxwrapper present; pmc_bb.dll missing"
                         : gameInfo.has_pmc_bb
                           ? "pmc_bb.dll present; dxwrapper missing"
                           : "Not installed"

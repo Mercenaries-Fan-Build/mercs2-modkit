@@ -9,6 +9,7 @@ import type {
   CatalogMod,
   Catalog,
   RepoSource,
+  ComponentStatus,
   ComponentUpdate,
   ConflictGraph,
   CrackResult,
@@ -72,9 +73,6 @@ const ASI_TARGET_KEY = "mercs2-modkit:asiTarget";
 const LIBRARY_KEY = "mercs2-modkit:library";
 // Versions of the core components modkit last installed, remembered so a later
 // release of either can be flagged as an available update.
-const PMC_BB_VERSION_KEY = "mercs2-modkit:pmcBbVersion";
-const CRACK_VERSION_KEY = "mercs2-modkit:crackVersion";
-const DXWRAPPER_VERSION_KEY = "mercs2-modkit:dxwrapperVersion";
 const REGION_KEY = "mercs2-modkit:preferredRegion";
 
 function slugify(name: string): string {
@@ -192,9 +190,6 @@ const MODKIT_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-modkit";
  */
 let pendingUpdate: Update | null = null;
 /** Repos publishing the core components modkit installs (release-checked too). */
-const PMC_BB_REPO = "https://github.com/Mercenaries-Fan-Build/pmc-blackbox";
-const CRACK_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-securom-bypass";
-const DXWRAPPER_REPO = "https://github.com/elishacloud/dxwrapper";
 
 interface ProjectState {
   // Base game
@@ -231,12 +226,17 @@ interface ProjectState {
   updateInstalling: boolean;
   /** Download progress 0-100, or null when the size is unknown. */
   updateProgress: number | null;
-  // Versions of the core components modkit last installed (null = unknown).
-  pmcBbVersion: string | null;
-  crackVersion: string | null;
-  /** dxwrapper release tag last installed (licensed path); null = unknown. */
-  dxwrapperVersion: string | null;
+  /**
+   * Install state of every artifact modkit manages, from the backend ledger.
+   *
+   * This replaced three `localStorage` version strings. They could not survive a
+   * cleared profile (which made the update check silently never fire, since it
+   * gated on a known current version), were never compared against the files on
+   * disk, and could not say *which* of six pmc_bb builds was installed.
+   */
+  managed: ComponentStatus[];
   // Release-update status per core component, keyed "pmc_bb" / "apply_crack".
+  // Derived from `managed`; kept in this shape so the existing views are unchanged.
   componentUpdates: Record<string, ComponentUpdate>;
   // Workshop toolset (the mercs2-wad-simulator release binaries modkit manages).
   toolset: ToolsetStatus | null;
@@ -305,9 +305,7 @@ export const useProjectStore = defineStore("project", {
     modkitUpdate: null,
     updateInstalling: false,
     updateProgress: null,
-    pmcBbVersion: null,
-    crackVersion: null,
-    dxwrapperVersion: null,
+    managed: [],
     componentUpdates: {},
     toolset: null,
     toolsetProgress: null,
@@ -368,6 +366,42 @@ export const useProjectStore = defineStore("project", {
       const r = state.region;
       return !!r && r.applicable && !r.normalized;
     },
+    /** Ledger row for one managed component. */
+    managedComponent(state) {
+      return (key: string): ComponentStatus | undefined =>
+        state.managed.find((c) => c.key === key);
+    },
+
+    /**
+     * Release tag of the installed pmc_bb build, or null when modkit did not
+     * install it. Read from the backend ledger rather than browser storage, so it
+     * survives a cleared profile and describes what is actually on disk.
+     */
+    pmcBbVersion(): string | null {
+      return this.managedComponent("pmc_bb")?.installedTag ?? null;
+    },
+
+    /**
+     * Which of the six pmc_bb builds is installed, e.g. `pmc_bb_asi_log.dll`.
+     * Every one of them installs as `pmc_bb.dll`, so the filename cannot say.
+     */
+    pmcBbAsset(): string | null {
+      return this.managedComponent("pmc_bb")?.installedAsset ?? null;
+    },
+
+    /** The installed pmc_bb is still there but no longer the bytes modkit wrote. */
+    pmcBbModified(): boolean {
+      return this.managedComponent("pmc_bb")?.modified ?? false;
+    },
+
+    crackVersion(): string | null {
+      return this.managedComponent("apply_crack")?.installedTag ?? null;
+    },
+
+    dxwrapperVersion(): string | null {
+      return this.managedComponent("dxwrapper")?.installedTag ?? null;
+    },
+
     /**
      * The v1.1 cracked build we'll launch, whether that's the base exe (cracked
      * in place) or the `Mercenaries2.cracked.exe` setup wrote next to it. The
@@ -425,7 +459,7 @@ export const useProjectStore = defineStore("project", {
       return "crack";
     },
 
-    /** Licensed path ready: dxwrapper + the logging pmc_bb bridge are installed. */
+    /** Licensed path ready: dxwrapper + the pmc_bb bridge are installed. */
     dxwrapperReady(state): boolean {
       return !!state.gameInfo?.has_dxwrapper && !!state.gameInfo?.has_pmc_bb;
     },
@@ -579,10 +613,10 @@ export const useProjectStore = defineStore("project", {
     /** Restore remembered settings + the saved library on app start. */
     async init() {
       this.asiTarget = localStorage.getItem(ASI_TARGET_KEY) ?? "scripts";
-      this.pmcBbVersion = localStorage.getItem(PMC_BB_VERSION_KEY);
-      this.crackVersion = localStorage.getItem(CRACK_VERSION_KEY);
-      this.dxwrapperVersion = localStorage.getItem(DXWRAPPER_VERSION_KEY);
       this.preferredRegion = localStorage.getItem(REGION_KEY);
+      // Component versions used to be restored from localStorage here. They live
+      // in the backend ledger now, which is read fresh rather than remembered —
+      // see `refreshManaged`.
 
       // Restore the library (WAD mods, ASI plugins, enable flags, wardrobe picks).
       try {
@@ -1036,57 +1070,42 @@ export const useProjectStore = defineStore("project", {
     },
 
     /**
-     * Check the GitHub releases of modkit's core components (the pmc_bb.dll ASI
-     * loader and the apply_crack tool) for newer versions than the ones modkit
-     * last installed. Mirrors {@link checkModkitUpdate}; results land in
-     * `componentUpdates` keyed by component id. Best-effort — offline / no-release
-     * lookups are ignored so any prior result is preserved.
+     * Read what modkit has installed, and (with `checkRemote`) whether anything
+     * newer has been published.
+     *
+     * One backend call for every managed component, replacing three sequential
+     * `latest_release` lookups compared against `localStorage` strings. The
+     * version comparison lives in Rust now, so the Workshop Tools page and these
+     * chips can no longer disagree about whether an update exists — they did,
+     * because the toolset compared tags with `!=` while this compared with semver.
+     *
+     * Best-effort: an offline lookup still reports what is installed, so every
+     * page renders either way.
      */
-    async checkComponentUpdates() {
-      const checks: Array<{
-        key: string;
-        name: string;
-        repo: string;
-        current: string | null;
-      }> = [
-        {
-          key: "pmc_bb",
-          name: "pmc_bb.dll (ASI loader)",
-          repo: PMC_BB_REPO,
-          current: this.pmcBbVersion,
-        },
-        {
-          key: "apply_crack",
-          name: "apply_crack (SecuROM bypass)",
-          repo: CRACK_REPO,
-          current: this.crackVersion,
-        },
-        {
-          key: "dxwrapper",
-          name: "dxwrapper",
-          repo: DXWRAPPER_REPO,
-          current: this.dxwrapperVersion,
-        },
-      ];
-      for (const { key, name, repo, current } of checks) {
-        try {
-          const rel = await invoke<ReleaseInfo>("latest_release", { repo });
-          this.componentUpdates[key] = {
-            name,
-            current,
-            latest: rel.tag,
-            url: rel.url,
-            // apply_crack is re-downloaded from its latest release every time the exe is
-            // cracked/updated (crack_game -> cache_apply_crack), so it auto-updates on use —
-            // there is nothing for the user to install. Never surface it as an actionable
-            // update; only pmc_bb and dxwrapper are real manual installs.
-            available:
-              key !== "apply_crack" && !!current && semverGt(rel.tag, current),
-          };
-        } catch {
-          /* offline or no releases yet — keep any prior result */
-        }
+    async refreshManaged(checkRemote = true) {
+      try {
+        this.managed = await invoke<ComponentStatus[]>("managed_status", {
+          checkRemote,
+        });
+      } catch {
+        /* ledger unreadable — leave any prior status in place */
+        return;
       }
+      // Project onto the shape the existing views read.
+      for (const c of this.managed) {
+        this.componentUpdates[c.key] = {
+          name: c.label,
+          current: c.installedTag,
+          latest: c.latestTag ?? "",
+          url: c.url ?? `https://github.com/${c.repo}/releases`,
+          available: c.updateAvailable,
+        };
+      }
+    },
+
+    /** @deprecated Use {@link refreshManaged}; kept so existing callers still work. */
+    async checkComponentUpdates() {
+      await this.refreshManaged(true);
     },
 
     /**
@@ -1447,8 +1466,7 @@ export const useProjectStore = defineStore("project", {
         generatedAt: new Date().toISOString(),
         modkitVersion,
         game: this.gameInfo,
-        pmcBbVersion: this.pmcBbVersion,
-        crackVersion: this.crackVersion,
+        managedComponents: this.managed,
         componentUpdates: this.componentUpdates,
         vcRedist: this.vcRedist,
         region: this.region,
@@ -1909,21 +1927,24 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /** Download the latest pmc_bb.dll (ASI loader) into the game folder. */
-    async installPmcBb(): Promise<InstallDllResult> {
+    /**
+     * Install the pmc_bb build this game install wants.
+     *
+     * There is no longer one "the pmc_bb.dll" to fetch: upstream publishes six
+     * feature variants and the backend resolves which one belongs here from the
+     * exe's identity. Pass `variant` only to override that deliberately.
+     */
+    async installPmcBb(variant?: string): Promise<InstallDllResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.busy = true;
       this.error = null;
       try {
         const res = await invoke<InstallDllResult>("install_pmc_bb", {
           gameRoot: this.gameInfo.root,
+          variant: variant ?? null,
         });
-        // Remember what we just installed so future release checks compare
-        // like-for-like (this also clears any stale "update available" flag).
-        this.pmcBbVersion = res.version;
-        localStorage.setItem(PMC_BB_VERSION_KEY, res.version);
         await this.refreshGame().catch(() => {});
-        void this.checkComponentUpdates();
+        await this.refreshManaged();
         return res;
       } catch (e) {
         this.error = String(e);
@@ -1934,40 +1955,37 @@ export const useProjectStore = defineStore("project", {
     },
 
     /**
-     * Set up the licensed (non-destructive) mod path: install the logging-only
-     * pmc_bb.dll and dxwrapper, leaving the exe untouched. One action so the
-     * Setup page can offer it as a single step. Order matters only cosmetically
-     * (both land before launch); pmc_bb first so the loader it needs exists.
+     * Set up the licensed (non-destructive) mod path: dxwrapper plus the pmc_bb
+     * build that suits this exe, leaving the exe untouched. One action so the
+     * Setup page can offer it as a single step.
+     *
+     * dxwrapper goes first, and not only for ordering: it inspects the exe to
+     * decide which pmc_bb build will be installed, and writes `LoadPlugins`
+     * accordingly. Installing pmc_bb first would not change that decision, but
+     * splitting the two halves would make a partial failure harder to read.
      */
     async setupDxwrapper(): Promise<DxwrapperResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.busy = true;
       this.error = null;
       try {
-        // Install dxwrapper FIRST, so it (and its tracked version) land even if the
-        // logging pmc_bb download isn't available yet.
         const res = await invoke<DxwrapperResult>("install_dxwrapper", {
           gameRoot: this.gameInfo.root,
         });
-        if (res.version) {
-          this.dxwrapperVersion = res.version;
-          localStorage.setItem(DXWRAPPER_VERSION_KEY, res.version);
-        }
-        // Then the logging bridge (installed as pmc_bb.dll). If that download fails
-        // (e.g. the release hasn't published pmc_bb_log.dll yet) but a pmc_bb.dll is
-        // already present, keep going — only a total absence of the loader is fatal.
+        // Then the loader bridge. If that download fails but a pmc_bb.dll is
+        // already present, keep going — only a total absence is fatal.
         try {
-          const log = await invoke<InstallDllResult>("install_pmc_bb_log", {
+          await invoke<InstallDllResult>("install_pmc_bb", {
             gameRoot: this.gameInfo.root,
+            variant: null,
           });
-          this.pmcBbVersion = log.version;
-          localStorage.setItem(PMC_BB_VERSION_KEY, log.version);
         } catch (e) {
           await this.refreshGame().catch(() => {});
           if (!this.gameInfo?.has_pmc_bb) throw e;
-          this.error = `dxwrapper installed, but the logging pmc_bb.dll couldn't be downloaded (${e}). Keeping the pmc_bb.dll already present.`;
+          this.error = `dxwrapper installed, but pmc_bb.dll couldn't be downloaded (${e}). Keeping the pmc_bb.dll already present.`;
         }
         await this.refreshGame().catch(() => {});
+        await this.refreshManaged();
         return res;
       } catch (e) {
         this.error = String(e);
@@ -1987,13 +2005,9 @@ export const useProjectStore = defineStore("project", {
           exePath: this.gameInfo.exe_path,
           outputPath: opts.outputPath,
         });
-        // Remember the apply_crack build we ran so a later release shows as an
-        // available update.
-        if (res.tool_version) {
-          this.crackVersion = res.tool_version;
-          localStorage.setItem(CRACK_VERSION_KEY, res.tool_version);
-          void this.checkComponentUpdates();
-        }
+        // apply_crack is a ledger component now, so the backend already recorded
+        // which build ran; just re-read it.
+        void this.refreshManaged();
         await this.refreshGame().catch(() => {});
         return res;
       } catch (e) {
@@ -2017,11 +2031,7 @@ export const useProjectStore = defineStore("project", {
         const res = await invoke<CrackResult>("update_game", {
           exePath: this.gameInfo.exe_path,
         });
-        if (res.tool_version) {
-          this.crackVersion = res.tool_version;
-          localStorage.setItem(CRACK_VERSION_KEY, res.tool_version);
-          void this.checkComponentUpdates();
-        }
+        void this.refreshManaged();
         await this.refreshGame().catch(() => {});
         return res;
       } catch (e) {

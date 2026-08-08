@@ -2,7 +2,7 @@
 //!
 //! # The DLL is six DLLs
 //!
-//! `mercs2-pmc-blackbox` publishes one subset of three independent features per
+//! `pmc-blackbox` publishes one subset of three independent features per
 //! asset. There is **no** `pmc_bb.dll` asset and no required install name — the
 //! `.def` carries no `LIBRARY` line, so `ld` stamps each output's own filename into
 //! its export directory and every build self-describes.
@@ -45,8 +45,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// GitHub repo publishing the variants.
-pub const REPO: &str = "Mercenaries-Fan-Build/mercs2-pmc-blackbox";
+/// GitHub repo publishing the variants. Note the name has no `mercs2-` prefix,
+/// unlike its siblings and unlike the usual local checkout directory.
+pub const REPO: &str = "Mercenaries-Fan-Build/pmc-blackbox";
 
 /// What modkit installs every variant as.
 ///

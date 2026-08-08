@@ -203,7 +203,7 @@ mod tests {
             tag: tag.into(),
             asset: asset.into(),
             features: vec!["log".into()],
-            source: "Mercenaries-Fan-Build/mercs2-pmc-blackbox".into(),
+            source: "Mercenaries-Fan-Build/pmc-blackbox".into(),
             installed_at: 1_700_000_000,
             files,
         }

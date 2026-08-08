@@ -934,6 +934,60 @@ fn identify_exe(
     Some(ExeReport { file: name.to_string(), size, hash, identified_id, identified_as, notes })
 }
 
+// ----------------------------------------------------------------------------
+// The exe catalogue, on its own
+// ----------------------------------------------------------------------------
+
+/// Just the `exes` array of a manifest.
+///
+/// The bundled manifest is ~4.8 MB of per-file and per-block digests; the exe
+/// catalogue inside it is six entries. Deserializing into this rather than
+/// [`Manifest`] lets serde skip the rest as `IgnoredAny` instead of materializing
+/// a few hundred thousand strings to reach six of them.
+#[derive(Debug, Deserialize)]
+struct ExeCatalog {
+    #[serde(default)]
+    exes: Vec<ExeEntry>,
+}
+
+static EXE_CATALOG: std::sync::OnceLock<Vec<ExeEntry>> = std::sync::OnceLock::new();
+
+/// The bundled exe catalogue, parsed once per run.
+///
+/// An empty slice when the resource cannot be read or parsed. That degrades to
+/// "unrecognised build", which every caller must already handle — a user with a
+/// modified install has always been able to produce it.
+pub fn exe_catalog(window: &Window) -> &'static [ExeEntry] {
+    if let Some(cached) = EXE_CATALOG.get() {
+        return cached;
+    }
+    let loaded = window
+        .path()
+        .resolve(BUNDLED_MANIFEST, BaseDirectory::Resource)
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice::<ExeCatalog>(&bytes).ok())
+        .map(|c| c.exes);
+
+    match loaded {
+        // Not cached on failure: a missing resource is worth retrying, and caching
+        // the empty answer would pin every later lookup to "unrecognised".
+        None => &[],
+        Some(exes) => EXE_CATALOG.get_or_init(|| exes),
+    }
+}
+
+/// Identify `Mercenaries2.exe` under `game_root` against the bundled catalogue.
+///
+/// By content hash, like [`identify_exe`], and for the same reason: two catalogued
+/// builds are the same byte size because swapping the `cruise.dll` import for
+/// `pmc_bb.dll` is length-preserving, and a third lands at exactly the cracked
+/// size. Size cannot separate them, and which one this is decides which pmc_bb
+/// build gets installed.
+pub fn identify_main_exe(window: &Window, game_root: &Path) -> Option<ExeReport> {
+    identify_exe(GENERATED_ALGO, game_root, MAIN_EXE, exe_catalog(window))
+}
+
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
     let m: Manifest =
         serde_json::from_slice(bytes).map_err(|e| format!("Manifest isn't valid JSON: {e}"))?;

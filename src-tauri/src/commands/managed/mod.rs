@@ -16,9 +16,11 @@ use std::path::PathBuf;
 pub mod ledger;
 pub mod place;
 pub mod pmc_bb;
+pub mod status;
 
 pub use ledger::{Component, InstalledFile, Ledger};
 pub use place::{place, snapshot, PlaceOpts, Placed, Verifier};
+pub use status::{managed_status, ComponentStatus};
 
 /// `<app-data>/managed`, where the install record lives.
 pub fn managed_dir() -> Result<PathBuf, String> {
