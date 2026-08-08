@@ -2383,9 +2383,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "loadprobe"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33b709500752fd2c4edeccb321995660c819304b16bcd4840a06a506de4fa84b"
+checksum = "154a402f087cf8096fce2240cf5296bce491aa64967fefc0a3ee1f5514064468"
 dependencies = [
  "clap",
  "colored",
@@ -2504,9 +2504,9 @@ dependencies = [
 
 [[package]]
 name = "mercs2_formats"
-version = "3.4.0"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be656928cdd0eafda00271494b6785fd551a9c154784f65a7a536fba30f7e557"
+checksum = "6e28c5e99e1b01003fd3f8d07f06b36d2bc025923b2db9899616e92ba9adc45a"
 dependencies = [
  "flate2",
  "gltf",
@@ -2514,9 +2514,9 @@ dependencies = [
 
 [[package]]
 name = "mercs2_luac"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90ace0f128a504cbb80b1678b883fa7094628410be24ea26af5ea788e3d87bd1"
+checksum = "afe17d93b34844655e325f4afc139fa2835124d7a9ea051435d761b2fb2ac9b5"
 dependencies = [
  "cc",
 ]
