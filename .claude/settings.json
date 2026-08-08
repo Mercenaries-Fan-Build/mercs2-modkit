@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffprobe -v error -show_entries format=duration,size -show_entries stream=width,height,nb_frames,r_frame_rate \"/Users/austinkregel/src/mercs2-modkit/storage/Mercenaries 2 World in Flames/data/Movies/shell_mainmenu.bik\")",
+      "Bash(ffmpeg -v error -i \"/Users/austinkregel/src/mercs2-modkit/storage/Mercenaries 2 World in Flames/data/Movies/shell_mainmenu.bik\" -vf \"fps=1/4,scale=400:-1\" -frames:v 12 shot_%02d.png)",
+      "Bash(ffmpeg -v error -i shot_06.png -i shot_08.png -i shot_10.png -i shot_12.png -filter_complex \"[0][1][2][3]hstack=4\" grid_a.png -y)",
+      "Bash(ffmpeg -v error -i shot_02.png -i shot_03.png -i shot_04.png -i shot_05.png -filter_complex \"[0][1][2][3]hstack=4\" grid_b.png -y)",
+      "Bash(ffmpeg -v error -i pal.png -f rawvideo -pix_fmt rgb24 -)",
+      "Bash(xxd -p -c 3)",
+      "Bash(awk '{print \"#\"$1}')",
+      "Bash(ffmpeg -v error -i \"/Users/austinkregel/src/mercs2-modkit/storage/Mercenaries 2 World in Flames/data/Movies/title_logo.bik\" -vf \"select='eq\\(n\\\\,95\\)',crop=iw*0.55:ih*0.16:iw*0.18:ih*0.28,palettegen=max_colors=12:stats_mode=full\" -frames:v 1 -y logopal.png)",
+      "Bash(ffmpeg -v error -i logopal.png -f rawvideo -pix_fmt rgb24 -)",
+      "Bash(ffmpeg -v error -i \"/Users/austinkregel/src/mercs2-modkit/storage/Mercenaries 2 World in Flames/data/Movies/shell_mainmenu.bik\" -vf \"select='eq\\(n\\\\,720\\)',scale=340:-1\" -frames:v 1 -q:v 6 src_scope.jpg -y)",
+      "Bash(ffmpeg -v error -i \"/Users/austinkregel/src/mercs2-modkit/storage/Mercenaries 2 World in Flames/data/Movies/title_logo.bik\" -vf \"select='eq\\(n\\\\,95\\)',crop=iw*0.72:ih*0.30:iw*0.14:ih*0.22,scale=340:-1\" -frames:v 1 -q:v 6 src_logo.jpg -y)",
+      "Bash(base64 -i src_scope.jpg -o scope.b64)",
+      "Bash(base64 -i src_logo.jpg -o logo.b64)",
+      "Bash(ls -d ~/src/mercs2-* ~/src/mercenaries-game 2>/dev/null)",
+      "Read(//Users/austinkregel/src/**)",
+      "Bash(cd ~/src/mercs2-securom-bypass && cat .github/workflows/release.yml)",
+      "Read(//Users/austinkregel/src/mercs2-securom-bypass/**)",
+      "Bash(cd ~/src/mercs2-pmc-blackbox && cat .github/workflows/release.yml)",
+      "Read(//Users/austinkregel/src/mercs2-pmc-blackbox/**)",
+      "Bash(cd ~/src/mercs2-wad-simulator && cat .github/workflows/release.yml)",
+      "Read(//Users/austinkregel/src/mercs2-wad-simulator/**)",
+      "Bash(cd ~/src/mercs2-qol-mods && cat .github/workflows/build-release.yml)",
+      "Read(//Users/austinkregel/src/mercs2-qol-mods/**)",
+      "Bash(cd ~/src/mercs2-wad-simulator && ls crates | head -60; echo \"---\"; grep -rn \"gilrs\\\\|cpal\" crates/mercs2_engine/Cargo.toml | head)",
+      "Bash(gh release *)",
+      "Bash(curl -sL https://github.com/Mercenaries-Fan-Build/mercs2-modkit/releases/download/v1.3.0/latest.json)",
+      "Read(//Users/austinkregel/src/mercs2-securom-bypass/.github/workflows/**)",
+      "Read(//Users/austinkregel/src/mercs2-wad-simulator/.github/workflows/**)",
+      "Bash(python3 -c \"import yaml,sys; d=yaml.safe_load\\(open\\('.github/workflows/release.yml'\\)\\); rows=d['jobs']['build']['strategy']['matrix']['include']; print\\(len\\(rows\\),'rows'\\); [print\\(' ',r['os'],r['suffix']\\) for r in rows]\")",
+      "Bash(python3 -c \"import yaml,sys; d=yaml.safe_load\\(open\\('.github/workflows/release.yml'\\)\\); rows=d['jobs']['build']['strategy']['matrix']['include']; print\\(len\\(rows\\),'rows'\\); [print\\(' ',r['os'],r['target'],r['suffix']\\) for r in rows]\")",
+      "Read(//private/tmp/**)",
+      "Bash(/usr/bin/python3 -c ' *)",
+      "Bash(cargo test *)",
+      "Bash(npm run *)",
+      "Bash(cd ~/src/mercs2-securom-bypass *)"
+    ],
+    "additionalDirectories": [
+      "/Users/austinkregel/src/mercs2-securom-bypass/.github/workflows",
+      "/Users/austinkregel/src/mercs2-wad-simulator/.github/workflows"
+    ]
+  }
+}

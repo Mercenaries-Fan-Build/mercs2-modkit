@@ -56,9 +56,11 @@ use super::net;
 /// GitHub repo whose releases publish the toolset.
 const REPO: &str = "Mercenaries-Fan-Build/mercs2-wad-simulator";
 
-/// A toolset binary smaller than this is not a build — a forge error page served
-/// with a 200, or a truncated transfer.
-const MIN_TOOL_SIZE: u64 = 64 * 1024;
+/// Last-resort floor, used only if the release ever stops declaring asset sizes;
+/// the declared size is the real check. Kept well under the smallest published
+/// tool rather than at a round number that felt about right — that habit rejected
+/// two legitimate pmc_bb builds.
+const MIN_TOOL_SIZE: u64 = 4 * 1024;
 
 /// Name of the sidecar recording which release is installed.
 const STATE_FILE: &str = "installed.json";
@@ -723,6 +725,7 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
             PlaceOpts::default()
                 .executable()
                 .expecting(remote.sha256())
+                .sized(remote.size)
                 .at_least(MIN_TOOL_SIZE)
                 // A version dir only ever holds one release, so there is never an
                 // incumbent to displace and a `.bak` here would be noise.

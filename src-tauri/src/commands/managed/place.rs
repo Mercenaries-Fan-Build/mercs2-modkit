@@ -50,8 +50,17 @@ pub struct PlaceOpts {
     /// Expected sha256, lowercase hex. When the forge published a digest this is
     /// the only end-to-end integrity check a bare release binary gets.
     pub expect_sha256: Option<String>,
-    /// Reject a suspiciously small file. A forge error page served with a 200 is
-    /// a few hundred bytes; a DLL is not.
+    /// Exact byte count the forge declared for this asset.
+    ///
+    /// Preferred over [`Self::min_size`] wherever it is available, because it is
+    /// authoritative rather than guessed. Inventing a floor is how
+    /// `pmc_bb_crack_only.dll` (13,838 bytes) and `pmc_bb_crack_asi.dll` (15,886)
+    /// came to be rejected by a 16 KB minimum that was picked without looking at
+    /// what the release actually publishes.
+    pub expect_size: Option<u64>,
+    /// Reject a suspiciously small file, for sources that declare no size —
+    /// GitLab does not. A forge error page served with a 200 is a few hundred
+    /// bytes. Keep any such floor well under the smallest real artifact.
     pub min_size: Option<u64>,
     /// Mark executable on unix.
     pub executable: bool,
@@ -72,6 +81,7 @@ impl Default for PlaceOpts {
     fn default() -> Self {
         Self {
             expect_sha256: None,
+            expect_size: None,
             min_size: None,
             executable: false,
             keep_bak_sibling: true,
@@ -94,6 +104,12 @@ impl PlaceOpts {
 
     pub fn at_least(mut self, bytes: u64) -> Self {
         self.min_size = Some(bytes);
+        self
+    }
+
+    /// The exact size the forge declared, when it declared one.
+    pub fn sized(mut self, bytes: Option<u64>) -> Self {
+        self.expect_size = bytes;
         self
     }
 
@@ -147,12 +163,22 @@ pub fn place(dest: &Path, bytes: &[u8], opts: PlaceOpts) -> Result<Placed, Strin
         .unwrap_or("the file")
         .to_string();
 
-    if let Some(min) = opts.min_size {
-        if (bytes.len() as u64) < min {
+    let got = bytes.len() as u64;
+    // The declared size is authoritative, so it wins over any floor a caller also
+    // set — and a mismatch here is a truncated or substituted download, not a
+    // small one.
+    if let Some(want) = opts.expect_size {
+        if got != want {
             return Err(format!(
-                "Refusing to install {label}: got {} bytes, expected at least {min}. \
-                 That is the size of an error page, not an artifact.",
-                bytes.len()
+                "Refusing to install {label}: got {got} bytes, but the release declares \
+                 {want}. The download was truncated or the artifact was replaced."
+            ));
+        }
+    } else if let Some(min) = opts.min_size {
+        if got < min {
+            return Err(format!(
+                "Refusing to install {label}: got {got} bytes, expected at least {min}. \
+                 That is the size of an error page, not an artifact."
             ));
         }
     }
@@ -428,6 +454,41 @@ mod tests {
         let opts = f.opts().expecting(Some(&sha256_hex(b"genuine")));
         place(&dest, b"genuine", opts).expect("the digest matches");
         assert_eq!(std::fs::read(&dest).unwrap(), b"genuine");
+    }
+
+    #[test]
+    fn a_declared_size_mismatch_is_refused() {
+        let f = Fixture::new();
+        let dest = f.game.join("pmc_bb.dll");
+        std::fs::write(&dest, b"incumbent").unwrap();
+
+        let err = place(&dest, b"truncated", f.opts().sized(Some(51214))).unwrap_err();
+        assert!(err.contains("truncated or the artifact was replaced"), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"incumbent");
+    }
+
+    #[test]
+    fn a_matching_declared_size_is_accepted() {
+        let f = Fixture::new();
+        let dest = f.game.join("tool");
+        place(&dest, b"exactly-13", f.opts().sized(Some(10))).expect("10 bytes, as declared");
+    }
+
+    /// The declared size is authoritative, so a caller's floor must not be able to
+    /// reject an artifact the release says is exactly this big. This is the bug in
+    /// miniature: a 16 KB floor against a 13,838-byte published build.
+    #[test]
+    fn a_declared_size_overrides_an_over_eager_floor() {
+        let f = Fixture::new();
+        let dest = f.game.join("pmc_bb.dll");
+        let small = vec![0u8; 13_838];
+
+        place(
+            &dest,
+            &small,
+            f.opts().sized(Some(13_838)).at_least(16 * 1024),
+        )
+        .expect("the release says this is the whole artifact");
     }
 
     #[test]

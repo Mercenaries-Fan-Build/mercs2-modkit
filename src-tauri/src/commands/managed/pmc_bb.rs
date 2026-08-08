@@ -58,9 +58,31 @@ pub const REPO: &str = "Mercenaries-Fan-Build/pmc-blackbox";
 /// is underneath it.
 pub const INSTALL_NAME: &str = "pmc_bb.dll";
 
-/// A DLL smaller than this is not a build. Guards against a forge error page or a
-/// truncated transfer being written over a working loader.
-pub const MIN_SIZE: u64 = 16 * 1024;
+/// Last-resort floor for a build, used only when the release declares no size.
+///
+/// Deliberately far below the smallest published variant. The first value here
+/// was 16 KB, picked without looking: `pmc_bb_crack_only.dll` is 13,838 bytes and
+/// `pmc_bb_crack_asi.dll` is 15,886, so that floor rejected two of the six real
+/// builds as "the size of an error page". A guess about how big an artifact ought
+/// to be is worth less than the exact size the release publishes — see
+/// [`super::place::PlaceOpts::expect_size`], which is what actually guards this
+/// now. Any change here should be checked against the release page, not reasoned
+/// about.
+pub const MIN_SIZE: u64 = 4 * 1024;
+
+/// Size of the smallest build the release publishes (`pmc_bb_crack_only.dll`,
+/// v0.6.0). The floor has to clear it, because the floor applies to whichever
+/// variant an *override* selects, not only to the one auto-resolution picks.
+const SMALLEST_PUBLISHED_BUILD: u64 = 13_838;
+
+// Fails the build rather than a test: raising MIN_SIZE past a real artifact is a
+// mistake that only shows up when somebody picks that variant by hand, which is
+// exactly the path least likely to be exercised before release.
+const _: () = assert!(
+    MIN_SIZE < SMALLEST_PUBLISHED_BUILD,
+    "MIN_SIZE rejects the smallest published pmc_bb build — check the release \
+     page before raising it",
+);
 
 /// The three independent features a build may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

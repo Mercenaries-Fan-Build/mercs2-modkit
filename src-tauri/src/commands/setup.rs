@@ -142,6 +142,7 @@ pub async fn install_pmc_bb(
         &bytes,
         PlaceOpts::default()
             .expecting(asset.sha256())
+            .sized(asset.size)
             .at_least(pmc_bb::MIN_SIZE),
     )?;
 
@@ -231,6 +232,7 @@ async fn ensure_apply_crack(window: &Window) -> Result<(String, PathBuf), String
         PlaceOpts::default()
             .executable()
             .expecting(asset.sha256())
+            .sized(asset.size)
             .at_least(CRACK_MIN_SIZE),
     )?;
 
