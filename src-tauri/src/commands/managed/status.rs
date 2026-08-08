@@ -64,7 +64,13 @@ pub struct ComponentStatus {
     /// Latest published tag; `None` when the lookup was skipped or failed, which
     /// is not an error — the page still renders offline.
     pub latest_tag: Option<String>,
+    /// A newer release exists **and** the file this install would download is
+    /// actually there. Never true during the publish window.
     pub update_available: bool,
+    /// Set when a newer tag exists but is not yet actionable, saying which of the
+    /// two reasons it is. Surfaced rather than swallowed: one of them resolves
+    /// itself in a minute and the other never will.
+    pub pending_reason: Option<String>,
     /// Every recorded file is still on disk.
     pub present: bool,
     /// Every recorded file still has the bytes modkit wrote. `false` with
@@ -85,6 +91,7 @@ fn row(m: &Managed, installed: Option<&Component>) -> ComponentStatus {
         features: installed.map(|c| c.features.clone()).unwrap_or_default(),
         latest_tag: None,
         update_available: false,
+        pending_reason: None,
         present: installed.is_some_and(|c| c.is_present()),
         modified: installed.is_some_and(|c| c.is_present() && !c.is_intact()),
         url: None,
@@ -122,16 +129,76 @@ pub async fn managed_status(check_remote: bool) -> Result<Vec<ComponentStatus>, 
     };
     for (m, r) in MANAGED.iter().zip(rows.iter_mut()) {
         if let Ok(release) = net::latest_release(&client, ReleaseHost::GitHub, m.repo).await {
-            r.update_available = r
+            let newer = r
                 .installed_tag
                 .as_deref()
                 .is_some_and(|cur| is_newer(cur, &release.tag));
+
+            if newer {
+                let (available, pending) = offer(&release, r.installed_asset.as_deref(), m.label);
+                r.update_available = available;
+                r.pending_reason = pending;
+            }
             r.url = Some(release.url);
             r.latest_tag = Some(release.tag);
         }
     }
 
     Ok(rows)
+}
+
+/// Whether a newer release is actually offerable, and why not when it isn't.
+///
+/// The check is against the **same asset that is installed**. That is the file
+/// this machine would download again: an update to a `pmc_bb_log_only.dll`
+/// install is only real once the new release publishes a `pmc_bb_log_only.dll`,
+/// however many of its five siblings have finished uploading.
+///
+/// Three outcomes, and keeping them apart is the point:
+///
+/// * the asset is there and uploaded — offer it;
+/// * the release is still uploading — say so and stay quiet, because this
+///   resolves itself and a notification now sends people to a release page with
+///   nothing on it;
+/// * everything is uploaded and the asset is absent — say *that*, loudly, because
+///   it means the artifact was renamed or dropped and no amount of waiting fixes
+///   it. Treating this as "still publishing" is how a client pins itself to an
+///   old build forever without ever reporting a problem.
+fn offer(
+    release: &net::Release,
+    installed_asset: Option<&str>,
+    label: &str,
+) -> (bool, Option<String>) {
+    let Some(asset) = installed_asset.filter(|a| !a.is_empty()) else {
+        // Nothing recorded to match against. Offer it — an install is exactly
+        // what makes the asset knowable, and refusing would be the old
+        // "unknown version means never update" trap in a new place.
+        return (true, None);
+    };
+
+    if release.publishes(asset) {
+        return (true, None);
+    }
+
+    if release.is_still_publishing() {
+        (
+            false,
+            Some(format!(
+                "{} {} is published but its files are still uploading — modkit will offer it \
+                 once {asset} is there.",
+                label, release.tag
+            )),
+        )
+    } else {
+        (
+            false,
+            Some(format!(
+                "{} {} no longer publishes {asset}. modkit needs a different build for this \
+                 install — check the release notes.",
+                label, release.tag
+            )),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +288,94 @@ mod tests {
         let r = row(&MANAGED[0], Some(&c));
         assert!(r.present);
         assert!(r.modified, "a hand-swapped DLL must be visible as such");
+    }
+
+    // ----------------------------------------------------------------------
+    // Not announcing an update before it exists
+    // ----------------------------------------------------------------------
+
+    fn asset_named(name: &str, state: &str) -> net::Asset {
+        net::Asset {
+            name: name.into(),
+            url: String::new(),
+            size: None,
+            digest: None,
+            state: Some(state.into()),
+        }
+    }
+
+    fn release_of(assets: Vec<net::Asset>) -> net::Release {
+        net::Release {
+            tag: "v0.7.0".into(),
+            name: "v0.7.0".into(),
+            url: String::new(),
+            body: String::new(),
+            assets,
+        }
+    }
+
+    /// The report that got maintainers pinged: a release is published the instant
+    /// CI creates it, and every client polling in the seconds before its binaries
+    /// land announced an update nobody could download.
+    #[test]
+    fn a_release_still_uploading_is_not_offered() {
+        let r = release_of(vec![asset_named("pmc_bb_log_only.dll", "starter")]);
+        let (available, why) = offer(&r, Some("pmc_bb_log_only.dll"), "pmc_bb.dll");
+
+        assert!(!available, "announced an update whose file is not there yet");
+        let why = why.expect("the reason is recorded rather than swallowed");
+        assert!(why.contains("still uploading"), "{why}");
+    }
+
+    /// A partially-published release is not offered either, even when *other*
+    /// assets are ready — the one that matters is the one this install uses.
+    #[test]
+    fn a_partly_uploaded_release_is_not_offered_on_the_strength_of_its_siblings() {
+        let r = release_of(vec![
+            asset_named("pmc_bb_fully_loaded.dll", "uploaded"),
+            asset_named("pmc_bb_log_only.dll", "starter"),
+        ]);
+        let (available, _) = offer(&r, Some("pmc_bb_log_only.dll"), "pmc_bb.dll");
+        assert!(!available);
+
+        // ...and the install that uses the finished one is offered it.
+        let (available, _) = offer(&r, Some("pmc_bb_fully_loaded.dll"), "pmc_bb.dll");
+        assert!(available, "this install's file is ready");
+    }
+
+    #[test]
+    fn a_finished_release_is_offered() {
+        let r = release_of(vec![asset_named("pmc_bb_log_only.dll", "uploaded")]);
+        let (available, why) = offer(&r, Some("pmc_bb_log_only.dll"), "pmc_bb.dll");
+        assert!(available);
+        assert!(why.is_none());
+    }
+
+    /// The opposite failure, and the more dangerous one: if a dropped asset were
+    /// reported as "still publishing", modkit would wait forever and never say
+    /// why. This is what pmc_bb.dll becoming six variants looks like from here.
+    #[test]
+    fn a_dropped_asset_is_reported_rather_than_waited_on() {
+        let r = release_of(vec![asset_named("pmc_bb_log_only.dll", "uploaded")]);
+        let (available, why) = offer(&r, Some("pmc_bb.dll"), "pmc_bb.dll");
+
+        assert!(!available);
+        let why = why.expect("a reason");
+        assert!(why.contains("no longer publishes"), "{why}");
+        assert!(
+            !why.contains("still uploading"),
+            "a rename must not be described as a slow upload: {why}"
+        );
+    }
+
+    /// An install modkit did not perform has no asset to match. Refusing to offer
+    /// an update there would recreate the trap this whole change removed, where an
+    /// unknown installed version meant the update check silently never fired.
+    #[test]
+    fn an_untracked_install_is_still_offered_an_update() {
+        let r = release_of(vec![asset_named("pmc_bb_log_only.dll", "uploaded")]);
+        assert!(offer(&r, None, "pmc_bb.dll").0);
+        assert!(offer(&r, Some(""), "pmc_bb.dll").0);
     }
 
     #[test]

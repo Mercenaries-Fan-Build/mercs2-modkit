@@ -23,6 +23,14 @@ const {
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
 const dxwrapperUpdate = computed(() => componentUpdates.value["dxwrapper"]);
 
+// Why a newer release isn't being offered, when there is one — either it is still
+// uploading, or it no longer publishes the build this install uses. Shown so the
+// gap between "a new tag exists" and "you can have it" is legible rather than
+// looking like modkit failed to notice.
+const pmcBbPending = computed(
+  () => store.managedComponent("pmc_bb")?.pendingReason ?? null,
+);
+
 // Which pmc_bb build modkit would install here, and why. Resolved from the exe's
 // identity rather than the setup path — see managed::pmc_bb. Shown before the user
 // commits, so "why this one" never needs to be guessed at.
@@ -438,6 +446,12 @@ async function normalizeRegion() {
               <button class="underline" @click="openUrl(pmcBbUpdate.url)">
                 release notes
               </button>
+            </p>
+            <p
+              v-else-if="pmcBbPending"
+              class="mt-3 text-sm text-zinc-400"
+            >
+              {{ pmcBbPending }}
             </p>
             <p
               v-else-if="gameInfo.has_pmc_bb && pmcBbVersion && pmcBbUpdate?.latest"

@@ -14,6 +14,14 @@ pub struct ReleaseInfo {
     pub url: String,
     /// Release notes (may be empty).
     pub body: String,
+    /// Whether the release has finished publishing its downloads.
+    ///
+    /// False while CI is still uploading — a release exists from the moment it is
+    /// created, so `tag_name` goes new before anything is downloadable from it.
+    /// Callers must not announce an update on a release that answers `false`
+    /// here; that is the window in which people are told about a build, follow
+    /// the link, and find an empty release page.
+    pub assets_ready: bool,
 }
 
 /// Whether this binary was installed in a form the Tauri updater can replace
@@ -60,6 +68,7 @@ pub async fn latest_release(repo: String) -> Result<ReleaseInfo, String> {
     let release = net::latest_release(&client, net::ReleaseHost::GitHub, &owner_repo).await?;
 
     Ok(ReleaseInfo {
+        assets_ready: !release.is_still_publishing(),
         tag: release.tag,
         name: release.name,
         url: release.url,

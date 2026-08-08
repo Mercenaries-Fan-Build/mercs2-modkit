@@ -460,9 +460,16 @@ pub struct ToolsetStatus {
     /// Latest published tag. Null when the lookup was skipped or failed
     /// (offline) — the page still renders what is installed.
     pub latest_tag: Option<String>,
-    /// True when a newer release exists AND at least one tool is installed.
-    /// Nothing installed is not "out of date", it is "not set up".
+    /// True when a newer release exists, at least one tool is installed, AND that
+    /// release has actually finished publishing the binaries this host needs.
+    ///
+    /// Nothing installed is not "out of date", it is "not set up". And a tag whose
+    /// assets are still uploading is not an update yet either — announcing one
+    /// then sends people to a release page with nothing on it.
     pub update_available: bool,
+    /// Why a newer tag is not being offered, when there is one. Null when the
+    /// update is offerable, or when there is nothing newer.
+    pub pending_reason: Option<String>,
     /// Directory "Open folder" opens. The version directory once something is
     /// installed, otherwise the toolset root — which [`toolset_root`] has already
     /// created, so it is always a real directory.
@@ -510,8 +517,30 @@ async fn latest_toolset(
 // Status
 // ----------------------------------------------------------------------------
 
-/// Build the status view from `state`, optionally with a known latest tag.
-fn status_from(root: &Path, state: &InstalledState, latest: Option<String>) -> ToolsetStatus {
+/// Everything a status view needs to know about the newest release: its tag, and
+/// which assets it has actually finished uploading.
+type Latest<'a> = (&'a str, &'a BTreeMap<String, net::Asset>);
+
+/// Whether `assets` carries a ready build of every installed tool, for this host.
+///
+/// Per-tool, not per-release. The toolset publishes eleven binaries across six
+/// platforms, so a release is mid-publish for a long stretch during which *some*
+/// assets are ready — and the ones that matter are the ones this machine would
+/// re-download.
+fn ready_for_installed(state: &InstalledState, assets: &BTreeMap<String, net::Asset>) -> bool {
+    TOOLS
+        .iter()
+        .filter(|t| state.tools.contains_key(t.name))
+        .all(|t| match asset_name(t) {
+            Some(name) => assets.get(&name).is_some_and(|a| a.is_ready()),
+            // No build for this host at all: not something a new release can fix,
+            // and not a reason to withhold an update from the other tools.
+            None => true,
+        })
+}
+
+/// Build the status view from `state`, optionally with a known latest release.
+fn status_from(root: &Path, state: &InstalledState, latest: Option<Latest>) -> ToolsetStatus {
     let dir = (!state.tag.is_empty()).then(|| root.join(&state.tag));
 
     let tools = TOOLS
@@ -550,14 +579,28 @@ fn status_from(root: &Path, state: &InstalledState, latest: Option<String>) -> T
 
     let installed_tag = (!state.tag.is_empty()).then(|| state.tag.clone());
     let anything_installed = tools.iter().any(|t| t.path.is_some());
-    let update_available = match (&installed_tag, &latest) {
-        (Some(cur), Some(new)) => anything_installed && cur != new,
-        _ => false,
-    };
+
+    // `cur != new` used to stand in for "newer", which made a re-tag or a rollback
+    // read as an update here while the component chips (semver) disagreed.
+    let mut update_available = false;
+    let mut pending_reason = None;
+    if let (Some(cur), Some((new, assets))) = (&installed_tag, latest) {
+        if anything_installed && super::managed::is_newer(cur, new) {
+            if ready_for_installed(state, assets) {
+                update_available = true;
+            } else {
+                pending_reason = Some(format!(
+                    "Toolset {new} is published but its binaries are still uploading — \
+                     modkit will offer it once the builds for this machine are there."
+                ));
+            }
+        }
+    }
 
     ToolsetStatus {
         installed_tag,
-        latest_tag: latest,
+        latest_tag: latest.map(|(tag, _)| tag.to_string()),
+        pending_reason,
         update_available,
         dir: dir
             .filter(|_| anything_installed)
@@ -576,16 +619,23 @@ pub async fn toolset_status(check_remote: bool) -> Result<ToolsetStatus, String>
     let root = toolset_root()?;
     let state = read_state(&root);
 
+    // The asset map is kept, not discarded: whether a newer tag is offerable
+    // depends on whether its binaries have finished uploading, and that is the
+    // only place that answer lives.
     let latest = if check_remote {
         match net::client() {
-            Ok(c) => latest_toolset(&c).await.ok().map(|(tag, _)| tag),
+            Ok(c) => latest_toolset(&c).await.ok(),
             Err(_) => None,
         }
     } else {
         None
     };
 
-    Ok(status_from(&root, &state, latest))
+    Ok(status_from(
+        &root,
+        &state,
+        latest.as_ref().map(|(tag, assets)| (tag.as_str(), assets)),
+    ))
 }
 
 // ----------------------------------------------------------------------------
@@ -759,7 +809,7 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
     write_state(&root, &new_state)?;
     prune(&root, &tag);
 
-    Ok(status_from(&root, &new_state, Some(tag)))
+    Ok(status_from(&root, &new_state, Some((&tag, &assets))))
 }
 
 /// Remove one installed tool. The engine-backed apps are the large ones, so
@@ -1317,6 +1367,25 @@ pub async fn ensure_tool(window: Window, name: &str) -> Result<PathBuf, String> 
 mod tests {
     use super::*;
 
+    /// A release's asset map: `(name, finished_uploading)` per entry.
+    fn published(assets: &[(&str, bool)]) -> BTreeMap<String, net::Asset> {
+        assets
+            .iter()
+            .map(|(name, ready)| {
+                (
+                    name.to_string(),
+                    net::Asset {
+                        name: name.to_string(),
+                        url: String::new(),
+                        size: None,
+                        digest: None,
+                        state: Some(if *ready { "uploaded" } else { "starter" }.into()),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// A crashed tool must be forgotten AND reported — the whole point of
     /// tracking children is that a silent death used to look like a launch.
     /// Unix-only: needs a shell that exits on demand.
@@ -1680,7 +1749,7 @@ mod tests {
     fn nothing_installed_is_not_an_available_update() {
         let dir = tempfile::tempdir().unwrap();
         let state = InstalledState::default();
-        let s = status_from(dir.path(), &state, Some("v0.9.3".into()));
+        let s = status_from(dir.path(), &state, Some(("v0.9.3", &published(&[]))));
         assert_eq!(s.installed_tag, None);
         // "Not set up" must not render as "out of date".
         assert!(!s.update_available);
@@ -1698,7 +1767,7 @@ mod tests {
         tools.insert("wad_simulator".into(), "wad_simulator-linux-x86_64".into());
         let state = InstalledState { tag: "v0.9.3".into(), tools };
 
-        let s = status_from(dir.path(), &state, Some("v0.9.4".into()));
+        let s = status_from(dir.path(), &state, Some(("v0.9.4", &published(&[]))));
         let ws = s.tools.iter().find(|t| t.name == "wad_simulator").unwrap();
         assert_eq!(ws.path, None);
         assert_eq!(ws.size, None);
@@ -1716,7 +1785,9 @@ mod tests {
         tools.insert("wad_simulator".into(), local);
         let state = InstalledState { tag: "v0.9.3".into(), tools };
 
-        let current = status_from(dir.path(), &state, Some("v0.9.3".into()));
+        let ready = published(&[(&asset_name(tool("wad_simulator").unwrap()).unwrap(), true)]);
+
+        let current = status_from(dir.path(), &state, Some(("v0.9.3", &ready)));
         let ws = current.tools.iter().find(|t| t.name == "wad_simulator").unwrap();
         assert!(ws.path.is_some());
         assert_eq!(ws.size, Some(6));
@@ -1724,12 +1795,89 @@ mod tests {
         // Something is installed, so it points at the version dir, not the root.
         assert_eq!(current.dir, dir.path().join("v0.9.3").to_string_lossy());
 
-        let stale = status_from(dir.path(), &state, Some("v0.10.0".into()));
-        assert!(stale.update_available, "a newer tag is an available update");
+        let stale = status_from(dir.path(), &state, Some(("v0.10.0", &ready)));
+        assert!(stale.update_available, "a newer tag whose binaries are up");
 
         // Offline: no latest tag known, so nothing is claimed about staleness.
         let offline = status_from(dir.path(), &state, None);
         assert!(!offline.update_available);
         assert_eq!(offline.installed_tag.as_deref(), Some("v0.9.3"));
+    }
+
+    /// v0.10.0 sorts before v0.9.3 as a string, so the old `cur != new` test
+    /// happened to be right here for the wrong reason — and wrong in the other
+    /// direction on a rollback, where it announced an "update" to an older build.
+    #[test]
+    fn staleness_is_a_version_comparison_not_a_string_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = local_name(tool("wad_simulator").unwrap());
+        std::fs::create_dir_all(dir.path().join("v0.10.0")).unwrap();
+        std::fs::write(dir.path().join("v0.10.0").join(&local), b"binary").unwrap();
+
+        let mut tools = BTreeMap::new();
+        tools.insert("wad_simulator".into(), local);
+        let state = InstalledState { tag: "v0.10.0".into(), tools };
+        let ready = published(&[(&asset_name(tool("wad_simulator").unwrap()).unwrap(), true)]);
+
+        let rolled_back = status_from(dir.path(), &state, Some(("v0.9.3", &ready)));
+        assert!(
+            !rolled_back.update_available,
+            "v0.9.3 is older than v0.10.0 — that is not an update"
+        );
+    }
+
+    /// The report this exists for: a release is published the moment CI creates
+    /// it and its binaries upload afterwards, so for a stretch after every tag
+    /// modkit was telling people about a build they could not download.
+    #[test]
+    fn a_release_still_uploading_is_not_announced_as_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tool("wad_simulator").unwrap();
+        let local = local_name(t);
+        std::fs::create_dir_all(dir.path().join("v0.9.3")).unwrap();
+        std::fs::write(dir.path().join("v0.9.3").join(&local), b"binary").unwrap();
+
+        let mut tools = BTreeMap::new();
+        tools.insert("wad_simulator".into(), local);
+        let state = InstalledState { tag: "v0.9.3".into(), tools };
+
+        let Some(asset) = asset_name(t) else {
+            return; // no build for this host; nothing to assert
+        };
+
+        // Tag is out, this host's binary is not.
+        let uploading = published(&[(&asset, false)]);
+        let s = status_from(dir.path(), &state, Some(("v0.10.0", &uploading)));
+        assert!(!s.update_available, "announced a build that is still uploading");
+        assert!(
+            s.pending_reason.is_some_and(|r| r.contains("still uploading")),
+            "the wait is explained rather than silently hidden"
+        );
+
+        // Same release once it lands.
+        let landed = published(&[(&asset, true)]);
+        let s = status_from(dir.path(), &state, Some(("v0.10.0", &landed)));
+        assert!(s.update_available);
+        assert!(s.pending_reason.is_none());
+    }
+
+    /// A release that has finished uploading *other* platforms' binaries is still
+    /// not an update for this one.
+    #[test]
+    fn another_platforms_binary_does_not_count_as_this_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tool("wad_simulator").unwrap();
+        let local = local_name(t);
+        std::fs::create_dir_all(dir.path().join("v0.9.3")).unwrap();
+        std::fs::write(dir.path().join("v0.9.3").join(&local), b"binary").unwrap();
+
+        let mut tools = BTreeMap::new();
+        tools.insert("wad_simulator".into(), local);
+        let state = InstalledState { tag: "v0.9.3".into(), tools };
+
+        // A release carrying every asset except the one this host needs.
+        let others = published(&[("wad_simulator-some-other-platform", true)]);
+        let s = status_from(dir.path(), &state, Some(("v0.10.0", &others)));
+        assert!(!s.update_available);
     }
 }

@@ -1109,7 +1109,12 @@ export const useProjectStore = defineStore("project", {
           current,
           latest: rel.tag,
           url: rel.url,
-          available: !!current && semverGt(rel.tag, current),
+          // Gated on the release having finished uploading. A tag is published
+          // the moment CI creates it and the installers land afterwards, so
+          // without this the header announces a build for the minutes before it
+          // can be downloaded — and points at an empty release page.
+          available:
+            !!current && semverGt(rel.tag, current) && rel.assets_ready,
           canInstall: false,
         };
       } catch {

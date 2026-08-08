@@ -22,12 +22,34 @@ pub struct Asset {
     /// is carried through to [`crate::commands::managed::place`] rather than
     /// dropped here.
     pub digest: Option<String>,
+    /// GitHub's upload state: `uploaded` once the file is actually there,
+    /// `starter` while it is still going up.
+    ///
+    /// This is the gap that gets maintainers pinged. A release is *published* the
+    /// moment CI creates it, and the binaries upload afterwards — so
+    /// `/releases/latest` reports a new tag for the seconds-to-minutes before
+    /// anyone can download anything from it. Every client polling in that window
+    /// announced an update that did not yet exist.
+    ///
+    /// `None` for GitLab, which does not report a state; there, an asset that is
+    /// listed is treated as ready.
+    pub state: Option<String>,
 }
 
 impl Asset {
     /// The bare hex digest when the forge published a `sha256:` one.
     pub fn sha256(&self) -> Option<&str> {
         self.digest.as_deref()?.strip_prefix("sha256:")
+    }
+
+    /// Whether this asset can actually be downloaded right now.
+    pub fn is_ready(&self) -> bool {
+        match self.state.as_deref() {
+            Some(s) => s.eq_ignore_ascii_case("uploaded"),
+            // A forge that reports no state is taken at its word: it listed the
+            // asset, so it exists.
+            None => true,
+        }
     }
 }
 
@@ -83,10 +105,28 @@ impl AssetRule<'_> {
 
 impl Release {
     /// First asset matching the highest-priority rule that matches anything.
+    ///
+    /// Matches regardless of upload state, so a caller can tell "not published by
+    /// this release" apart from "published but still uploading" — see
+    /// [`Asset::is_ready`]. Collapsing the two would make a rename look like a
+    /// slow upload, and modkit would wait forever for a file that is never coming.
     pub fn pick(&self, rules: &[AssetRule]) -> Option<&Asset> {
         rules
             .iter()
             .find_map(|rule| self.assets.iter().find(|a| rule.matches(&a.name)))
+    }
+
+    /// Whether an asset by this exact name is present *and* fully uploaded.
+    pub fn publishes(&self, asset: &str) -> bool {
+        self.assets
+            .iter()
+            .any(|a| a.name.eq_ignore_ascii_case(asset) && a.is_ready())
+    }
+
+    /// Whether the release has any asset still uploading — the signal that CI is
+    /// mid-publish and this tag is worth re-checking shortly rather than acting on.
+    pub fn is_still_publishing(&self) -> bool {
+        self.assets.is_empty() || self.assets.iter().any(|a| !a.is_ready())
     }
 
     /// [`Release::pick`], or an error that says what was wanted and what the
@@ -96,6 +136,18 @@ impl Release {
     /// message this replaces — is true and useless; when an upstream renames its
     /// artifacts the only thing a reader needs is both halves side by side.
     pub fn require(&self, rules: &[AssetRule], what: &str) -> Result<&Asset, String> {
+        if let Some(found) = self.pick(rules) {
+            // Present but still going up. Said plainly, because "try again in a
+            // minute" is genuinely the fix and nothing else the user does helps.
+            if !found.is_ready() {
+                return Err(format!(
+                    "Release {} lists {} for {what}, but it is still uploading. \
+                     Give it a minute and try again.",
+                    self.tag, found.name
+                ));
+            }
+            return Ok(found);
+        }
         self.pick(rules).ok_or_else(|| {
             let wanted = rules
                 .iter()
@@ -220,6 +272,7 @@ fn asset_from_github(a: &serde_json::Value) -> Option<Asset> {
         url: a["browser_download_url"].as_str()?.to_string(),
         size: a["size"].as_u64(),
         digest: a["digest"].as_str().map(str::to_string),
+        state: a["state"].as_str().map(str::to_string),
     })
 }
 
@@ -303,6 +356,7 @@ async fn gitlab_latest(client: &reqwest::Client, project: &str) -> Result<Releas
                 url: l["url"].as_str()?.to_string(),
                 size: None,
                 digest: None,
+                state: None,
             })
         })
         .collect();
@@ -317,6 +371,7 @@ async fn gitlab_latest(client: &reqwest::Client, project: &str) -> Result<Releas
                         url: u.to_string(),
                         size: None,
                         digest: None,
+                        state: None,
                     });
                 }
             }
@@ -414,6 +469,15 @@ mod tests {
             url: format!("https://example.invalid/{name}"),
             size: None,
             digest: None,
+            state: Some("uploaded".into()),
+        }
+    }
+
+    /// An asset GitHub has created a record for but is still receiving.
+    fn uploading(name: &str) -> Asset {
+        Asset {
+            state: Some("starter".into()),
+            ..asset(name)
         }
     }
 
@@ -625,6 +689,93 @@ mod tests {
         for suffix in ["-macos-arm64", "-linux-arm64", "-windows-arm64.exe"] {
             assert!(!suffix.contains("aarch64"), "{suffix} regressed to aarch64");
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // The publish window
+    // ----------------------------------------------------------------------
+
+    fn release_of(assets: Vec<Asset>) -> Release {
+        Release {
+            tag: "v0.6.0".into(),
+            name: "v0.6.0".into(),
+            url: String::new(),
+            body: String::new(),
+            assets,
+        }
+    }
+
+    #[test]
+    fn an_asset_is_ready_only_once_uploaded() {
+        assert!(asset("x.dll").is_ready());
+        assert!(!uploading("x.dll").is_ready());
+        // GitLab reports no state; a listed asset is taken at its word.
+        let mut no_state = asset("x.dll");
+        no_state.state = None;
+        assert!(no_state.is_ready());
+    }
+
+    /// The whole point: a release exists the moment CI creates it, and the
+    /// binaries arrive afterwards. Announcing an update in that window is what
+    /// sends people to the release page to find nothing there.
+    #[test]
+    fn a_release_mid_upload_does_not_publish_its_asset_yet() {
+        let r = release_of(vec![uploading("pmc_bb_log_only.dll")]);
+        assert!(!r.publishes("pmc_bb_log_only.dll"));
+        assert!(r.is_still_publishing());
+    }
+
+    #[test]
+    fn a_release_with_no_assets_is_still_publishing() {
+        assert!(release_of(vec![]).is_still_publishing());
+        assert!(!release_of(vec![]).publishes("anything"));
+    }
+
+    #[test]
+    fn a_fully_uploaded_release_publishes_its_assets() {
+        let r = release_of(vec![asset("pmc_bb_log_only.dll"), asset("pmc_bb_asi_log.dll")]);
+        assert!(r.publishes("pmc_bb_log_only.dll"));
+        assert!(r.publishes("PMC_BB_ASI_LOG.DLL"), "matched case-insensitively");
+        assert!(!r.is_still_publishing());
+        assert!(!r.publishes("pmc_bb_crack_only.dll"), "not in this release");
+    }
+
+    /// A rename must not look like a slow upload. `publishes` is false either
+    /// way, so callers distinguish them by asking whether anything is still in
+    /// flight — otherwise modkit waits forever for a file that is never coming,
+    /// which is how pmc_bb.dll would have pinned everyone silently.
+    #[test]
+    fn a_renamed_asset_is_distinguishable_from_one_still_uploading() {
+        let renamed = release_of(vec![asset("pmc_bb_log_only.dll")]);
+        assert!(!renamed.publishes("pmc_bb.dll"));
+        assert!(
+            !renamed.is_still_publishing(),
+            "everything it has is uploaded — the old name is gone, not late"
+        );
+
+        let late = release_of(vec![uploading("pmc_bb.dll")]);
+        assert!(!late.publishes("pmc_bb.dll"));
+        assert!(late.is_still_publishing(), "this one is worth waiting for");
+    }
+
+    #[test]
+    fn requiring_an_uploading_asset_says_to_wait_rather_than_that_it_is_missing() {
+        let r = release_of(vec![uploading("pmc_bb_log_only.dll")]);
+        let err = r
+            .require(&[AssetRule::Named("pmc_bb_log_only.dll")], "the loader")
+            .unwrap_err();
+        assert!(err.contains("still uploading"), "{err}");
+        assert!(!err.contains("no asset for"), "that would misdiagnose it: {err}");
+    }
+
+    #[test]
+    fn requiring_a_genuinely_absent_asset_still_lists_what_is_there() {
+        let r = release_of(vec![asset("pmc_bb_log_only.dll")]);
+        let err = r
+            .require(&[AssetRule::Named("pmc_bb.dll")], "the loader")
+            .unwrap_err();
+        assert!(err.contains("no asset for"), "{err}");
+        assert!(err.contains("pmc_bb_log_only.dll"), "{err}");
     }
 
     #[test]

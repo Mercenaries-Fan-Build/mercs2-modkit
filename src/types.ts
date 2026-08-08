@@ -791,6 +791,12 @@ export interface ReleaseInfo {
   name: string;
   url: string;
   body: string;
+  /**
+   * The release has finished publishing its downloads. False while CI is still
+   * uploading — the tag goes new before anything is downloadable from it, so an
+   * update announced on `false` here points at an empty release page.
+   */
+  assets_ready: boolean;
 }
 
 export interface ModkitUpdate {
@@ -870,7 +876,14 @@ export interface ToolsetStatus {
   installed_tag: string | null;
   /** Null when the lookup was skipped or failed (offline). */
   latest_tag: string | null;
+  /**
+   * A newer release exists AND its binaries for this machine have finished
+   * uploading. Not just "the tag differs": a release is published before its
+   * assets land, and announcing one then points people at nothing.
+   */
   update_available: boolean;
+  /** Why a newer tag isn't offered yet, when there is one. */
+  pending_reason: string | null;
   /**
    * Directory "Open folder" opens — the version directory once something is
    * installed, otherwise the toolset root. Always a real, existing directory.
@@ -980,7 +993,19 @@ export interface ComponentStatus {
   features: string[];
   /** Latest published tag; null when the lookup was skipped or failed. */
   latestTag: string | null;
+  /**
+   * A newer release exists AND the file this install would download is actually
+   * on it. Never true while a release is still uploading its binaries — a tag
+   * exists the moment CI creates it, and announcing an update in that window
+   * sends people to a release page with nothing on it.
+   */
   updateAvailable: boolean;
+  /**
+   * Why a newer tag isn't being offered, when there is one. Two distinct cases:
+   * the release is still uploading (resolves itself), or it no longer publishes
+   * the asset this install uses (never will — needs a different build).
+   */
+  pendingReason: string | null;
   /** Every recorded file is still on disk. */
   present: boolean;
   /** Still there, but no longer the bytes modkit wrote — replaced by hand. */
