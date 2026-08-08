@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod place;
 pub mod pmc_bb;
 pub mod status;
+pub mod trash;
 
 pub use ledger::{Component, InstalledFile, Ledger};
 pub use place::{place, snapshot, PlaceOpts, Placed, Verifier};

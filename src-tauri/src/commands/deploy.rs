@@ -2,7 +2,6 @@
 //! and remove (trash) deployed files back out of it.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -108,13 +107,6 @@ pub struct TrashResult {
     pub trash_dir: Option<String>,
 }
 
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 /// Force-remove deployed plugin files. By default each file is **moved to the
 /// recoverable trash dir** (timestamped, so re-removing the same name never
 /// clobbers a prior copy); with `permanent` it is deleted outright. Operates on
@@ -127,7 +119,7 @@ pub fn trash_paths(paths: Vec<String>, permanent: bool) -> Result<TrashResult, S
     let mut trashed = Vec::new();
     let mut missing = Vec::new();
 
-    for (i, p) in paths.iter().enumerate() {
+    for p in paths.iter() {
         let src = Path::new(p);
         let name = src
             .file_name()
@@ -142,14 +134,7 @@ pub fn trash_paths(paths: Vec<String>, permanent: bool) -> Result<TrashResult, S
 
         match &dir {
             Some(d) => {
-                let dest = d.join(format!("{}-{}-{}", now_millis(), i, name));
-                // Prefer an atomic rename; fall back to copy+remove across volumes.
-                if std::fs::rename(src, &dest).is_err() {
-                    std::fs::copy(src, &dest)
-                        .map_err(|e| format!("Failed to move {name} to trash: {e}"))?;
-                    std::fs::remove_file(src)
-                        .map_err(|e| format!("Failed to remove {name}: {e}"))?;
-                }
+                crate::commands::managed::trash::discard(src, Some(d))?;
             }
             None => {
                 std::fs::remove_file(src)

@@ -258,26 +258,10 @@ impl PlacementStore {
     }
 
     /// Move one file into the recoverable trash, timestamped so re-removing a name never clobbers
-    /// an earlier copy. Same treatment [`super::deploy::trash_paths`] gives a plugin.
+    /// an earlier copy. Same treatment [`super::deploy::trash_paths`] gives a plugin — literally
+    /// the same code now, in [`crate::commands::managed::trash`].
     fn trash(&self, src: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(&self.trash)
-            .map_err(|e| format!("creating {}: {e}", self.trash.display()))?;
-        let name = src
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dest = self.trash.join(format!("{stamp}-{name}"));
-        if std::fs::rename(src, &dest).is_ok() {
-            return Ok(());
-        }
-        // Across volumes `rename` fails; copy then remove.
-        std::fs::copy(src, &dest).map_err(|e| format!("moving {name} to the trash: {e}"))?;
-        std::fs::remove_file(src).map_err(|e| format!("removing {name}: {e}"))
+        crate::commands::managed::trash::discard(src, Some(&self.trash)).map(|_| ())
     }
 
     /// Take previously-placed files back out of the game folder.

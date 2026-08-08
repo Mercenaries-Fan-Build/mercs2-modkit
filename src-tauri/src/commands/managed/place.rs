@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::commands::paths::trash_dir;
 
 /// What [`place`] did, for the ledger and for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,31 +128,11 @@ pub fn sha256_of_file(path: &Path) -> Result<String, String> {
 
 /// Move `src` into `into` (default: the recoverable trash), content-addressed.
 ///
-/// Keyed by digest rather than by timestamp, so re-installing the same artifact
-/// twice does not pile up identical copies — and, more importantly, so the
-/// original's bytes stay banked under their own name no matter how many times an
-/// install runs. Falls back to copy+remove when `rename` fails across volumes.
+/// See [`super::trash::bank`] — the digest keying is what keeps the *original*
+/// recoverable after the tenth reinstall instead of burying it under nine
+/// identical intermediates.
 pub fn snapshot(src: &Path, into: Option<&Path>) -> Result<PathBuf, String> {
-    let dir = match into {
-        Some(d) => d.to_path_buf(),
-        None => trash_dir()?,
-    };
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-
-    let hash = sha256_of_file(src)?;
-    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let dest = dir.join(format!("{}-{name}", &hash[..16.min(hash.len())]));
-
-    if dest.exists() {
-        // Same bytes already banked. Nothing to do but report where they are.
-        return Ok(dest);
-    }
-    if std::fs::rename(src, &dest).is_ok() {
-        return Ok(dest);
-    }
-    std::fs::copy(src, &dest).map_err(|e| format!("Could not snapshot {name}: {e}"))?;
-    std::fs::remove_file(src).map_err(|e| format!("Could not remove {name}: {e}"))?;
-    Ok(dest)
+    super::trash::bank(src, into)
 }
 
 /// Write `bytes` to `dest`, atomically, snapshotting whatever was there.

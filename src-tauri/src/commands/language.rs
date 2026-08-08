@@ -13,7 +13,6 @@
 //! a language the install never shipped.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -237,27 +236,14 @@ pub fn set_language(game_root: String, language: String) -> Result<SetLanguageRe
     })
 }
 
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-/// Move `src` into the trash dir under a timestamped name (so re-runs never
-/// clobber a prior copy). Falls back to copy+remove across volumes.
-fn move_to_trash(src: &Path, trash: &Path, seq: usize) -> Result<(), String> {
-    let name = src
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
-    let dest = trash.join(format!("{}-{}-{}", now_millis(), seq, name));
-    if std::fs::rename(src, &dest).is_err() {
-        std::fs::copy(src, &dest)
-            .map_err(|e| format!("Failed to move {name} to trash: {e}"))?;
-        std::fs::remove_file(src).map_err(|e| format!("Failed to remove {name}: {e}"))?;
-    }
-    Ok(())
+/// Move `src` into the trash dir under a timestamped name.
+///
+/// Timestamped rather than content-addressed on purpose: a language pack is a
+/// `.wad` plus a VO stream, and hashing hundreds of megabytes on the way to the
+/// trash would buy only a dedupe nobody needs here — the user drops each language
+/// once. See [`crate::commands::managed::trash`].
+fn move_to_trash(src: &Path, trash: &Path, _seq: usize) -> Result<(), String> {
+    crate::commands::managed::trash::discard(src, Some(trash)).map(|_| ())
 }
 
 #[cfg(test)]
