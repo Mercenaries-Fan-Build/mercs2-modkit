@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::commands::net;
 use crate::commands::paths::{downloading_dir, staging_dir};
 use crate::commands::registry::CatalogMod;
 
@@ -27,11 +28,6 @@ pub struct InstallResult {
     pub staged_files: usize,
 }
 
-enum Host {
-    GitHub,
-    GitLab,
-}
-
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -47,122 +43,25 @@ fn slugify(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Parse a repo URL into its host and project path (`owner/repo`, or a
-/// GitLab group path). Handles `https://`, `git@…:`, and trailing `.git`.
-fn parse_repo(url: &str) -> Result<(Host, String), String> {
-    let s = url.trim().trim_end_matches('/');
-    let s = s.strip_suffix(".git").unwrap_or(s);
-
-    for (host, token) in [(Host::GitHub, "github.com"), (Host::GitLab, "gitlab.com")] {
-        if let Some(idx) = s.find(token) {
-            let path = s[idx + token.len()..]
-                .trim_start_matches([':', '/'])
-                .to_string();
-            if path.is_empty() {
-                return Err(format!("No project path in repository URL: {url}"));
-            }
-            return Ok((host, path));
-        }
-    }
-    Err(format!("Unsupported repository host (need github.com or gitlab.com): {url}"))
-}
-
 /// GET a release artifact and return its bytes.
 ///
 /// Shared with [`super::mercsink`], which downloads from the same place: mercs.ink never
 /// re-hosts artifacts, so a registry install ends up pulling a GitHub release asset exactly as
 /// a catalog install does. Deliberately sends **no** `Authorization` header — these are public
-/// downloads on a third-party host.
+/// downloads on a third-party host, which [`net::download`] guarantees for every caller.
 pub(crate) async fn download_bytes(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<Vec<u8>, String> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    Ok(resp.bytes().await.map_err(|e| e.to_string())?.to_vec())
-}
-
-/// `(tag, [(asset_name, download_url)])` for the latest GitHub release.
-async fn github_artifacts(
-    client: &reqwest::Client,
-    owner_repo: &str,
-) -> Result<(String, Vec<(String, String)>), String> {
-    let api = format!("https://api.github.com/repos/{owner_repo}/releases/latest");
-    let v: serde_json::Value = client
-        .get(&api)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| format!("GitHub release lookup failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let tag = v["tag_name"].as_str().unwrap_or("latest").to_string();
-    let mut assets = Vec::new();
-    for a in v["assets"].as_array().into_iter().flatten() {
-        if let (Some(n), Some(u)) = (a["name"].as_str(), a["browser_download_url"].as_str()) {
-            assets.push((n.to_string(), u.to_string()));
-        }
-    }
-    Ok((tag, assets))
-}
-
-/// `(tag, [(asset_name, download_url)])` for the latest GitLab release.
-async fn gitlab_artifacts(
-    client: &reqwest::Client,
-    project_path: &str,
-) -> Result<(String, Vec<(String, String)>), String> {
-    let enc = project_path.replace('/', "%2F");
-    let api = format!("https://gitlab.com/api/v4/projects/{enc}/releases");
-    let v: serde_json::Value = client
-        .get(&api)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| format!("GitLab release lookup failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let rel = v
-        .as_array()
-        .and_then(|a| a.first())
-        .ok_or("GitLab project has no releases")?;
-    let tag = rel["tag_name"].as_str().unwrap_or("latest").to_string();
-
-    let mut assets = Vec::new();
-    for l in rel["assets"]["links"].as_array().into_iter().flatten() {
-        if let (Some(n), Some(u)) = (l["name"].as_str(), l["url"].as_str()) {
-            assets.push((n.to_string(), u.to_string()));
-        }
-    }
-    // Fall back to the auto-generated source zip if no custom links exist.
-    if assets.is_empty() {
-        for s in rel["assets"]["sources"].as_array().into_iter().flatten() {
-            if s["format"].as_str() == Some("zip") {
-                if let Some(u) = s["url"].as_str() {
-                    assets.push(("source.zip".to_string(), u.to_string()));
-                }
-            }
-        }
-    }
-    Ok((tag, assets))
+    net::download(client, url, net::DownloadOpts::new("mod", "the mod artifact")).await
 }
 
 /// Unpack a downloaded archive into the staging directory. Shared with [`super::mercsink`] so
-/// both installers lay a mod out on disk the same way.
+/// both installers lay a mod out on disk the same way — including the traversal guard, which
+/// matters most here: this is the one path that unpacks an archive from an arbitrary GitHub or
+/// GitLab project the user pointed modkit at.
 pub(crate) fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
-    let f = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("Bad zip archive: {e}"))?;
-    z.extract(dest).map_err(|e| format!("Failed to extract archive: {e}"))
+    net::archive::extract_zip(archive, dest)
 }
 
 /// Find the directory containing `manifest.json` (at the stage root or one
@@ -295,17 +194,16 @@ pub async fn install_catalog_mod(item: CatalogMod) -> Result<InstallResult, Stri
     // Stage per (repo, mod) so two mods from one repo — or same-named mods from
     // different repos — never collide.
     let id = slugify(&format!("{}-{}", item.repo_name, item.slug));
-    let (host, path) = parse_repo(&item.repository)?;
+    let (host, path) = net::release::parse_repo(&item.repository)?;
 
-    let client = reqwest::Client::builder()
-        .user_agent("mercs2-modkit")
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let (tag, all_assets) = match host {
-        Host::GitHub => github_artifacts(&client, &path).await?,
-        Host::GitLab => gitlab_artifacts(&client, &path).await?,
-    };
+    let client = net::client()?;
+    let release = net::latest_release(&client, host, &path).await?;
+    let tag = release.tag.clone();
+    let all_assets: Vec<(String, String)> = release
+        .assets
+        .iter()
+        .map(|a| (a.name.clone(), a.url.clone()))
+        .collect();
     if all_assets.is_empty() {
         return Err(format!(
             "The latest release of {} has no downloadable artifacts",

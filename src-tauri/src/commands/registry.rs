@@ -305,10 +305,7 @@ pub fn save_custom_sources(sources: Vec<RepoSource>) -> Result<(), String> {
 /// dedupe the mods themselves by `(repository, slug)`.
 #[tauri::command]
 pub async fn fetch_catalog() -> Catalog {
-    let client = match reqwest::Client::builder()
-        .user_agent("mercs2-modkit")
-        .build()
-    {
+    let client = match crate::commands::net::client() {
         Ok(c) => c,
         Err(_) => {
             return Catalog {

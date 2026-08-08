@@ -141,33 +141,35 @@ async fn install_windows() -> Result<InstallVcRedistResult, String> {
         });
     }
 
-    // Download from Microsoft over HTTPS.
-    let client = reqwest::Client::builder()
-        .user_agent("mercs2-modkit")
-        .build()
-        .map_err(|e| e.to_string())?;
-    let bytes = client
-        .get(VCREDIST_2008_SP1_X86_URL)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download the VC++ 2008 redistributable: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Microsoft download returned an error: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
+    // Download from Microsoft over HTTPS, through the shared client.
+    let client = crate::commands::net::client()?;
+    let bytes = crate::commands::net::download(
+        &client,
+        VCREDIST_2008_SP1_X86_URL,
+        crate::commands::net::DownloadOpts::new("vcredist", "the VC++ 2008 redistributable"),
+    )
+    .await?;
 
-    let dir = crate::commands::paths::app_data_dir()?.join("bin");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let exe = dir.join("vcredist_2008sp1_x86.exe");
-    std::fs::write(&exe, &bytes)
-        .map_err(|e| format!("Failed to save the downloaded installer: {e}"))?;
-
-    // Refuse to run anything that isn't a valid, Microsoft-signed binary.
-    verify_microsoft_signature(&exe)?;
+    // The signature check now runs *before* the file reaches its final path, not
+    // after — `place` verifies the staged copy and only then renames it in. So
+    // there is never a moment where an unverified binary sits at the name the
+    // elevated launch below reads.
+    let exe = crate::commands::paths::app_data_dir()?
+        .join("bin")
+        .join("vcredist_2008sp1_x86.exe");
+    let placed = crate::commands::managed::place(
+        &exe,
+        &bytes,
+        crate::commands::managed::PlaceOpts::default()
+            .executable()
+            .at_least(1024 * 1024)
+            .verified_by(crate::commands::managed::Verifier::Authenticode {
+                organization: "Microsoft Corporation",
+            }),
+    )?;
 
     // Run elevated (UAC shows the Microsoft publisher) and wait for it.
-    run_installer_elevated(&exe)?;
+    run_installer_elevated(std::path::Path::new(&placed.abs_path))?;
 
     if vc90_crt_assembly_dir().is_some() {
         Ok(InstallVcRedistResult {
@@ -182,27 +184,11 @@ async fn install_windows() -> Result<InstallVcRedistResult, String> {
     }
 }
 
-/// Verify `path` carries a valid Authenticode signature issued to Microsoft,
-/// via PowerShell's `Get-AuthenticodeSignature`. The path is passed through an
-/// env var to sidestep all command-line quoting concerns.
-#[cfg(target_os = "windows")]
-fn verify_microsoft_signature(path: &Path) -> Result<(), String> {
-    const SCRIPT: &str = "$ErrorActionPreference='Stop'; \
-         $s = Get-AuthenticodeSignature -FilePath $env:VCREDIST_PATH; \
-         if ($s.Status -ne 'Valid') { Write-Error \"signature status is $($s.Status)\"; exit 2 }; \
-         if ($s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { \
-            Write-Error \"unexpected signer $($s.SignerCertificate.Subject)\"; exit 3 }";
-
-    let out = powershell(SCRIPT, path)?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Refusing to run the download — could not confirm it is Microsoft-signed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
-}
+// The Authenticode check that used to live here is now
+// `managed::place::Verifier::Authenticode`, applied to the staged copy before it
+// is renamed into place — so an unverified binary never occupies the path the
+// elevated launch below reads. It is also available to every other download now,
+// rather than to this one alone.
 
 /// Launch the installer elevated and silently, waiting for completion. The UAC
 /// prompt that `-Verb RunAs` raises shows the verified Microsoft publisher.

@@ -459,11 +459,11 @@ async fn fetch(client: &reqwest::Client, url: &str, cache_file: &Path) -> Result
     }
 }
 
+/// The shared client. The conditional-request bookkeeping above stays here
+/// because it is mercs.ink's spec, not a general HTTP concern — but the transport
+/// underneath it (user agent, timeouts, connection pool) is everyone's.
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .user_agent(concat!("mercs2-modkit/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("Could not build an HTTP client: {e}"))
+    crate::commands::net::client()
 }
 
 // ---------------------------------------------------------------------------------------

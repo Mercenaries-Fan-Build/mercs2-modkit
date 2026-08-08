@@ -50,8 +50,15 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Window};
 
+use super::managed::{place, PlaceOpts};
+use super::net;
+
 /// GitHub repo whose releases publish the toolset.
 const REPO: &str = "Mercenaries-Fan-Build/mercs2-wad-simulator";
+
+/// A toolset binary smaller than this is not a build — a forge error page served
+/// with a 200, or a truncated transfer.
+const MIN_TOOL_SIZE: u64 = 64 * 1024;
 
 /// Name of the sidecar recording which release is installed.
 const STATE_FILE: &str = "installed.json";
@@ -291,32 +298,21 @@ fn tool(name: &str) -> Option<&'static Tool> {
 /// The release-asset suffix for the host, matching the `suffix:` values in the
 /// toolset's release workflow.
 ///
+/// One definition, in [`super::net::release`], shared with the other repos modkit
+/// downloads from. It had drifted: this module spelled ARM `arm64` (correct, and
+/// what every release publishes) while `setup.rs` spelled it `aarch64`, so an
+/// exact-match rule there could never fire on an ARM host. A cross-module test
+/// existed to catch exactly that, and now guards one definition instead of two.
+///
 /// The old validator hardcoded `-macos-x86_64`, so every Apple Silicon user ran
 /// the Intel build under Rosetta and the published `-macos-arm64` asset was never
-/// once downloaded. Arch is read here, not assumed.
+/// once downloaded. Arch is read, not assumed.
 ///
-/// Covers all three desktop OSes on both 64-bit arches, plus the two legacy
-/// 32-bit x86 rows. Every entry here must have a matching `suffix:` row in the
-/// toolset's release matrix — a suffix with no publisher makes every tool report
-/// "no build for this machine", which is the arm64-Linux behaviour this replaced.
-///
-/// `pub(crate)` so [`super::setup`] can assert its own arch spelling against this
-/// one; the two modules download from different repos but must agree on how an
-/// arch is named in an asset.
-pub(crate) fn platform_suffix() -> Option<&'static str> {
-    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => "-windows-x86_64.exe",
-        ("windows", "x86") => "-windows-i686.exe",
-        ("windows", "aarch64") => "-windows-arm64.exe",
-        ("macos", "aarch64") => "-macos-arm64",
-        ("macos", "x86_64") => "-macos-x86_64",
-        ("linux", "x86_64") => "-linux-x86_64",
-        ("linux", "aarch64") => "-linux-arm64",
-        ("linux", "x86") => "-linux-i686",
-        // Anything else (BSD, riscv, 32-bit ARM) degrades to "unavailable" per
-        // tool rather than erroring — the page still renders and says why.
-        _ => return None,
-    })
+/// `None` on a host no release builds for (BSD, riscv, 32-bit ARM), which degrades
+/// to "unavailable" per tool rather than erroring — the page still renders and
+/// says why.
+fn platform_suffix() -> Option<String> {
+    super::net::release::platform_suffix()
 }
 
 /// True when the host is 64-bit, i.e. the engine-backed apps have an asset.
@@ -490,42 +486,22 @@ struct ProgressEvent {
 // GitHub
 // ----------------------------------------------------------------------------
 
-fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .user_agent("mercs2-modkit")
-        .build()
-        .map_err(|e| format!("HTTP client: {e}"))
-}
-
-/// `(tag, {asset_name: download_url})` for the toolset's latest release.
+/// `(tag, {asset_name: asset})` for the toolset's latest release.
+///
+/// Kept as a map rather than using [`Release::pick`]: this is the one caller that
+/// wants *every* asset at once, because a single release supplies eleven binaries
+/// plus their data bundles and the whole point is that checking the toolset costs
+/// one API call rather than eleven.
 async fn latest_toolset(
     client: &reqwest::Client,
-) -> Result<(String, BTreeMap<String, String>), String> {
-    let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let v: serde_json::Value = client
-        .get(&api)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to query the toolset release: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Toolset release lookup failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse the release JSON: {e}"))?;
-
-    let tag = v["tag_name"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or("The toolset repo has no published releases")?
-        .to_string();
-
-    let mut assets = BTreeMap::new();
-    for a in v["assets"].as_array().into_iter().flatten() {
-        if let (Some(n), Some(u)) = (a["name"].as_str(), a["browser_download_url"].as_str()) {
-            assets.insert(n.to_string(), u.to_string());
-        }
-    }
-    Ok((tag, assets))
+) -> Result<(String, BTreeMap<String, net::Asset>), String> {
+    let release = net::latest_release(client, net::ReleaseHost::GitHub, REPO).await?;
+    let assets = release
+        .assets
+        .into_iter()
+        .map(|a| (a.name.clone(), a))
+        .collect();
+    Ok((release.tag, assets))
 }
 
 // ----------------------------------------------------------------------------
@@ -599,7 +575,7 @@ pub async fn toolset_status(check_remote: bool) -> Result<ToolsetStatus, String>
     let state = read_state(&root);
 
     let latest = if check_remote {
-        match client() {
+        match net::client() {
             Ok(c) => latest_toolset(&c).await.ok().map(|(tag, _)| tag),
             Err(_) => None,
         }
@@ -622,8 +598,9 @@ pub async fn toolset_status(check_remote: bool) -> Result<ToolsetStatus, String>
 /// bundles are left alone — a version dir only ever holds one release, so if the
 /// directory is there it came from this same tag.
 async fn install_companion(
+    window: &Window,
     client: &reqwest::Client,
-    assets: &BTreeMap<String, String>,
+    assets: &BTreeMap<String, net::Asset>,
     version_dir: &Path,
     t: &Tool,
     companion: &Companion,
@@ -633,38 +610,28 @@ async fn install_companion(
         return Ok(());
     }
 
-    let url = assets.get(companion.asset).ok_or_else(|| {
+    let asset = assets.get(companion.asset).ok_or_else(|| {
         format!(
             "Release publishes no '{}' — {} needs it to find its reference data.",
             companion.asset, t.label
         )
     })?;
 
-    let bytes = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Download of the {} data bundle failed: {e}", t.label))?
-        .error_for_status()
-        .map_err(|e| format!("Download of the {} data bundle failed: {e}", t.label))?
-        .bytes()
-        .await
-        .map_err(|e| format!("Reading the {} data bundle failed: {e}", t.label))?;
+    let label = format!("{} data bundle", t.label);
+    let bytes = net::download(
+        client,
+        &asset.url,
+        net::DownloadOpts::new(&format!("toolset:{}", companion.asset), &label)
+            .with_window(Some(window)),
+    )
+    .await?;
 
-    // Stage the archive next to its output and drop it once unpacked; the bundle
-    // is tens of MB and there is no reason to keep the compressed copy around.
-    let archive = version_dir.join(companion.asset);
-    std::fs::write(&archive, &bytes)
-        .map_err(|e| format!("Failed to save the {} data bundle: {e}", t.label))?;
-
-    let result = (|| -> Result<(), String> {
-        let f = std::fs::File::open(&archive).map_err(|e| e.to_string())?;
-        let mut z = zip::ZipArchive::new(f).map_err(|e| format!("Bad data bundle: {e}"))?;
-        z.extract(version_dir)
-            .map_err(|e| format!("Failed to unpack the {} data bundle: {e}", t.label))
-    })();
-    let _ = std::fs::remove_file(&archive);
-    result?;
+    // Unpacked straight from memory: staging the archive beside its own output
+    // only to delete it again bought nothing, and the guarded extractor rejects
+    // an entry that would escape `version_dir` — which the bare `z.extract` here
+    // did not.
+    net::archive::extract_bytes(bytes, version_dir)
+        .map_err(|e| format!("Failed to unpack the {} data bundle: {e}", t.label))?;
 
     if !unpacked.is_dir() {
         return Err(format!(
@@ -691,7 +658,7 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
     let root = toolset_root()?;
     let state = read_state(&root);
 
-    let client = client()?;
+    let client = net::client()?;
     let (tag, assets) = latest_toolset(&client).await?;
 
     // Union of "asked for" and "already installed", minus anything this host has
@@ -735,44 +702,40 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
             continue;
         }
 
-        let url = assets.get(&asset).ok_or_else(|| {
+        let remote = assets.get(&asset).ok_or_else(|| {
             format!("Release {tag} publishes no asset named '{asset}' — the toolset's release matrix may have changed.")
         })?;
 
-        let bytes = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("Download of {} failed: {e}", t.label))?
-            .error_for_status()
-            .map_err(|e| format!("Download of {} failed: {e}", t.label))?
-            .bytes()
-            .await
-            .map_err(|e| format!("Reading {} failed: {e}", t.label))?;
+        let bytes = net::download(
+            &client,
+            &remote.url,
+            net::DownloadOpts::new(&format!("toolset:{}", t.name), t.label)
+                .with_window(Some(&window)),
+        )
+        .await?;
 
-        // Land it under a temp name and rename into place, so an interrupted
-        // download can never be mistaken for an installed tool.
-        let part = dir.join(format!("{local}.part"));
-        std::fs::write(&part, &bytes).map_err(|e| format!("Failed to save {}: {e}", t.label))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&part)
-                .map_err(|e| e.to_string())?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&part, perms).map_err(|e| e.to_string())?;
-        }
-
-        std::fs::rename(&part, &dest).map_err(|e| format!("Failed to install {}: {e}", t.label))?;
+        // Staged and renamed into place, so an interrupted download can never be
+        // mistaken for an installed tool — the same guarantee this module always
+        // had, now with the digest check and the size floor that come with it.
+        place(
+            &dest,
+            &bytes,
+            PlaceOpts::default()
+                .executable()
+                .expecting(remote.sha256())
+                .at_least(MIN_TOOL_SIZE)
+                // A version dir only ever holds one release, so there is never an
+                // incumbent to displace and a `.bak` here would be noise.
+                .keeping_no_bak(),
+        )
+        .map_err(|e| format!("Failed to install {}: {e}", t.label))?;
         installed.insert(t.name.to_string(), local);
 
         // The bundle unpacks BESIDE the binary, which is where the tool looks for
         // it. Fetched after the exe so a failure here cannot leave a recorded
         // install pointing at a half-made directory.
         if let Some(c) = &t.companion {
-            install_companion(&client, &assets, &dir, t, c).await?;
+            install_companion(&window, &client, &assets, &dir, t, c).await?;
         }
     }
 
@@ -1527,7 +1490,7 @@ mod tests {
             .iter()
             .find(|(os, arch, _)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH);
         if let Some((_, _, suffix)) = here {
-            assert_eq!(platform_suffix(), Some(*suffix));
+            assert_eq!(platform_suffix().as_deref(), Some(*suffix));
         }
         // Suffixes are distinct — two hosts sharing one would fetch each other's
         // binaries.

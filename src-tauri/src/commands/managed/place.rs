@@ -107,6 +107,14 @@ impl PlaceOpts {
         self.backup_dir = Some(dir.to_path_buf());
         self
     }
+
+    /// Skip the `<name>.bak` sibling. For destinations where nothing is ever
+    /// displaced (a fresh version directory) or where a second copy beside the
+    /// original would invite launching the wrong one.
+    pub fn keeping_no_bak(mut self) -> Self {
+        self.keep_bak_sibling = false;
+        self
+    }
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -291,7 +299,7 @@ fn verify(path: &Path, v: &Verifier) -> Result<(), String> {
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            &script,
+            script.as_str(),
         ])
         .env("MODKIT_VERIFY_PATH", path)
         .no_window()
