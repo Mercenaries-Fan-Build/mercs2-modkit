@@ -26,3 +26,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local tooling state (vector index, agent scratch) — machine-specific, tens of
+# thousands of files. Not the project.
+/.crucible/
