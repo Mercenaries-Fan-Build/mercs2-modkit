@@ -939,6 +939,27 @@ export interface InstallDllResult {
   overridden: boolean;
 }
 
+/** Result of installing the shared m2 SDK runtime (`m2-sdk.dll`) into the game root. */
+export interface InstallM2SdkResult {
+  path: string;
+  version: string;
+}
+
+/** One managed dependency after an auto-on-deploy resolution pass. */
+export interface ResolvedDependency {
+  name: string;
+  versionReq: string;
+  /** Release tag installed, or null when the dependency was skipped (see `note`). */
+  installedTag: string | null;
+  /** Why it was skipped, when it was. */
+  note: string | null;
+}
+
+/** Result of resolving a Shipment's managed `load.requires` on deploy. */
+export interface ResolveDepsResult {
+  resolved: ResolvedDependency[];
+}
+
 /**
  * Install state for one artifact modkit manages, from the backend ledger.
  *
@@ -1054,12 +1075,31 @@ export interface LanguagePresence {
   pwsSize: number;
 }
 
+/** A NOVEL language installed as `data/<name>.wad` — one the base game never shipped. */
+export interface AddedLanguage {
+  name: string; // the WAD basename / language token (e.g. "polski")
+  display: string; // friendlier label (title-cased)
+  wadName: string;
+  wadSize: number;
+  active: boolean; // the selector is enabled AND names this language
+}
+
+/** State of the `mercs2_language` selector plugin that switches into an added language. */
+export interface SelectorStatus {
+  pluginInstalled: boolean;
+  enabled: boolean;
+  active: string | null; // the name the config selects, enabled or not
+  dryRun: boolean;
+}
+
 /** Which languages the install currently carries. */
 export interface LanguageStatus {
   dataDir: string | null;
   audioDir: string | null;
   languages: LanguagePresence[];
   presentCount: number;
+  added: AddedLanguage[];
+  selector: SelectorStatus;
 }
 
 /** Result of keeping one language and trashing the others. */
@@ -1068,6 +1108,13 @@ export interface SetLanguageResult {
   removed: string[]; // basenames moved to the recoverable trash
   freedBytes: number;
   trashDir: string | null;
+}
+
+/** Result of selecting or clearing an added language. */
+export interface SetAddedLanguageResult {
+  name: string | null; // the language now selected, or null when cleared
+  iniPath: string;
+  enabled: boolean;
 }
 
 /** A vanilla file that exists but no longer matches its manifest fingerprint. */
