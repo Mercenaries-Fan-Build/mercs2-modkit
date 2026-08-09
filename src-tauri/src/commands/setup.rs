@@ -174,19 +174,20 @@ pub struct InstallM2SdkResult {
     pub version: String,
 }
 
-/// Download `m2-sdk.dll` from the SDK release and place it in the game ROOT.
+/// Download `m2-sdk.dll` at the highest release satisfying `version_req`, and place it in the game
+/// ROOT.
 ///
-/// `m2-sdk.dll` is the shared SDK runtime every SDK-based mod links against. It is managed rather
-/// than shipped (see [`super::managed::m2_sdk`]), and it lands in the game root — not `scripts/` —
-/// because pmc_bb's loader resolves a plugin's imports from the exe's directory. A copy in `scripts/`
-/// beside the `.asi` is invisible to it, and is the `0x7E` ERROR_MOD_NOT_FOUND load failure.
-#[tauri::command]
-pub async fn install_m2_sdk(
+/// Internal to auto-on-deploy: the SDK is developer infrastructure — a shared library every
+/// SDK-based plugin links against — installed only as a resolved dependency (see
+/// [`resolve_shipment_dependencies`]), never as a user action. It is managed rather than shipped
+/// (see [`super::managed::m2_sdk`]), and it lands in the game root — not `scripts/` — because
+/// pmc_bb's loader resolves a plugin's imports from the exe's directory. A copy in `scripts/` beside
+/// the `.asi` is invisible to it, and is the `0x7E` ERROR_MOD_NOT_FOUND load failure.
+pub(crate) async fn install_m2_sdk(
     window: Window,
     game_root: String,
-    // A semver range from the requiring Shipment's `load.requires` (`"^0.1"`). `None` installs the
-    // latest release — a manual "just give me the SDK" install with no Shipment context.
-    version_req: Option<String>,
+    // The semver range from the requiring Shipment's `load.requires` (e.g. `"^0.1"`).
+    version_req: String,
 ) -> Result<InstallM2SdkResult, String> {
     let root = PathBuf::from(&game_root);
     if !root.is_dir() {
@@ -194,28 +195,21 @@ pub async fn install_m2_sdk(
     }
 
     let client = net::client()?;
-    // With a range, RESOLVE it (the highest release that satisfies it) so a Shipment gets the SDK
-    // its `load.requires` declared — one shared, updatable copy. Without one, this is a manual
-    // install and takes the latest. Either path is the same managed component, ledger-recorded below.
-    let release = match version_req.as_deref() {
-        Some(range) => {
-            let req = semver::VersionReq::parse(range).map_err(|e| {
-                format!("m2-sdk requirement {range:?} is not a valid semver range: {e}")
-            })?;
-            let releases = net::list_releases(&client, ReleaseHost::GitHub, m2_sdk::REPO).await?;
-            net::highest_satisfying(&releases, &req).cloned().ok_or_else(|| {
-                format!(
-                    "no published m2-sdk release satisfies {range:?} — available: {}",
-                    releases
-                        .iter()
-                        .map(|r| r.tag.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?
-        }
-        None => net::latest_release(&client, ReleaseHost::GitHub, m2_sdk::REPO).await?,
-    };
+    // Resolve the range to the highest release that satisfies it, so a Shipment gets the SDK its
+    // `load.requires` declared — one shared, updatable copy, ledger-recorded below.
+    let req = semver::VersionReq::parse(&version_req)
+        .map_err(|e| format!("m2-sdk requirement {version_req:?} is not a valid semver range: {e}"))?;
+    let releases = net::list_releases(&client, ReleaseHost::GitHub, m2_sdk::REPO).await?;
+    let release = net::highest_satisfying(&releases, &req).cloned().ok_or_else(|| {
+        format!(
+            "no published m2-sdk release satisfies {version_req:?} — available: {}",
+            releases
+                .iter()
+                .map(|r| r.tag.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
     let asset = release.require(
         &[AssetRule::Named(m2_sdk::ASSET)],
         "the m2-sdk runtime (m2-sdk.dll)",
@@ -307,8 +301,7 @@ pub async fn resolve_shipment_dependencies(
         match managed_component_repo(&name) {
             Some(repo) if repo == m2_sdk::REPO => {
                 let installed =
-                    install_m2_sdk(window.clone(), game_root.clone(), Some(version_req.clone()))
-                        .await?;
+                    install_m2_sdk(window.clone(), game_root.clone(), version_req.clone()).await?;
                 resolved.push(ResolvedDependency {
                     name,
                     version_req,
