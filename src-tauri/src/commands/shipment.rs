@@ -148,7 +148,7 @@ const MANIFEST_NAMES: [&str; 4] = [
 
 /// The manifest file `qm` would read in `dir`, if any — the first name that exists, in qm's own
 /// lookup order.
-fn manifest_path(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn manifest_path(dir: &Path) -> Option<PathBuf> {
     MANIFEST_NAMES
         .iter()
         .map(|n| dir.join(n))
@@ -176,6 +176,8 @@ pub fn has_manifest(dir: &Path) -> bool {
 struct ManifestHead {
     #[serde(default)]
     shipment: ShipmentHead,
+    #[serde(default)]
+    load: LoadHead,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -186,6 +188,25 @@ struct ShipmentHead {
     version: Option<String>,
 }
 
+/// Just enough of `load:` to see a Shipment's managed dependencies. Same discipline as the head:
+/// qm owns the schema, so everything else is ignored and a missing `load` reads as "no deps".
+#[derive(Debug, Default, Deserialize)]
+struct LoadHead {
+    #[serde(default)]
+    requires: Vec<RequireHead>,
+}
+
+/// One `load.requires` entry, in qm's untagged spelling. Only the MANAGED form (`{name,version}`)
+/// is captured — a bare-string Shipment dep or an `{url,sha256}` External is a different kind of
+/// reference modkit does not resolve here, so it deserializes into `Ignored` and is dropped. The
+/// `Ignored` arm is what keeps a manifest that mixes forms parseable rather than failing whole.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RequireHead {
+    Managed { name: String, version: String },
+    Ignored(serde::de::IgnoredAny),
+}
+
 /// Read `shipment.{name,version}` out of a qm manifest, dispatching on the extension the way qm
 /// does.
 ///
@@ -194,19 +215,43 @@ struct ShipmentHead {
 /// with the real parser — and a Shipment that builds fine would become un-stageable because a
 /// field modkit does not use was written in a form modkit does not know.
 fn read_manifest_head(path: &Path) -> Option<ShipmentHead> {
+    Some(parse_manifest(path)?.shipment)
+}
+
+/// Parse a qm manifest's head-and-load fields, dispatching on the extension the way qm does.
+/// `None` on anything that does not parse — see [`read_manifest_head`] for why refusing would be
+/// wrong: modkit is not the authority on the schema, `qm build` is.
+fn parse_manifest(path: &Path) -> Option<ManifestHead> {
     let text = std::fs::read_to_string(path).ok()?;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let head: ManifestHead = match ext.as_str() {
-        "json" => serde_json::from_str(&text).ok()?,
-        "toml" => toml::from_str(&text).ok()?,
+    match ext.as_str() {
+        "json" => serde_json::from_str(&text).ok(),
+        "toml" => toml::from_str(&text).ok(),
         // qm's default, and its two spellings.
-        _ => serde_norway::from_str(&text).ok()?,
-    };
-    Some(head.shipment)
+        _ => serde_norway::from_str(&text).ok(),
+    }
+}
+
+/// A Shipment's MANAGED dependencies as `(name, version-range)` pairs — the input to auto-on-deploy
+/// resolution. Empty when the manifest lists none, does not parse, or carries only non-managed
+/// (`Shipment` / `External`) deps.
+pub(crate) fn read_managed_requirements(path: &Path) -> Vec<(String, String)> {
+    parse_manifest(path)
+        .map(|m| {
+            m.load
+                .requires
+                .into_iter()
+                .filter_map(|r| match r {
+                    RequireHead::Managed { name, version } => Some((name, version)),
+                    RequireHead::Ignored(_) => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Blank a value that is present but empty. A manifest with `name: ""` declares no more identity
