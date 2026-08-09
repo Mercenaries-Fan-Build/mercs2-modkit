@@ -1825,8 +1825,17 @@ export const useProjectStore = defineStore("project", {
         // Auto-on-deploy: install each deployed Shipment's managed dependencies (its
         // `load.requires`) at the version its semver range resolves to. A Shipment with none
         // does no work — the backend reads the manifest and returns before touching the network.
+        // A managed dependency is dev infrastructure (a shared library), not something a player
+        // manages: resolution is silent to the user, logged to the console for a developer.
         for (const s of this.shipments) {
-          await this.resolveShipmentDependencies(s.path);
+          const { resolved } = await this.resolveShipmentDependencies(s.path);
+          for (const d of resolved) {
+            console.debug(
+              d.installedTag
+                ? `[deps] ${s.name}: ${d.name} ${d.versionReq} -> ${d.installedTag}`
+                : `[deps] ${s.name}: ${d.name} ${d.versionReq} - ${d.note ?? "unresolved"}`
+            );
+          }
         }
         await this.refreshGame();
         await this.loadWadBackups();
