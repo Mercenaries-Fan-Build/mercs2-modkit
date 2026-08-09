@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 pub mod ledger;
+pub mod m2_sdk;
 pub mod place;
 pub mod pmc_bb;
 pub mod status;
