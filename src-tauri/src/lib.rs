@@ -35,8 +35,8 @@ use commands::save_backup::{
     set_saves_dir,
 };
 use commands::setup::{
-    crack_game, install_m2_sdk, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb,
-    resolve_shipment_dependencies, update_game,
+    crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, resolve_shipment_dependencies,
+    update_game,
 };
 use commands::shipment::{inspect_shipment, take_pending_shipment, PendingShipment};
 use commands::toolchain::{
@@ -161,7 +161,6 @@ pub fn run() {
             deploy_asi,
             trash_paths,
             install_pmc_bb,
-            install_m2_sdk,
             resolve_shipment_dependencies,
             resolve_pmc_bb,
             pmc_bb_variants,
