@@ -9,7 +9,7 @@
 
 use serde::Serialize;
 
-use super::{is_newer, ledger::Component, pmc_bb, Ledger};
+use super::{is_newer, ledger::Component, m2_sdk, pmc_bb, Ledger};
 use crate::commands::net::{self, ReleaseHost};
 
 /// A managed artifact modkit knows how to install and keep current.
@@ -31,6 +31,11 @@ pub const MANAGED: &[Managed] = &[
         key: "pmc_bb",
         label: "pmc_bb.dll (ASI loader / logging bridge)",
         repo: pmc_bb::REPO,
+    },
+    Managed {
+        key: m2_sdk::KEY,
+        label: m2_sdk::LABEL,
+        repo: m2_sdk::REPO,
     },
     Managed {
         key: "dxwrapper",
