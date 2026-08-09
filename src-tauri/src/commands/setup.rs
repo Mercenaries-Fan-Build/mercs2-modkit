@@ -19,7 +19,7 @@ use serde::Serialize;
 use tauri::Window;
 
 use crate::commands::managed::pmc_bb::{self, ExeKind};
-use crate::commands::managed::{self, place, Component, Ledger, PlaceOpts};
+use crate::commands::managed::{self, m2_sdk, place, Component, Ledger, PlaceOpts};
 use crate::commands::net::{self, AssetRule, ReleaseHost};
 use crate::commands::paths::app_data_dir;
 use crate::commands::proc::NoWindow;
@@ -164,6 +164,173 @@ pub async fn install_pmc_bb(
         reason: choice.reason,
         overridden: choice.overridden,
     })
+}
+
+/// What installing the m2-sdk runtime produced.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallM2SdkResult {
+    pub path: String,
+    pub version: String,
+}
+
+/// Download `m2-sdk.dll` from the SDK release and place it in the game ROOT.
+///
+/// `m2-sdk.dll` is the shared SDK runtime every SDK-based mod links against. It is managed rather
+/// than shipped (see [`super::managed::m2_sdk`]), and it lands in the game root — not `scripts/` —
+/// because pmc_bb's loader resolves a plugin's imports from the exe's directory. A copy in `scripts/`
+/// beside the `.asi` is invisible to it, and is the `0x7E` ERROR_MOD_NOT_FOUND load failure.
+#[tauri::command]
+pub async fn install_m2_sdk(
+    window: Window,
+    game_root: String,
+    // A semver range from the requiring Shipment's `load.requires` (`"^0.1"`). `None` installs the
+    // latest release — a manual "just give me the SDK" install with no Shipment context.
+    version_req: Option<String>,
+) -> Result<InstallM2SdkResult, String> {
+    let root = PathBuf::from(&game_root);
+    if !root.is_dir() {
+        return Err(format!("Game folder not found: {game_root}"));
+    }
+
+    let client = net::client()?;
+    // With a range, RESOLVE it (the highest release that satisfies it) so a Shipment gets the SDK
+    // its `load.requires` declared — one shared, updatable copy. Without one, this is a manual
+    // install and takes the latest. Either path is the same managed component, ledger-recorded below.
+    let release = match version_req.as_deref() {
+        Some(range) => {
+            let req = semver::VersionReq::parse(range).map_err(|e| {
+                format!("m2-sdk requirement {range:?} is not a valid semver range: {e}")
+            })?;
+            let releases = net::list_releases(&client, ReleaseHost::GitHub, m2_sdk::REPO).await?;
+            net::highest_satisfying(&releases, &req).cloned().ok_or_else(|| {
+                format!(
+                    "no published m2-sdk release satisfies {range:?} — available: {}",
+                    releases
+                        .iter()
+                        .map(|r| r.tag.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?
+        }
+        None => net::latest_release(&client, ReleaseHost::GitHub, m2_sdk::REPO).await?,
+    };
+    let asset = release.require(
+        &[AssetRule::Named(m2_sdk::ASSET)],
+        "the m2-sdk runtime (m2-sdk.dll)",
+    )?;
+
+    let bytes = net::download(
+        &client,
+        &asset.url,
+        net::DownloadOpts::new(m2_sdk::KEY, m2_sdk::ASSET).with_window(Some(&window)),
+    )
+    .await?;
+
+    let dest = root.join(m2_sdk::INSTALL_NAME);
+    let placed = place(
+        &dest,
+        &bytes,
+        PlaceOpts::default()
+            .expecting(asset.sha256())
+            .sized(asset.size)
+            .at_least(m2_sdk::MIN_SIZE),
+    )?;
+
+    Ledger::app()?.record(Component {
+        key: m2_sdk::KEY.to_string(),
+        tag: release.tag.clone(),
+        asset: m2_sdk::ASSET.to_string(),
+        features: Vec::new(),
+        source: m2_sdk::REPO.to_string(),
+        installed_at: managed::ledger::now_unix(),
+        files: vec![placed.clone().into()],
+    })?;
+
+    Ok(InstallM2SdkResult {
+        path: placed.abs_path,
+        version: release.tag,
+    })
+}
+
+/// Map a Shipment's managed-dependency NAME (from `load.requires`) to the component repo that
+/// satisfies it. `None` for a name modkit does not manage — not fatal: the dependency is reported
+/// unresolved rather than blocking the deploy, since a future modkit may manage it.
+fn managed_component_repo(name: &str) -> Option<&'static str> {
+    match name {
+        // Spelled `m2-sdk` in manifests; accept the ledger key spelling too.
+        "m2-sdk" | m2_sdk::KEY => Some(m2_sdk::REPO),
+        _ => None,
+    }
+}
+
+/// One managed dependency after an auto-on-deploy resolution pass.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDependency {
+    pub name: String,
+    pub version_req: String,
+    /// The release tag installed, or `None` when the dependency was skipped (see `note`).
+    pub installed_tag: Option<String>,
+    /// Why it was skipped, when it was.
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveDepsResult {
+    pub resolved: Vec<ResolvedDependency>,
+}
+
+/// Resolve and install a Shipment's managed dependencies — the auto-on-deploy step.
+///
+/// Reads the Shipment's `load.requires`, and for each MANAGED (`{name, version}`) requirement
+/// installs the highest released version satisfying its semver range, through the same
+/// ledger-tracked channel as a manual install. A range nothing satisfies is a hard error; a dep
+/// naming a component modkit does not manage is reported unresolved but does not fail the deploy.
+#[tauri::command]
+pub async fn resolve_shipment_dependencies(
+    window: Window,
+    shipment_dir: String,
+    game_root: String,
+) -> Result<ResolveDepsResult, String> {
+    let dir = PathBuf::from(&shipment_dir);
+    // No manifest is not an error: a deploy may hand a directory that is not a Shipment source
+    // tree (an already-built patch, say). There is simply nothing to resolve.
+    let Some(manifest) = crate::commands::shipment::manifest_path(&dir) else {
+        return Ok(ResolveDepsResult { resolved: Vec::new() });
+    };
+
+    let mut resolved = Vec::new();
+    for (name, version_req) in crate::commands::shipment::read_managed_requirements(&manifest) {
+        match managed_component_repo(&name) {
+            Some(repo) if repo == m2_sdk::REPO => {
+                let installed =
+                    install_m2_sdk(window.clone(), game_root.clone(), Some(version_req.clone()))
+                        .await?;
+                resolved.push(ResolvedDependency {
+                    name,
+                    version_req,
+                    installed_tag: Some(installed.version),
+                    note: None,
+                });
+            }
+            Some(_) => resolved.push(ResolvedDependency {
+                name,
+                version_req,
+                installed_tag: None,
+                note: Some("recognised, but no installer is wired for it yet".into()),
+            }),
+            None => resolved.push(ResolvedDependency {
+                name,
+                version_req,
+                installed_tag: None,
+                note: Some("not a modkit-managed component; left for the mod to provide".into()),
+            }),
+        }
+    }
+    Ok(ResolveDepsResult { resolved })
 }
 
 #[derive(Debug, Serialize)]
