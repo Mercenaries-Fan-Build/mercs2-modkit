@@ -17,7 +17,7 @@ use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
 use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
-use commands::language::{scan_languages, set_language};
+use commands::language::{clear_added_language, scan_languages, set_added_language, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::license::detect_license;
 use commands::logprobe::{analyze_log, locate_log};
@@ -35,7 +35,8 @@ use commands::save_backup::{
     set_saves_dir,
 };
 use commands::setup::{
-    crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, update_game,
+    crack_game, install_m2_sdk, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb,
+    resolve_shipment_dependencies, update_game,
 };
 use commands::shipment::{inspect_shipment, take_pending_shipment, PendingShipment};
 use commands::toolchain::{
@@ -160,6 +161,8 @@ pub fn run() {
             deploy_asi,
             trash_paths,
             install_pmc_bb,
+            install_m2_sdk,
+            resolve_shipment_dependencies,
             resolve_pmc_bb,
             pmc_bb_variants,
             managed_status,
@@ -183,6 +186,8 @@ pub fn run() {
             normalize_region,
             scan_languages,
             set_language,
+            set_added_language,
+            clear_added_language,
             build_debug_zip,
             list_saves,
             backup_saves,
