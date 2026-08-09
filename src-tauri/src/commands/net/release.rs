@@ -472,6 +472,47 @@ mod tests {
     }
 
     #[test]
+    fn tag_version_strips_the_v_and_rejects_non_semver() {
+        assert_eq!(tag_version("v0.1.0"), Some(semver::Version::new(0, 1, 0)));
+        assert_eq!(tag_version("1.2.3"), Some(semver::Version::new(1, 2, 3)));
+        assert!(tag_version("v1.2.3-rc.1").is_some());
+        assert!(tag_version("nightly").is_none());
+        assert!(tag_version("v1.2").is_none()); // major.minor is not a full semver version
+    }
+
+    #[test]
+    fn a_github_release_json_parses_its_tag_and_assets() {
+        let v = serde_json::json!({
+            "tag_name": "v0.1.0",
+            "name": "SDK 0.1.0",
+            "html_url": "https://example.invalid/releases/v0.1.0",
+            "body": "notes",
+            "assets": [
+                { "name": "m2-sdk.dll", "browser_download_url": "https://example.invalid/m2-sdk.dll", "size": 100 }
+            ],
+        });
+        let r = release_from_github(&v).expect("a usable release");
+        assert_eq!(r.tag, "v0.1.0");
+        assert_eq!(r.name, "SDK 0.1.0");
+        assert_eq!(r.assets.len(), 1);
+        assert_eq!(r.assets[0].name, "m2-sdk.dll");
+    }
+
+    #[test]
+    fn a_release_json_without_a_usable_tag_is_skipped() {
+        // Draft/placeholder entries carry no tag; they must be dropped, not turned into a
+        // release with an empty tag that resolution would then choke on.
+        assert!(release_from_github(&serde_json::json!({ "name": "draft", "assets": [] })).is_none());
+        assert!(release_from_github(&serde_json::json!({ "tag_name": "", "assets": [] })).is_none());
+    }
+
+    #[test]
+    fn a_release_name_falls_back_to_its_tag() {
+        let v = serde_json::json!({ "tag_name": "v2.0.0", "assets": [] });
+        assert_eq!(release_from_github(&v).unwrap().name, "v2.0.0");
+    }
+
+    #[test]
     fn rules_are_tried_in_priority_order() {
         let r = release(&["tool-linux-x86_64", "tool-windows-x86_64.exe"]);
         // The second rule matches something too, but the first one wins.
