@@ -45,6 +45,11 @@ pub enum Destination {
     Overlay,
     /// A loose file, at `relative` under the game folder (forward slashes, game root = no prefix).
     GameFolder { relative: String },
+    /// A NEW base WAD at `relative` under the game folder (`data/<name>.wad`) — an `add_language`
+    /// language WAD the engine opens by name. Deployed like a loose file (written to its path,
+    /// the displaced file banked), NOT mounted as an overlay. qm derives the name from the language
+    /// and refuses one that collides with a shipped WAD (M0200), so this only ever ADDS to `data/`.
+    DataWad { relative: String },
 }
 
 /// One artifact in the record.
@@ -234,8 +239,11 @@ pub fn staged_files(
 ) -> Result<Vec<StagedFile>, String> {
     let mut out = Vec::new();
     for entry in &record.placements {
-        let Destination::GameFolder { relative } = &entry.destination else {
-            continue;
+        // Both a game-folder companion and an add_language base WAD resolve to a file written under
+        // the game folder at `relative`; only an overlay (mounted, never copied) is skipped here.
+        let relative = match &entry.destination {
+            Destination::GameFolder { relative } | Destination::DataWad { relative } => relative,
+            Destination::Overlay => continue,
         };
         if let Some(why) = refuse_unsafe_relative(relative) {
             return Err(format!(
@@ -421,6 +429,28 @@ mod tests {
         let (_, files) = read_output(dir.path(), "s").unwrap();
         assert_eq!(files[0].dir(), "");
         assert!(!files[0].is_asi());
+    }
+
+    /// An `add_language` ships a NEW base WAD as a `data_wad` placement — deployed like a loose file
+    /// into `data/<name>.wad`, never mounted as an overlay. It must stage exactly like a companion.
+    #[test]
+    fn a_data_wad_is_staged_as_a_file_under_data() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "data/polski.wad", "FFCS...");
+        write(
+            dir.path(),
+            PLACEMENT_FILE,
+            &record_json(
+                r#"{"name":"polski.wad","bytes":7,"sha256":"ab","destination":{"kind":"data_wad","relative":"data/polski.wad"}}"#,
+            ),
+        );
+        let (wad, files) = read_output(dir.path(), "mercs2-language").unwrap();
+        assert!(wad.is_none(), "a data_wad is not an overlay");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].dir(), "data");
+        assert_eq!(files[0].file_name(), "polski.wad");
+        assert!(!files[0].is_asi());
+        assert_eq!(files[0].relative, "data/polski.wad");
     }
 
     /// A record that cannot be parsed is a refusal, never an empty list.
