@@ -23,7 +23,6 @@ import type {
   ExeCandidate,
   GameInfo,
   InstallDllResult,
-  InstallM2SdkResult,
   InstallResult,
   LoadedMod,
   LogReport,
@@ -1997,25 +1996,6 @@ export const useProjectStore = defineStore("project", {
           variant: variant ?? null,
         });
         await this.refreshGame().catch(() => {});
-        await this.refreshManaged();
-        return res;
-      } catch (e) {
-        this.error = String(e);
-        throw e;
-      } finally {
-        this.busy = false;
-      }
-    },
-
-    /** Install the shared m2 SDK runtime (`m2-sdk.dll`) into the game root, from the SDK release. */
-    async installM2Sdk(): Promise<InstallM2SdkResult> {
-      if (!this.gameInfo) throw new Error("Set the game folder first");
-      this.busy = true;
-      this.error = null;
-      try {
-        const res = await invoke<InstallM2SdkResult>("install_m2_sdk", {
-          gameRoot: this.gameInfo.root,
-        });
         await this.refreshManaged();
         return res;
       } catch (e) {
