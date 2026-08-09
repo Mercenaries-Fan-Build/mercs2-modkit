@@ -2483,6 +2483,7 @@ dependencies = [
  "mercs2_mesh",
  "rayon",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "serde_norway",
