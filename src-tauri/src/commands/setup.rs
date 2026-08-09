@@ -531,3 +531,23 @@ pub async fn update_game(window: Window, exe_path: String) -> Result<CrackResult
         tool_version: tag,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Shipment spells the dep `m2-sdk`; the ledger key is `m2_sdk`. Both must resolve to the
+    /// same component, or a manifest and the ledger would disagree about what got installed.
+    #[test]
+    fn managed_component_repo_maps_both_spellings_of_m2_sdk() {
+        assert_eq!(managed_component_repo("m2-sdk"), Some(m2_sdk::REPO));
+        assert_eq!(managed_component_repo(m2_sdk::KEY), Some(m2_sdk::REPO));
+    }
+
+    /// A name modkit does not manage resolves to `None` — reported unresolved, not guessed at.
+    #[test]
+    fn managed_component_repo_is_none_for_an_unmanaged_name() {
+        assert_eq!(managed_component_repo("some-random-lib"), None);
+        assert_eq!(managed_component_repo(""), None);
+    }
+}
