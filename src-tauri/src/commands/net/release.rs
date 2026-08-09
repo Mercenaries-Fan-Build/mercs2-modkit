@@ -223,6 +223,29 @@ fn asset_from_github(a: &serde_json::Value) -> Option<Asset> {
     })
 }
 
+/// Parse one GitHub release JSON object into a `Release`. `None` when it carries no usable tag,
+/// which skips a tagless/placeholder entry rather than turning it into a release with an empty tag.
+fn release_from_github(v: &serde_json::Value) -> Option<Release> {
+    let tag = v["tag_name"].as_str().filter(|s| !s.is_empty())?.to_string();
+    let name = v["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&tag)
+        .to_string();
+    Some(Release {
+        url: v["html_url"].as_str().unwrap_or_default().to_string(),
+        body: v["body"].as_str().unwrap_or_default().to_string(),
+        assets: v["assets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(asset_from_github)
+            .collect(),
+        name,
+        tag,
+    })
+}
+
 async fn github_latest(client: &reqwest::Client, project: &str) -> Result<Release, String> {
     let api = format!("https://api.github.com/repos/{project}/releases/latest");
     let resp = super::client::get(client, &api).await?;
@@ -242,33 +265,8 @@ async fn github_latest(client: &reqwest::Client, project: &str) -> Result<Releas
         .await
         .map_err(|e| format!("Could not parse the release JSON for {project}: {e}"))?;
 
-    // An empty tag is not a release. Every implementation this replaces had its own
-    // answer here — `"latest"`, `unwrap_or_default()`, or an error — so a repo with
-    // no releases produced three different downstream behaviours.
-    let tag = v["tag_name"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("{project} has no published releases"))?
-        .to_string();
-
-    let name = v["name"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&tag)
-        .to_string();
-
-    Ok(Release {
-        tag,
-        name,
-        url: v["html_url"].as_str().unwrap_or_default().to_string(),
-        body: v["body"].as_str().unwrap_or_default().to_string(),
-        assets: v["assets"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(asset_from_github)
-            .collect(),
-    })
+    // An empty tag is not a release: a repo with none must produce one behaviour, not three.
+    release_from_github(&v).ok_or_else(|| format!("{project} has no published releases"))
 }
 
 async fn gitlab_latest(client: &reqwest::Client, project: &str) -> Result<Release, String> {
@@ -350,6 +348,62 @@ pub async fn latest_release(
     }
 }
 
+/// Every published release of `project` on `host`, as the forge returns them (newest first).
+pub async fn list_releases(
+    client: &reqwest::Client,
+    host: ReleaseHost,
+    project: &str,
+) -> Result<Vec<Release>, String> {
+    match host {
+        ReleaseHost::GitHub => github_releases(client, project).await,
+        // Only GitHub hosts a managed component today; wire GitLab here if that changes.
+        ReleaseHost::GitLab => Err(format!(
+            "listing every release is only implemented for GitHub (asked for {project} on GitLab)"
+        )),
+    }
+}
+
+async fn github_releases(client: &reqwest::Client, project: &str) -> Result<Vec<Release>, String> {
+    let api = format!("https://api.github.com/repos/{project}/releases?per_page=100");
+    let resp = super::client::get(client, &api).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Release list failed for {project}: {status}"));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Could not parse the releases JSON for {project}: {e}"))?;
+    Ok(v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(release_from_github)
+        .collect())
+}
+
+/// Strip an optional leading `v` and read the tag as a semver `Version`; `None` if it is not semver.
+pub fn tag_version(tag: &str) -> Option<semver::Version> {
+    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+}
+
+/// The highest release whose tag satisfies `req` — the resolver.
+///
+/// Given every release and a range like `^0.1`, it picks the GREATEST matching version: `^0.1`
+/// takes `0.1.4` over `0.1.0`, and refuses a breaking `0.2.0` even though it is newer. Tags that
+/// are not semver are ignored rather than fatal (a repo may carry `nightly`/`latest` tags that are
+/// not releases under this scheme). `None` when nothing satisfies the range.
+pub fn highest_satisfying<'a>(
+    releases: &'a [Release],
+    req: &semver::VersionReq,
+) -> Option<&'a Release> {
+    releases
+        .iter()
+        .filter_map(|r| tag_version(&r.tag).map(|v| (v, r)))
+        .filter(|(v, _)| req.matches(v))
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, r)| r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +425,50 @@ mod tests {
             body: String::new(),
             assets: names.iter().map(|n| asset(n)).collect(),
         }
+    }
+
+    fn rel_tag(tag: &str) -> Release {
+        Release {
+            tag: tag.into(),
+            name: tag.into(),
+            url: String::new(),
+            body: String::new(),
+            assets: Vec::new(),
+        }
+    }
+
+    fn req(s: &str) -> semver::VersionReq {
+        semver::VersionReq::parse(s).unwrap()
+    }
+
+    /// The whole point of resolution: the range wins over recency. This is the exact scenario the
+    /// byte-exact pin could not express — a breaking 0.2.0 exists, but `^0.1` must not take it.
+    #[test]
+    fn resolves_to_the_top_of_the_range_not_the_newest_release() {
+        let rs = vec![
+            rel_tag("v0.0.1"),
+            rel_tag("v0.0.3"),
+            rel_tag("v0.1.0"),
+            rel_tag("v0.2.0"),
+        ];
+        assert_eq!(highest_satisfying(&rs, &req("^0.1")).unwrap().tag, "v0.1.0");
+    }
+
+    #[test]
+    fn resolves_to_the_greatest_matching_patch() {
+        let rs = vec![rel_tag("v0.1.0"), rel_tag("v0.1.4"), rel_tag("v0.1.2")];
+        assert_eq!(highest_satisfying(&rs, &req("^0.1")).unwrap().tag, "v0.1.4");
+    }
+
+    #[test]
+    fn a_range_no_release_satisfies_resolves_to_none() {
+        assert!(highest_satisfying(&[rel_tag("v0.0.3")], &req("^0.1")).is_none());
+    }
+
+    #[test]
+    fn non_semver_tags_are_ignored_rather_than_fatal() {
+        let rs = vec![rel_tag("nightly"), rel_tag("v0.1.0"), rel_tag("latest")];
+        assert_eq!(highest_satisfying(&rs, &req("^0.1")).unwrap().tag, "v0.1.0");
     }
 
     #[test]
