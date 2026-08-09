@@ -29,4 +29,7 @@ pub mod release;
 
 pub use client::{client, USER_AGENT};
 pub use download::{download, DownloadOpts};
-pub use release::{latest_release, Asset, AssetRule, Release, ReleaseHost};
+pub use release::{
+    highest_satisfying, latest_release, list_releases, tag_version, Asset, AssetRule, Release,
+    ReleaseHost,
+};
