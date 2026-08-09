@@ -766,6 +766,66 @@ mod tests {
         assert_eq!(parse_ship_url("https://example.com"), None);
     }
 
+    // --- load.requires: managed dependencies for auto-on-deploy ---
+
+    fn managed_reqs(name: &str, body: &str) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        read_managed_requirements(&path)
+    }
+
+    #[test]
+    fn a_managed_requirement_reads_as_name_and_range() {
+        let got = managed_reqs(
+            "manifest.yaml",
+r#"shipment: { name: x, version: 1.0.0 }
+load:
+  requires:
+    - name: m2-sdk
+      version: "^0.1"
+contributions: []
+"#,
+        );
+        assert_eq!(got, vec![("m2-sdk".to_string(), "^0.1".to_string())]);
+    }
+
+    /// The whole reason `RequireHead` has an `Ignored` arm: a bare-string Shipment dep and an
+    /// `{url,sha256}` External dep are NOT managed components — they must be skipped, and their
+    /// presence must not stop the managed dep in the same list from being read.
+    #[test]
+    fn non_managed_requirement_forms_are_skipped_not_fatal() {
+        let got = managed_reqs(
+            "manifest.yaml",
+r#"shipment: { name: x, version: 1.0.0 }
+load:
+  requires:
+    - some-other-shipment
+    - url: https://example.com/x.asi
+      sha256: abc
+    - name: m2-sdk
+      version: "^0.1"
+contributions: []
+"#,
+        );
+        assert_eq!(got, vec![("m2-sdk".to_string(), "^0.1".to_string())]);
+    }
+
+    #[test]
+    fn no_requires_means_no_managed_dependencies() {
+        assert!(managed_reqs("manifest.yaml", "shipment: { name: x }\ncontributions: []\n").is_empty());
+    }
+
+    /// Untagged disambiguation must hold across formats, not just YAML.
+    #[test]
+    fn a_managed_requirement_reads_from_json_too() {
+        let got = managed_reqs(
+            "manifest.json",
+            r#"{"shipment":{"name":"x"},"load":{"requires":[{"name":"m2-sdk","version":"^0.1"}]}}"#,
+        );
+        assert_eq!(got, vec![("m2-sdk".to_string(), "^0.1".to_string())]);
+    }
+
     use mercs2_formats::patch_wad::{
         build_patch_wad_multi, validate_blocks, AsetEntry, PatchBlock, FFCS_CERT_BLOB,
     };
