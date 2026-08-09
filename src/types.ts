@@ -939,12 +939,6 @@ export interface InstallDllResult {
   overridden: boolean;
 }
 
-/** Result of installing the shared m2 SDK runtime (`m2-sdk.dll`) into the game root. */
-export interface InstallM2SdkResult {
-  path: string;
-  version: string;
-}
-
 /** One managed dependency after an auto-on-deploy resolution pass. */
 export interface ResolvedDependency {
   name: string;
