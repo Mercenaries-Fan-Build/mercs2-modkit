@@ -33,6 +33,10 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Resolving a Shipment's managed dependency (`load.requires` → `{ name, version: "^0.1" }`) against a
+# component's published releases: parse each tag as a `Version`, keep those the range matches, install
+# the highest. The same crate qm validates the range with, so a range qm accepts, modkit resolves.
+semver = "1"
 
 # Reading the `shipment:` head of a Quartermaster manifest at ingest, so a staged Shipment is
 # identified by its own declared name and version rather than by the folder the user happened to
