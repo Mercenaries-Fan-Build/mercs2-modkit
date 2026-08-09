@@ -23,6 +23,7 @@ import type {
   ExeCandidate,
   GameInfo,
   InstallDllResult,
+  InstallM2SdkResult,
   InstallResult,
   LoadedMod,
   LogReport,
@@ -35,6 +36,7 @@ import type {
   RegistryMod,
   ReleaseInfo,
   Resolution,
+  ResolveDepsResult,
   ShipmentRef,
   RuntimeInfo,
   RuntimeOverrides,
@@ -66,6 +68,7 @@ import type {
   NormalizeRegionResult,
   LanguageStatus,
   SetLanguageResult,
+  SetAddedLanguageResult,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
@@ -1435,6 +1438,41 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
+    /** Switch the game into an added (novel) language via the selector plugin. */
+    async setAddedLanguage(name: string): Promise<SetAddedLanguageResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        return await invoke<SetAddedLanguageResult>("set_added_language", {
+          gameRoot: this.gameInfo.root,
+          name,
+        });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Clear the added-language override so the game uses its normal boot language. */
+    async clearAddedLanguage(): Promise<SetAddedLanguageResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        return await invoke<SetAddedLanguageResult>("clear_added_language", {
+          gameRoot: this.gameInfo.root,
+        });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
     /** Verify the install against a known-good manifest (Steam-style). Pass a
      *  local manifest path to test before publishing; omit it to fetch the
      *  published manifest for the detected version. */
@@ -1784,6 +1822,12 @@ export const useProjectStore = defineStore("project", {
             asi_target: this.asiTarget,
           },
         });
+        // Auto-on-deploy: install each deployed Shipment's managed dependencies (its
+        // `load.requires`) at the version its semver range resolves to. A Shipment with none
+        // does no work — the backend reads the manifest and returns before touching the network.
+        for (const s of this.shipments) {
+          await this.resolveShipmentDependencies(s.path);
+        }
         await this.refreshGame();
         await this.loadWadBackups();
         await this.loadDeployedWad();
@@ -1952,6 +1996,40 @@ export const useProjectStore = defineStore("project", {
       } finally {
         this.busy = false;
       }
+    },
+
+    /** Install the shared m2 SDK runtime (`m2-sdk.dll`) into the game root, from the SDK release. */
+    async installM2Sdk(): Promise<InstallM2SdkResult> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<InstallM2SdkResult>("install_m2_sdk", {
+          gameRoot: this.gameInfo.root,
+        });
+        await this.refreshManaged();
+        return res;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /**
+     * Resolve and install a Shipment's managed dependencies (its `load.requires`) — the
+     * auto-on-deploy step, also callable on its own. Does not manage `busy`: the deploy that
+     * calls it already owns that flag. The backend installs the highest release satisfying each
+     * range, so a mod always gets a compatible, shared, up-to-date runtime without being re-cut.
+     */
+    async resolveShipmentDependencies(shipmentDir: string): Promise<ResolveDepsResult> {
+      const root = this.gameInfo?.root;
+      if (!root) throw new Error("Set the game folder first");
+      return await invoke<ResolveDepsResult>("resolve_shipment_dependencies", {
+        shipmentDir,
+        gameRoot: root,
+      });
     },
 
     /**
