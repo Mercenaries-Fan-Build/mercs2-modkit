@@ -6,6 +6,7 @@ import type {
   LanguageStatus,
   LanguagePresence,
   SetLanguageResult,
+  AddedLanguage,
 } from "../types";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import Spinner from "../components/Spinner.vue";
@@ -69,6 +70,35 @@ async function confirmKeep() {
   result.value = null;
   try {
     result.value = await store.setLanguage(l.language);
+    await scan();
+  } catch (e) {
+    opError.value = String(e);
+  }
+}
+
+// --- Added (novel) languages ---
+const added = computed<AddedLanguage[]>(() => status.value?.added ?? []);
+const selector = computed(() => status.value?.selector ?? null);
+const addedMsg = ref<string | null>(null);
+
+async function useAdded(l: AddedLanguage) {
+  opError.value = null;
+  addedMsg.value = null;
+  try {
+    await store.setAddedLanguage(l.name);
+    addedMsg.value = `Selected ${l.display}. Relaunch the game to switch into it.`;
+    await scan();
+  } catch (e) {
+    opError.value = String(e);
+  }
+}
+
+async function clearAdded() {
+  opError.value = null;
+  addedMsg.value = null;
+  try {
+    await store.clearAddedLanguage();
+    addedMsg.value = "Cleared — the game will use its normal boot language.";
     await scan();
   } catch (e) {
     opError.value = String(e);
@@ -208,6 +238,89 @@ watch(
             Only one language is installed — nothing to remove.
           </p>
         </template>
+      </template>
+
+      <!-- Added (novel) languages — installed by a mod, switched via the selector plugin -->
+      <template v-if="status && (added.length || selector?.pluginInstalled)">
+        <div class="mt-8 border-t border-zinc-800 pt-6">
+          <h3 class="plate-title text-base">Added languages</h3>
+          <p class="mt-1 text-sm text-zinc-500">
+            Languages a mod installed that the game never shipped. The game has no
+            in-game language picker, so a selector plugin switches into one at launch.
+          </p>
+
+          <p
+            v-if="addedMsg"
+            class="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300"
+          >
+            {{ addedMsg }}
+          </p>
+
+          <p
+            v-if="selector && !selector.pluginInstalled"
+            class="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300"
+          >
+            The language-selector plugin isn't installed, so these can't be
+            switched on. Install the language mod to enable selection.
+          </p>
+
+          <div
+            v-if="added.length === 0"
+            class="empty-plate mt-4"
+          >
+            No added languages installed.
+          </div>
+
+          <ul
+            v-else
+            class="mt-3 space-y-2"
+          >
+            <li
+              v-for="l in added"
+              :key="l.name"
+              class="guilloche flex items-center justify-between gap-4 rounded-xl border p-4"
+              :class="l.active ? 'border-emerald-500/40' : 'border-zinc-800'"
+            >
+              <div class="min-w-0">
+                <p class="font-medium text-zinc-100">
+                  {{ l.display }}
+                  <span
+                    v-if="l.active"
+                    class="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-normal text-emerald-300"
+                  >
+                    Active
+                  </span>
+                </p>
+                <p class="mt-1 text-xs text-zinc-500">
+                  {{ l.wadName }}: {{ fmtBytes(l.wadSize) }}
+                </p>
+              </div>
+              <div class="flex shrink-0 items-center gap-3">
+                <button
+                  v-if="!l.active"
+                  class="btn-plate"
+                  :disabled="busy || !selector?.pluginInstalled"
+                  :title="
+                    selector?.pluginInstalled
+                      ? `Switch the game into ${l.display} at next launch`
+                      : 'The selector plugin is not installed'
+                  "
+                  @click="useAdded(l)"
+                >
+                  Use this language
+                </button>
+                <button
+                  v-else
+                  class="btn-outline"
+                  :disabled="busy"
+                  @click="clearAdded"
+                >
+                  Use default
+                </button>
+              </div>
+            </li>
+          </ul>
+        </div>
       </template>
     </template>
 
