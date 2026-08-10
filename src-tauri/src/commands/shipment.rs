@@ -483,6 +483,15 @@ pub async fn shipment_groups(
         return Err("Set the game folder before building Shipments.".into());
     }
 
+    // qm's explicit `--game` takes the path RAW: unlike its own discovery it does NOT resolve an
+    // install folder down to `data/vz.wad`, and `GameStack::open` then `File::open`s whatever it was
+    // handed. On Windows, opening the install *directory* as a file is "Access is denied (os error 5)".
+    // So resolve to the actual `vz.wad` here — exactly as qm's discovery would — before handing it over.
+    let vz_wad =
+        mercs2_formats::game_paths::wad_under(std::path::Path::new(game_path), "vz.wad")
+            .ok_or_else(|| format!("Could not find vz.wad under the game folder ({game_path})."))?;
+    let game_arg = vz_wad.as_os_str().to_os_string();
+
     // Prefer an already-installed qm (this is called on a build, and we don't want to block a build
     // on a download unless we must); ensure_tool otherwise fetches it.
     let qm = match installed_tool_path("qm") {
@@ -507,7 +516,7 @@ pub async fn shipment_groups(
             os("build"),
             os(&ship.path),
             os("--game"),
-            os(game_path),
+            game_arg.clone(),
             os("--out"),
             out.as_os_str().to_os_string(),
         ];
@@ -545,7 +554,7 @@ pub async fn shipment_groups(
     }
     link_args.extend([
         os("--game"),
-        os(game_path),
+        game_arg.clone(),
         os("--out"),
         link_out.as_os_str().to_os_string(),
     ]);
