@@ -484,6 +484,14 @@ export interface ShipmentRef {
   version: string | null;
   /** `local` with a null id for anything staged from disk. */
   origin: Origin;
+  /**
+   * A client-side "these bytes were just (re)staged" marker, set by the frontend at install time
+   * and never by the backend. A reinstall re-extracts the same staging path at the same version,
+   * so `id`/`version` alone can't tell the build the content changed; bumping this makes the load
+   * order signature move, which is what dirties the deployed WAD the same way adding a mod does.
+   * Absent on Shipments staged before this existed, and on Workshop imports.
+   */
+  stagedRev?: number;
 }
 
 /** A snapshot of a `vz-patch.wad` that a deploy displaced. */

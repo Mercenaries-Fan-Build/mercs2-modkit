@@ -1,11 +1,50 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from "vue";
+import { onMounted, onBeforeUnmount, ref, computed } from "vue";
 import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
+import Spinner from "./Spinner.vue";
 
 const store = useProjectStore();
-const { gameInfo, gamePath, busy, gameRunning } = storeToRefs(store);
+const router = useRouter();
+const { gameInfo, gamePath, busy, gameRunning, applyStatus } = storeToRefs(store);
+
+// Is the game up to date with the load order, and how much is staged? Drives the Play button.
+const pending = computed(() => store.pending);
+
+// The apply pipeline's current stage, as a short label shown beside the spinner in the button.
+const applyStageLabel = computed(() => {
+  switch (applyStatus.value?.step) {
+    case "build":
+      return "Building…";
+    case "validate":
+      return "Validating…";
+    case "deploy":
+      return "Deploying…";
+    default:
+      return "Applying…";
+  }
+});
+
+// Apply the staged load order (build · validate · deploy), then launch. On failure the detail and
+// the fix live on Build & Deploy — the conflict cards, the validation report — so route there
+// rather than trying to explain a failure from a button.
+async function applyAndPlay() {
+  const res = await store.applyToGame();
+  if (res.ok) {
+    await play();
+    return;
+  }
+  router.push(
+    res.reason === "conflict"
+      ? { name: "export" }
+      : {
+          name: "export",
+          query: applyStatus.value?.step === "invalid" ? { show: "validation" } : {},
+        },
+  );
+}
 
 // In-flight launch/stop, so the button can't be double-fired.
 const transitioning = ref(false);
@@ -174,22 +213,11 @@ function versionTone(v: string): string {
           />
           Verbose log
         </label>
+        <!-- One control for the whole path. With staged changes it applies (build · validate ·
+             deploy) and then launches; while it works, the spinner and the current stage live in
+             the button itself — no separate status bar. Plain ▶ Play once nothing is pending. -->
         <button
-          v-if="!gameRunning"
-          class="btn-plate"
-          :disabled="busy || transitioning"
-          :title="
-            verboseLog
-              ? 'Launch Mercenaries 2 with verbose pmc_blackbox logging'
-              : 'Launch Mercenaries 2'
-          "
-          data-gamepad-play
-          @click="play"
-        >
-          {{ transitioning ? "Launching…" : "▶ Play" }}
-        </button>
-        <button
-          v-else
+          v-if="gameRunning"
           class="btn-seal-red"
           :disabled="transitioning"
           title="Stop the running game"
@@ -197,6 +225,38 @@ function versionTone(v: string): string {
           @click="stop"
         >
           {{ transitioning ? "Stopping…" : "■ Stop" }}
+        </button>
+        <button
+          v-else
+          class="btn-plate"
+          :class="
+            pending.stale || applyStatus?.active
+              ? '!border-amber-500 !bg-amber-600 hover:!bg-amber-500'
+              : ''
+          "
+          :disabled="
+            busy || transitioning || applyStatus?.active || (pending.stale && !gameInfo.data_dir)
+          "
+          :title="
+            pending.stale
+              ? `${pending.count} staged change${pending.count === 1 ? '' : 's'} — build, validate, deploy, then launch`
+              : verboseLog
+                ? 'Launch Mercenaries 2 with verbose pmc_blackbox logging'
+                : 'Launch Mercenaries 2'
+          "
+          data-gamepad-play
+          @click="pending.stale ? applyAndPlay() : play()"
+        >
+          <Spinner v-if="applyStatus?.active" :size="14" class="shrink-0" />
+          {{
+            applyStatus?.active
+              ? applyStageLabel
+              : transitioning
+                ? "Launching…"
+                : pending.stale
+                  ? "▶ Apply & Play"
+                  : "▶ Play"
+          }}
         </button>
         <button
           class="shift-ink rounded-md px-2 py-1 text-[11px] tracking-wider uppercase text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"

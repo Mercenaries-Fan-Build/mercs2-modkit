@@ -8,6 +8,7 @@ import type {
   BuildResult,
   CatalogMod,
   Catalog,
+  ClaimConflict,
   RepoSource,
   ComponentStatus,
   ComponentUpdate,
@@ -76,6 +77,9 @@ const LIBRARY_KEY = "mercs2-modkit:library";
 // Versions of the core components modkit last installed, remembered so a later
 // release of either can be flagged as an available update.
 const REGION_KEY = "mercs2-modkit:preferredRegion";
+// Signature of the load order that produced the currently-deployed WAD, so a later change to
+// the load order can be recognised as "not in your game yet".
+const DEPLOYED_SIG_KEY = "mercs2-modkit:deployedSignature";
 
 function slugify(name: string): string {
   return name
@@ -193,6 +197,23 @@ const MODKIT_REPO = "https://github.com/Mercenaries-Fan-Build/mercs2-modkit";
 let pendingUpdate: Update | null = null;
 /** Repos publishing the core components modkit installs (release-checked too). */
 
+/**
+ * Live state of the guided "Apply to game" pipeline (Build · Validate · Deploy).
+ *
+ * `null` when idle. `active` is true only while a step is running; the terminal steps
+ * (`done` / `conflict` / `error`) stay set with `active: false` so the game bar can explain the
+ * outcome until the next attempt.
+ */
+export interface ApplyStatus {
+  active: boolean;
+  step: "build" | "validate" | "deploy" | "done" | "conflict" | "invalid" | "error";
+  message: string;
+  /** Result of the validate step: true/false once it ran, null if it was skipped or couldn't. */
+  validationOk: boolean | null;
+  /** Unresolvable partial-overlap conflicts, when `step === "conflict"`. */
+  conflicts: ClaimConflict[];
+}
+
 interface ProjectState {
   // Base game
   gamePath: string | null;
@@ -276,6 +297,15 @@ interface ProjectState {
    * WAD, not a "not loaded yet" placeholder.
    */
   deployedWad: DeployedWadRecord | null;
+  /**
+   * Signature of the load order that produced the currently-deployed WAD (persisted).
+   * Compared against {@link loadOrderSignature} to decide whether the game is up to date.
+   * `null` means "nothing modkit deployed is on record" — every staged entry then reads as
+   * pending, which is the honest default for a fresh or restored install.
+   */
+  deployedSignature: string | null;
+  /** Progress of the guided Build · Validate · Deploy action, or null when idle. */
+  applyStatus: ApplyStatus | null;
   /** Wearable models verified present in THIS install. */
   wardrobeModels: WardrobeModel[];
   /** Outfits the user has queued for the next build. */
@@ -325,6 +355,8 @@ export const useProjectStore = defineStore("project", {
     buildResult: null,
     wadBackups: [],
     deployedWad: null,
+    deployedSignature: null,
+    applyStatus: null,
     registryMods: [],
     registryStale: false,
     registryWarning: null,
@@ -609,6 +641,51 @@ export const useProjectStore = defineStore("project", {
         return semverGt(latest, installed.version) ? latest : null;
       };
     },
+
+    /**
+     * A stable string identifying exactly what the current load order would build: enabled mods
+     * (in order) + staged Shipments + imported WADs + wardrobe + textures + conflict resolutions.
+     *
+     * It is deliberately built from the same inputs as {@link buildOptions}, so comparing it to
+     * {@link deployedSignature} answers "does the deployed WAD still match what I have staged?"
+     * without rebuilding. Order matters — the load order decides overrides — so the arrays are
+     * joined in place rather than sorted.
+     */
+    loadOrderSignature(state): string {
+      const mods = this.enabledMods
+        .map((m) => `${m.id}@${m.manifest.version ?? ""}`)
+        .join(",");
+      const ships = state.shipments
+        // `stagedRev` (set on each install) is appended only when present, so a Shipment staged
+        // before this existed keeps its old signature and a deployed setup isn't dirtied on upgrade.
+        .map((s) => `${s.id}@${s.version ?? ""}${s.stagedRev ? `@r${s.stagedRev}` : ""}`)
+        .join(",");
+      const pre = state.prebuilt.map((p) => p.id).join(",");
+      const ward = state.wardrobe.map((o) => `${o.hero}/${o.model}`).join(",");
+      const tex = state.textures.map((t) => `${t.name}=${t.image_path}`).join(",");
+      const res = JSON.stringify(state.resolutions);
+      return `m[${mods}]s[${ships}]p[${pre}]w[${ward}]t[${tex}]r${res}`;
+    },
+
+    /**
+     * Whether the game reflects the current load order, plus how many entries are staged.
+     *
+     * `stale` is the signal the whole redesign turns on: it drives the game-bar "changes staged
+     * / up to date" strip and whether Play becomes "Apply & Play". With nothing staged there is
+     * nothing to apply; with nothing deployed, everything staged is pending; otherwise it is a
+     * plain signature comparison.
+     */
+    pending(state): { count: number; stale: boolean } {
+      const count =
+        this.enabledMods.length +
+        state.shipments.length +
+        state.prebuilt.length +
+        state.wardrobe.length +
+        state.textures.length;
+      if (count === 0) return { count: 0, stale: false };
+      if (!state.deployedWad) return { count, stale: true };
+      return { count, stale: this.loadOrderSignature !== state.deployedSignature };
+    },
   },
 
   actions: {
@@ -616,6 +693,7 @@ export const useProjectStore = defineStore("project", {
     async init() {
       this.asiTarget = localStorage.getItem(ASI_TARGET_KEY) ?? "scripts";
       this.preferredRegion = localStorage.getItem(REGION_KEY);
+      this.deployedSignature = localStorage.getItem(DEPLOYED_SIG_KEY);
       // Component versions used to be restored from localStorage here. They live
       // in the backend ledger now, which is read fresh rather than remembered —
       // see `refreshManaged`.
@@ -765,6 +843,11 @@ export const useProjectStore = defineStore("project", {
           slug: item.slug,
           version: version ?? null,
         });
+        // Stamp a fresh staging revision so a reinstall dirties the load order like a new mod.
+        // The backend re-extracted the staging dir, but at the same slug/version, so nothing in
+        // the ShipmentRef would otherwise change — and the deployed WAD would look up to date
+        // when it isn't. This marker is what moves `loadOrderSignature` on a reinstall.
+        res.shipment.stagedRev = Date.now();
         // Dedupe on the staging path, as `importShipment` does — re-installing a mod
         // overwrites its staging directory, so the same path is the same row.
         const existing = this.shipments.findIndex(
@@ -1839,12 +1922,118 @@ export const useProjectStore = defineStore("project", {
         await this.refreshGame();
         await this.loadWadBackups();
         await this.loadDeployedWad();
+        // Remember what we just deployed, so a later change to the load order reads as pending.
+        this.deployedSignature = this.loadOrderSignature;
+        localStorage.setItem(DEPLOYED_SIG_KEY, this.deployedSignature);
         return res;
       } catch (e) {
         this.error = String(e);
         throw e;
       } finally {
         this.busy = false;
+      }
+    },
+
+    /**
+     * The guided "Apply to game" flow: resolve → build → validate → deploy, in one action.
+     *
+     * This is the exact pipeline the Build & Deploy page runs, promoted in front of the user so a
+     * staged mod actually reaches the game instead of sitting unbuilt. Progress is published on
+     * {@link applyStatus} for the game-bar strip; a partial-overlap conflict is handed back so the
+     * caller can route the user to Build & Deploy, which resolves it richly.
+     */
+    async applyToGame(): Promise<{ ok: boolean; reason?: "conflict" | "error" }> {
+      if (!this.gameInfo?.data_dir) throw new Error("Set the game folder first");
+      this.error = null;
+      let validationOk: boolean | null = null;
+      this.applyStatus = {
+        active: true,
+        step: "build",
+        message: "Resolving load order…",
+        validationOk: null,
+        conflicts: [],
+      };
+      try {
+        // A partial overlap between two mods can't be auto-merged; send it to Build & Deploy.
+        try {
+          await this.previewConflicts();
+        } catch (e) {
+          const payload = e as { conflicts?: ClaimConflict[] };
+          if (payload?.conflicts?.length) {
+            this.applyStatus = {
+              active: false,
+              step: "conflict",
+              message: "Two mods change overlapping assets. Resolve it on Build & Deploy.",
+              validationOk: null,
+              conflicts: payload.conflicts,
+            };
+            return { ok: false, reason: "conflict" };
+          }
+          throw e;
+        }
+
+        this.applyStatus = {
+          active: true,
+          step: "build",
+          message: "Assembling patch WAD…",
+          validationOk: null,
+          conflicts: [],
+        };
+        const build = await this.assemble({});
+
+        // A WAD-less build (a Shipment placing only loose files) has nothing to validate.
+        if (build.path) {
+          this.applyStatus = {
+            active: true,
+            step: "validate",
+            message: "Validating with wad_simulator…",
+            validationOk: null,
+            conflicts: [],
+          };
+          const sim = await this.fetchSimulator().catch(() => null);
+          const v = await this.validate(build.path, sim).catch(() => null);
+          validationOk = v?.ok ?? null;
+          // A definite failure means the WAD is bad — stop before touching the game. A validation
+          // that could not run (no simulator) is a warning, not a blocker.
+          if (v && v.ok === false) {
+            this.applyStatus = {
+              active: false,
+              step: "invalid",
+              message: `Patch failed validation (exit ${v.exit_code ?? "?"}).`,
+              validationOk: false,
+              conflicts: [],
+            };
+            return { ok: false, reason: "error" };
+          }
+        }
+
+        this.applyStatus = {
+          active: true,
+          step: "deploy",
+          message: "Installing into the game…",
+          validationOk,
+          conflicts: [],
+        };
+        await this.deployPatchWad(build);
+
+        this.applyStatus = {
+          active: false,
+          step: "done",
+          message: "Deployed — your game is up to date.",
+          validationOk,
+          conflicts: [],
+        };
+        return { ok: true };
+      } catch (e) {
+        this.error = String(e);
+        this.applyStatus = {
+          active: false,
+          step: "error",
+          message: String(e),
+          validationOk,
+          conflicts: [],
+        };
+        return { ok: false, reason: "error" };
       }
     },
 
@@ -1970,6 +2159,10 @@ export const useProjectStore = defineStore("project", {
         await this.refreshGame();
         await this.loadWadBackups();
         await this.loadDeployedWad();
+        // What's deployed is now stock, or an older snapshot — no longer what our load order
+        // builds. Drop the signature so staged entries read as pending until re-applied.
+        this.deployedSignature = null;
+        localStorage.removeItem(DEPLOYED_SIG_KEY);
         return res;
       } catch (e) {
         this.error = String(e);

@@ -1,10 +1,25 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, nextTick } from "vue";
 import { storeToRefs } from "pinia";
+import { useRoute } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import ProgressBar from "../components/ProgressBar.vue";
 import type { ClaimConflict, GroupOutcome, PlacementOutcome } from "../types";
+
+const route = useRoute();
+// The validation report, and a transient highlight when arrived at via the game bar's
+// "view validation report" link (`/export?show=validation`).
+const validationSection = ref<HTMLElement | null>(null);
+const highlightValidation = ref(false);
+async function focusValidation() {
+  await nextTick();
+  const el = validationSection.value;
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  highlightValidation.value = true;
+  setTimeout(() => (highlightValidation.value = false), 2400);
+}
 
 const store = useProjectStore();
 const {
@@ -46,7 +61,11 @@ const deployed = ref<string | null>(null);
 // came back out. Shown because a file dropped into the game install is not visible anywhere else.
 const placement = ref<PlacementOutcome | null>(null);
 
-onMounted(() => void store.loadWadBackups().catch(() => {}));
+onMounted(() => {
+  void store.loadWadBackups().catch(() => {});
+  // Deep link from the game bar: land on the validation report and flag it.
+  if (route.query.show === "validation" && store.validation) void focusValidation();
+});
 
 /** Build into the managed staging dir, then validate with wad_simulator. */
 async function buildAndValidate() {
@@ -425,7 +444,13 @@ function outcomeText(o: GroupOutcome): string {
       </section>
 
       <!-- Validation -->
-      <section v-if="validation" class="mt-6">
+      <section
+        v-if="validation"
+        id="validation"
+        ref="validationSection"
+        class="mt-6 scroll-mt-6 rounded-lg p-1 transition-all duration-500"
+        :class="highlightValidation ? 'ring-2 ring-brass-500/70 bg-brass-500/5' : ''"
+      >
         <h3 class="plate-label mb-2 flex items-center gap-2">
           Validation
           <span
@@ -446,7 +471,11 @@ function outcomeText(o: GroupOutcome): string {
       </section>
 
       <!-- Install. Close the game first: it holds the WAD open. -->
-      <section v-if="buildResult" class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
+      <section
+        v-if="buildResult"
+        class="guilloche mt-6 rounded-xl border p-5"
+        :class="validation && !validation.ok ? 'border-red-500/40' : 'border-zinc-800'"
+      >
         <h3 class="plate-label">Install</h3>
         <p class="mt-1 text-xs text-zinc-500">
           Copies the WAD into
@@ -454,12 +483,25 @@ function outcomeText(o: GroupOutcome): string {
           >. Your current <code>vz-patch.wad</code> is backed up first, so you can undo
           this. <strong class="text-zinc-400">Close the game before installing.</strong>
         </p>
+        <!-- The build failed validation: don't hide that behind an ordinary Install button. -->
+        <p
+          v-if="validation && !validation.ok"
+          class="mt-2 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300"
+        >
+          This patch <strong>failed validation</strong> (exit {{ validation.exit_code ?? "?" }}).
+          Installing it may crash the game or corrupt a save — prefer fixing the load order above.
+        </p>
         <button
           class="btn-plate mt-3 w-full justify-center"
+          :class="
+            validation && !validation.ok
+              ? '!border-red-500 !bg-red-600 hover:!bg-red-500'
+              : ''
+          "
           :disabled="busy || !gameInfo?.data_dir"
           @click="deploy"
         >
-          Install into the game
+          {{ validation && !validation.ok ? "Install anyway" : "Install into the game" }}
         </button>
         <p
           v-if="deployed"

@@ -1251,6 +1251,17 @@ pub fn launch_tool(
     if let Some(s) = saves_dir.filter(|s| !s.trim().is_empty()) {
         cmd.env("MERCS2_SAVES_DIR", s);
     }
+    // Point the engine-backed tools at their Lua script corpus. Unlike the Workshop's
+    // `workshop_data` (resolved exe-relative by `data_home`), the corpus loader
+    // (`mercs2_script::corpus`) only consults `MERCS2_LUA_CORPUS` or a build-time compiled path
+    // that does not exist on an end user's machine — it has no exe-relative fallback. The toolset
+    // ships the corpus as `workshop_data/lua` beside the exe, so hand it over explicitly. Without
+    // this the native game boots with an empty script root and the first `import` (`MrxBootstrap`)
+    // fails with "module not found in roots".
+    let lua_corpus = dir.join("workshop_data").join("lua");
+    if lua_corpus.is_dir() {
+        cmd.env("MERCS2_LUA_CORPUS", &lua_corpus);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

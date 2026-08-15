@@ -84,7 +84,7 @@ async function install(item: RegistryMod) {
   try {
     const res = await store.installFromRegistry(item);
     const files = `${res.staged_files} file${res.staged_files === 1 ? "" : "s"}`;
-    lastAction.value = `Installed ${res.title ?? res.slug} ${res.release_version} (${files}) — it is staged for your next build`;
+    lastAction.value = `Staged ${res.title ?? res.slug} ${res.release_version} (${files}) — it isn’t in your game yet. Press ▶ Apply & Play in the game bar to apply it.`;
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -172,7 +172,7 @@ async function update(item: CatalogMod) {
     </div>
 
     <ProgressBar
-      v-if="busy && !working"
+      v-if="busy && !working && !store.applyStatus?.active"
       indeterminate
       label="Loading mods…"
       class="mt-4"
@@ -321,9 +321,9 @@ async function update(item: CatalogMod) {
                 >
                 <span
                   v-else-if="store.registryInstalled(item)"
-                  class="stamp text-emerald-300"
-                  title="Staged in the load order — it goes into your next build"
-                  >installed</span
+                  class="stamp text-amber-300"
+                  title="Staged in your load order — build &amp; deploy to put it in the game"
+                  >staged</span
                 >
               </div>
               <p v-if="item.description" class="mt-0.5 text-sm text-zinc-400">
@@ -345,7 +345,11 @@ async function update(item: CatalogMod) {
 
             <div class="flex shrink-0 items-center gap-2">
               <button
-                class="btn-plate"
+                :class="
+                  store.registryInstalled(item) && !store.registryUpdate(item)
+                    ? 'btn-outline'
+                    : 'btn-plate'
+                "
                 :disabled="busy"
                 :title="
                   store.registryInstalled(item)
