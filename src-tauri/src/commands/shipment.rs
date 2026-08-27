@@ -18,10 +18,13 @@
 //!
 //! qm's native model is per-Shipment overlays + a link WAD mounted last. The game (and
 //! [`super::deploy_wad`]) load a single `vz-patch.wad`, so we collapse: each Shipment's overlay
-//! contributes its blocks **with `scripts_vz` dropped**, and the linker's reconciled `scripts_vz` is
-//! added once, last. Dropping the per-Shipment scripts is what keeps `claim::resolve` from seeing a
-//! scripts-only group partially overriding a larger overlay group (an atomic partial-overlap
-//! conflict). Non-script overlaps across Shipments still resolve last-in-load-order-wins.
+//! contributes its blocks **with the linker-owned blocks dropped** — both `scripts_vz` AND the
+//! resident framework block, the two qm's linker re-emits (see [`is_scripts_block`]) — and the
+//! linker's reconciled copies of those blocks are added once, last. Dropping the per-Shipment
+//! copies is what keeps `claim::resolve` from seeing a linker group partially overriding a larger
+//! overlay group (an atomic partial-overlap conflict) — and, for the resident block, from seeing
+//! two overlays collide on its ~7000 rows. Non-linker overlaps across Shipments still resolve
+//! last-in-load-order-wins.
 //!
 //! # A Shipment is not only WAD blocks
 //!
@@ -261,10 +264,24 @@ fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-/// A block is the Lua scripts block if its PTHS path names `scripts_vz` — same test the prebuilt
-/// importer uses to flag script-shipping WADs.
+/// A block is a linker-owned script carrier if its PTHS path names `scripts_vz` OR the resident
+/// framework block — the two blocks qm's linker splices into (`SCRIPT_BLOCKS` in
+/// `mercs2_quartermaster::link`: `scripts_vz` holds the 114 content scripts, `resident` holds the
+/// ~240 `Mrx*` framework modules that `patch_lua` targets like `mrxplayer` live in). BOTH are
+/// re-emitted whole by `qm link`, so BOTH must be taken from the reconciled link WAD and dropped
+/// from every per-Shipment overlay.
+///
+/// Matching only `scripts_vz` here left each overlay shipping its own ~7000-row
+/// `resident_P000_Q3.block`, and two Shipments that both touch the resident block then collide on
+/// it — the "overlap on N assets, neither contains the other" build failure — while the link WAD's
+/// already-reconciled resident block was discarded.
+///
+/// The resident needle is ANCHORED on a leading separator so it cannot also match a *different*
+/// block whose name merely ends the same way (e.g. `sound_resident_P000_Q3.block`) — the same
+/// anchoring qm's `SCRIPT_BLOCKS` uses for exactly this reason.
 fn is_scripts_block(path_string: &str) -> bool {
-    path_string.to_lowercase().contains("scripts_vz")
+    let p = path_string.to_lowercase();
+    p.contains("scripts_vz") || p.contains(r"\resident_p000_q3.block")
 }
 
 /// Validate a Shipment source directory and describe it for the load order, without building it.
@@ -588,12 +605,15 @@ pub async fn shipment_groups(
     })
 }
 
-/// Fold per-Shipment overlays + the linker's reconciled scripts into final claim groups.
+/// Fold per-Shipment overlays + the linker's reconciled script blocks into final claim groups.
 ///
-/// Each Shipment contributes its non-`scripts_vz` blocks (a scripts-only Shipment contributes no
-/// group); the linker supplies the single `scripts_vz` group, appended **last** so it wins the block
-/// on last-in-load-order resolution. Because every per-Shipment `scripts_vz` is removed, the linker
-/// group never *partially* overrides an overlay group — which would be an atomic-group conflict.
+/// Each Shipment contributes its non-linker-owned blocks — everything that is neither `scripts_vz`
+/// nor the resident framework block (a pure Lua/residency Shipment therefore contributes no group);
+/// the linker supplies the single reconciled group carrying BOTH linker-owned blocks, appended
+/// **last** so it wins them on last-in-load-order resolution. Because every per-Shipment copy of
+/// those blocks is removed, the linker group never *partially* overrides an overlay group — which
+/// would be an atomic-group conflict. Dropping only `scripts_vz` (not the resident block) is what
+/// let two Shipments' resident blocks survive and collide.
 ///
 /// Pure and side-effect-free so the residency invariant is unit-testable without `qm` or a game.
 fn collapse(
@@ -626,7 +646,7 @@ fn collapse(
         groups.push(ClaimGroup {
             mod_id: "qm-link:scripts".into(),
             mod_name: "Quartermaster link".into(),
-            label: format!("Reconciled scripts ({shipment_count} Shipment(s))"),
+            label: format!("Reconciled scripts + resident ({shipment_count} Shipment(s))"),
             atomic: true,
             blocks: scripts,
         });
@@ -758,6 +778,11 @@ mod tests {
     #[test]
     fn scripts_block_is_detected_by_path() {
         assert!(is_scripts_block("blocks\\VZ\\scripts_vz_P000_Q3.block"));
+        // The resident framework block is ALSO linker-owned — qm re-emits it, so modkit must take
+        // it from the link WAD and drop it from overlays. Missing this was the ~7000-asset collision.
+        assert!(is_scripts_block("blocks\\VZ\\resident_P000_Q3.block"));
+        // Anchored: a different block that merely ends in `resident_P000_Q3.block` is NOT one of them.
+        assert!(!is_scripts_block("blocks\\VZ\\sound_resident_P000_Q3.block"));
         assert!(!is_scripts_block("blocks\\modkit\\some_model.block"));
     }
 
@@ -900,6 +925,47 @@ contributions: []
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
         build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)
             .expect("the collapsed WAD assembles");
+    }
+
+    /// Regression for the "overlap on N assets, neither contains the other" build failure.
+    ///
+    /// Two Shipments that both touch the RESIDENT framework block (`patch_lua` on `mrxplayer` &c.)
+    /// each build a standalone overlay carrying their own ~7000-row `resident_P000_Q3.block`. When
+    /// `collapse` dropped only `scripts_vz`, both resident blocks survived and `resolve` reported a
+    /// partial-overlap conflict on the resident block's rows. They must instead collapse to the
+    /// linker's single reconciled resident block, exactly as `scripts_vz` does.
+    #[test]
+    fn collapse_reconciles_the_resident_block_across_shipments() {
+        let resident_hash = 0x1234_5678;
+        let overlays = vec![
+            (
+                "shipment:a".into(),
+                "A".into(),
+                vec![block("blocks\\VZ\\resident_P000_Q3.block", resident_hash)],
+            ),
+            (
+                "shipment:b".into(),
+                "B".into(),
+                vec![block("blocks\\VZ\\resident_P000_Q3.block", resident_hash)],
+            ),
+        ];
+        // qm link re-emits the reconciled resident block once — collapse must take THIS one.
+        let link_scripts = vec![block("blocks\\VZ\\resident_P000_Q3.block", resident_hash)];
+
+        let groups = collapse(overlays, link_scripts, 2);
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(
+            resolved.conflicts.is_empty(),
+            "the resident block must reconcile, not conflict: {:?}",
+            resolved.conflicts
+        );
+        let resident: Vec<_> = resolved
+            .blocks
+            .iter()
+            .filter(|b| is_scripts_block(&b.path_string))
+            .collect();
+        assert_eq!(resident.len(), 1, "exactly one resident block survives");
+        validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
     }
 
     fn staged(shipment: &str, relative: &str) -> StagedFile {

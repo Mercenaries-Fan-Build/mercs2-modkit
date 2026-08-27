@@ -145,9 +145,13 @@ const ASI_TARGETS = [
   { value: "update", label: "update/" },
 ];
 
-async function addMod() {
-  const dir = await open({ directory: true, title: "Select a mod folder" });
-  if (typeof dir === "string") await store.loadModFromDir(dir).catch(() => {});
+async function addShipment() {
+  // A Shipment is a Quartermaster SOURCE folder (a manifest + src/), not a finished WAD. Staging
+  // the source is what lets modkit build and Lua-link it through `qm` at assemble time, so several
+  // script-touching mods reconcile into one scripts_vz instead of clobbering each other — the
+  // whole-WAD overlap conflict that importing finished .wad files cannot avoid.
+  const dir = await open({ directory: true, title: "Select a Shipment folder" });
+  if (typeof dir === "string") await store.importShipment(dir).catch(() => {});
 }
 async function addPlugin() {
   const sel = await open({
@@ -157,13 +161,6 @@ async function addPlugin() {
   });
   const paths = Array.isArray(sel) ? sel : typeof sel === "string" ? [sel] : [];
   if (paths.length) await store.importLocalAsi(paths).catch(() => {});
-}
-async function addWad() {
-  const f = await open({
-    title: "Select a mod's vz-patch.wad",
-    filters: [{ name: "Patch WAD", extensions: ["wad"] }],
-  });
-  if (typeof f === "string") await store.importPatchWad(f).catch(() => {});
 }
 async function deploy(mod: AsiMod) {
   await store.deployAsiMod(mod).catch(() => {});
@@ -198,8 +195,7 @@ const nothingHere = computed(
         <ConflictBadge v-if="mods.length" :count="conflictCount" />
         <RouterLink to="/catalog" class="btn-outline">Mod Market</RouterLink>
         <button class="btn-outline" :disabled="busy" @click="addPlugin">Add plugin</button>
-        <button class="btn-outline" :disabled="busy" @click="addWad">Add WAD</button>
-        <button class="btn-plate" :disabled="busy" @click="addMod">Add folder</button>
+        <button class="btn-plate" :disabled="busy" @click="addShipment">Add Shipment</button>
       </div>
     </header>
 
@@ -547,9 +543,9 @@ const nothingHere = computed(
       <p class="text-zinc-400">No mods yet.</p>
       <p class="mt-1 text-sm text-zinc-600">
         <RouterLink to="/catalog" class="text-emerald-400 hover:underline">Browse the Mod Market</RouterLink>
-        for mercs.ink Shipments and repository plugins, or add a folder, a
-        <code class="text-zinc-400">.asi</code> plugin, or a
-        <code class="text-zinc-400">vz-patch.wad</code>.
+        for mercs.ink Shipments and repository plugins, or add a
+        <span class="text-zinc-400">Shipment</span> folder or a
+        <code class="text-zinc-400">.asi</code> plugin.
       </p>
     </div>
 

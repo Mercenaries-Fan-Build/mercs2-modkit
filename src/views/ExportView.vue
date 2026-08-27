@@ -35,12 +35,12 @@ const {
   textures,
 } = storeToRefs(store);
 
-async function importWad() {
-  const f = await open({
-    title: "Select a mod's vz-patch.wad",
-    filters: [{ name: "Patch WAD", extensions: ["wad"] }],
-  });
-  if (typeof f === "string") await store.importPatchWad(f).catch(() => {});
+async function addShipment() {
+  // Stage a Quartermaster SOURCE folder, not a finished WAD: qm builds and Lua-links the whole
+  // staged set at assemble time, so several script-touching mods reconcile into one scripts_vz
+  // instead of one clobbering another — the overlap a finished .wad import cannot merge past.
+  const dir = await open({ directory: true, title: "Select a Shipment folder" });
+  if (typeof dir === "string") await store.importShipment(dir).catch(() => {});
 }
 
 const nothingToBuild = computed(
@@ -169,9 +169,9 @@ function outcomeText(o: GroupOutcome): string {
       <RouterLink to="/wardrobe" class="text-emerald-400 underline">wardrobe outfit</RouterLink>
       or a
       <RouterLink to="/textures" class="text-emerald-400 underline">texture</RouterLink>,
-      or add an existing mod WAD below.
+      or add a Shipment below.
       <div class="mt-4">
-        <button class="btn-secondary" @click="importWad">Add a WAD…</button>
+        <button class="btn-secondary" @click="addShipment">Add Shipment…</button>
       </div>
     </div>
 
@@ -190,21 +190,20 @@ function outcomeText(o: GroupOutcome): string {
         </span>
         will be included.
       </div>
-      <!-- Imported community WADs. The game loads only one patch WAD, so installing two
-           prebuilt mods has never been possible — modkit merges them into one. -->
-      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
-        <div class="flex items-center justify-between">
-          <div>
-            <h3 class="plate-label">Mod WADs</h3>
-            <p class="mt-1 text-xs text-zinc-500">
-              Add existing <code>vz-patch.wad</code> mods. Normally you could only use one at
-              a time — these get merged together.
-            </p>
-          </div>
-          <button class="btn-secondary shrink-0" @click="importWad">Add a WAD…</button>
+      <!-- Imported community WADs (legacy). New mods are added as Shipments below; this section
+           only appears when finished WADs are already in the load order, so they stay reorderable
+           and removable. The game loads one patch WAD, so these are still merged into it. -->
+      <section v-if="prebuilt.length" class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
+        <div>
+          <h3 class="plate-label">Mod WADs</h3>
+          <p class="mt-1 text-xs text-zinc-500">
+            Finished <code>vz-patch.wad</code> mods already in the load order — merged into the one
+            the game loads. Two that partially overlap can't be reconciled here; add mods as
+            Shipments instead.
+          </p>
         </div>
 
-        <ul v-if="prebuilt.length" class="mt-4 space-y-2">
+        <ul class="mt-4 space-y-2">
           <li
             v-for="(p, i) in prebuilt"
             :key="p.id"
@@ -246,24 +245,24 @@ function outcomeText(o: GroupOutcome): string {
             </p>
           </li>
         </ul>
-        <p v-else class="mt-3 text-xs text-zinc-600">None added.</p>
       </section>
 
-      <!-- Shipments handed over from the Workshop's "Send to Modkit". Source projects, not finished
-           WADs: modkit builds and Lua-links them through Quartermaster at build time, so several
-           script-touching Shipments reconcile instead of one clobbering another. -->
-      <section
-        v-if="shipments.length"
-        class="guilloche mt-6 rounded-xl border border-zinc-800 p-5"
-      >
-        <div>
-          <h3 class="plate-label">Workshop Shipments</h3>
-          <p class="mt-1 text-xs text-zinc-500">
-            Sent from the Workshop. Built and script-linked through Quartermaster when you build
-            below — no need to add them by hand.
-          </p>
+      <!-- Shipments: Quartermaster source projects, not finished WADs. modkit builds and Lua-links
+           the whole set through qm at build time, so several script-touching Shipments reconcile
+           instead of one clobbering another. Staged from the Workshop's "Send to Modkit" or added
+           by hand here. -->
+      <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="plate-label">Shipments</h3>
+            <p class="mt-1 text-xs text-zinc-500">
+              Source mods, built and script-linked through Quartermaster when you build below.
+              Sent from the Workshop, or add a local Shipment folder.
+            </p>
+          </div>
+          <button class="btn-secondary shrink-0" @click="addShipment">Add Shipment…</button>
         </div>
-        <ul class="mt-4 space-y-2">
+        <ul v-if="shipments.length" class="mt-4 space-y-2">
           <li
             v-for="(s, i) in shipments"
             :key="s.id"
@@ -279,6 +278,7 @@ function outcomeText(o: GroupOutcome): string {
             </button>
           </li>
         </ul>
+        <p v-else class="mt-3 text-xs text-zinc-600">None added.</p>
       </section>
 
       <!-- Load order. Later mods override earlier ones — same rule as the engine. -->
