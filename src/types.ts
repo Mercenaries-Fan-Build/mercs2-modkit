@@ -1009,21 +1009,6 @@ export interface InstallDllResult {
   overridden: boolean;
 }
 
-/** One managed dependency after an auto-on-deploy resolution pass. */
-export interface ResolvedDependency {
-  name: string;
-  versionReq: string;
-  /** Release tag installed, or null when the dependency was skipped (see `note`). */
-  installedTag: string | null;
-  /** Why it was skipped, when it was. */
-  note: string | null;
-}
-
-/** Result of resolving a Shipment's managed `load.requires` on deploy. */
-export interface ResolveDepsResult {
-  resolved: ResolvedDependency[];
-}
-
 /**
  * Install state for one artifact modkit manages, from the backend ledger.
  *
