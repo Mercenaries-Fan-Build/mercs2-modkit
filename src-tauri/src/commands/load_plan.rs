@@ -105,7 +105,9 @@ pub struct LoadPlan {
     pub capabilities: Vec<CapabilityRow>,
     pub conflicts: Vec<ConflictRow>,
     pub supersedes: Vec<SupersedeRow>,
-    pub script_block_paths: Vec<String>,
+    /// Every block `qm link` re-emits: the script blocks plus the merged string-table blocks
+    /// (renamed from `script_block_paths`, user 2026-09-24).
+    pub link_block_paths: Vec<String>,
     pub findings: Vec<Finding>,
 }
 
@@ -647,7 +649,7 @@ pub(crate) mod tests {
         { "declared_by": "shipment:ess", "index": 0, "dest": "on_load", "file": "1_Ess.lua",
           "relative": "scripts/OnLoad/1_Ess.lua", "present": false }
       ],
-      "script_block_paths": ["blocks\\VZ\\scripts_vz_P000_Q3.block", "blocks\\VZ\\resident_P000_Q3.block"],
+      "link_block_paths": ["blocks\\VZ\\scripts_vz_P000_Q3.block", "blocks\\VZ\\resident_P000_Q3.block"],
       "findings": []
     }"#;
 
@@ -700,6 +702,14 @@ pub(crate) mod tests {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["requirements"][0]["status"] = serde_json::json!("probably_fine");
         assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+    }
+
+    /// The field was renamed; a plan still carrying the old name is refused, not read.
+    #[test]
+    fn the_old_script_block_paths_name_is_refused() {
+        let text = CHAIN_PLAN.replace("link_block_paths", "script_block_paths");
+        let err = LoadPlan::parse(&text, &chain_request(), Producer::Preflight).unwrap_err();
+        assert!(err.contains("script_block_paths") || err.contains("link_block_paths"), "{err}");
     }
 
     #[test]
