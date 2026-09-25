@@ -17,6 +17,7 @@ use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
 use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
+use commands::dependencies::{plan_shipment_removal, remove_shipments};
 use commands::language::{clear_added_language, scan_languages, set_added_language, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::license::detect_license;
@@ -201,6 +202,8 @@ pub fn run() {
             fetch_mercsink_releases,
             fetch_mercsink_release,
             install_mercsink_shipment,
+            plan_shipment_removal,
+            remove_shipments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
