@@ -114,7 +114,11 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// A Workshop Shipment staged in the load order (a qm source directory, later wins).
+///
+/// Deserialized through [`ShipmentRefWire`] so that a saved row without `install_reason` fails
+/// with a message the player can act on rather than a bare serde error (user, 2026-09-24).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "ShipmentRefWire")]
 pub struct ShipmentRef {
     /// Stable id used in the load order and for dedupe. Folder-derived, and therefore **local
     /// only**: two checkouts of the same Shipment are two rows here, which is what the load
@@ -147,6 +151,48 @@ pub struct ShipmentRef {
     /// automatically, and a `user` row never is. Explicitly installing a `dependency`
     /// row promotes it to `user`; nothing demotes one.
     pub install_reason: InstallReason,
+}
+
+/// [`ShipmentRef`] as it arrives, before `install_reason` is checked. Only `install_reason` is
+/// optional here, and only so its absence can be named; it is never defaulted.
+#[derive(Deserialize)]
+struct ShipmentRefWire {
+    id: String,
+    name: String,
+    path: String,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default = "Origin::local_unknown")]
+    origin: Origin,
+    install_reason: Option<InstallReason>,
+}
+
+/// The refusal for a row saved before dependency tracking existed.
+pub(crate) fn missing_install_reason(name: &str) -> String {
+    format!(
+        "The Shipment \"{name}\" in your saved library has no install reason: the library \
+         predates dependency tracking and must be rebuilt. Remove its Shipments and install \
+         them again."
+    )
+}
+
+impl TryFrom<ShipmentRefWire> for ShipmentRef {
+    type Error = String;
+
+    fn try_from(w: ShipmentRefWire) -> Result<Self, String> {
+        let install_reason = w.install_reason.ok_or_else(|| missing_install_reason(&w.name))?;
+        Ok(ShipmentRef {
+            id: w.id,
+            name: w.name,
+            path: w.path,
+            slug: w.slug,
+            version: w.version,
+            origin: w.origin,
+            install_reason,
+        })
+    }
 }
 
 /// See [`ShipmentRef::install_reason`].
@@ -818,6 +864,30 @@ mod tests {
         let info = inspect_shipment(dir.to_string_lossy().into()).unwrap();
         assert_eq!(info.slug, None);
         assert_eq!(info.name, "blank");
+    }
+
+    /// A saved row with no `install_reason` predates dependency tracking. It fails with a message
+    /// saying the library must be rebuilt — not a bare serde error, and not a defaulted reason.
+    #[test]
+    fn a_row_without_an_install_reason_fails_with_a_rebuild_message() {
+        let old = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","slug":"ess","version":"0.7.0"}"#;
+        let err = serde_json::from_str::<ShipmentRef>(old).unwrap_err().to_string();
+        assert!(err.contains("predates dependency tracking"), "{err}");
+        assert!(err.contains("must be rebuilt"), "{err}");
+        assert!(err.contains("\"Ess\""), "names the row: {err}");
+        assert!(!err.contains("missing field"), "not a bare serde error: {err}");
+
+        let null = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","install_reason":null}"#;
+        assert!(serde_json::from_str::<ShipmentRef>(null).unwrap_err().to_string().contains("must be rebuilt"));
+
+        let bad = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","install_reason":"maybe"}"#;
+        assert!(serde_json::from_str::<ShipmentRef>(bad).is_err());
+
+        let ok = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","install_reason":"dependency"}"#;
+        assert_eq!(
+            serde_json::from_str::<ShipmentRef>(ok).unwrap().install_reason,
+            InstallReason::Dependency
+        );
     }
 
     /// A Shipment row persisted before origins existed must still load — as "staged locally,
