@@ -32,6 +32,7 @@ import type {
   ModkitUpdate,
   MercsInkInstall,
   RemovalOutcome,
+  SavedShipments,
   ShipmentRemovalPlan,
   PrebuiltWad,
   RegistryFeed,
@@ -320,6 +321,12 @@ interface ProjectState {
    * Nothing is removed until {@link confirmShipmentRemoval}; cancelling removes nothing.
    */
   pendingShipmentRemoval: ShipmentRemovalPlan | null;
+  /**
+   * Saved Shipment rows the backend refused on restore (a library saved before dependency
+   * tracking, or rows it cannot read). `saved` is the stored value, kept verbatim and written
+   * back unchanged; every Shipment write is refused until {@link discardRefusedShipments}.
+   */
+  refusedShipments: { message: string; count: number; saved: unknown } | null;
   /** Texture replacements queued for the next build. */
   textures: TextureSwap[];
   /** Every nameable texture in this install (browsable). Not persisted — cheap to rebuild. */
@@ -371,6 +378,7 @@ export const useProjectStore = defineStore("project", {
     prebuilt: [],
     shipments: [],
     pendingShipmentRemoval: null,
+    refusedShipments: null,
     textures: [],
     textureCatalog: [],
     validation: null,
@@ -715,21 +723,32 @@ export const useProjectStore = defineStore("project", {
           this.enabled = lib.enabled ?? {};
           this.wardrobe = lib.wardrobe ?? [];
           this.prebuilt = lib.prebuilt ?? [];
-          // A Shipment row saved before dependency tracking has no `install_reason`. It is not
-          // defaulted: the Shipment rows are refused, and the player is told the library must
-          // be rebuilt (user, 2026-09-24). The Rust side refuses such a row the same way.
-          const saved: ShipmentRef[] = lib.shipments ?? [];
-          const untracked = saved.find((s) => s.install_reason == null);
-          if (untracked) {
-            this.shipments = [];
-            this.error =
-              `The Shipment "${untracked.name}" in your saved library has no install reason: ` +
-              "the library predates dependency tracking and must be rebuilt. Its Shipments " +
-              "were not loaded; install them again.";
-          } else {
-            this.shipments = saved;
-          }
           this.textures = lib.textures ?? [];
+          // The Shipment rows are checked by the backend (`restore_saved_shipments`). Rows saved
+          // before dependency tracking, or rows that cannot be read, are NOT loaded and NOT
+          // overwritten: they are kept verbatim in `refusedShipments`, persisted as they were,
+          // until the player explicitly discards them (user, 2026-09-24).
+          const savedShipments: unknown = lib.shipments ?? null;
+          try {
+            const restored = await invoke<SavedShipments>("restore_saved_shipments", {
+              saved: savedShipments,
+            });
+            if (restored.state === "loaded") {
+              this.shipments = restored.rows;
+            } else {
+              this.refusedShipments = {
+                message: restored.message,
+                count: restored.count,
+                saved: savedShipments,
+              };
+            }
+          } catch (e) {
+            this.refusedShipments = {
+              message: String(e),
+              count: Array.isArray(savedShipments) ? savedShipments.length : 0,
+              saved: savedShipments,
+            };
+          }
         }
       } catch {
         /* ignore corrupt cache */
@@ -745,7 +764,9 @@ export const useProjectStore = defineStore("project", {
             enabled: state.enabled,
             wardrobe: state.wardrobe,
             prebuilt: state.prebuilt,
-            shipments: state.shipments,
+            // While the saved rows are refused, they are written back exactly as they were
+            // saved: nothing the store does can overwrite them until the player discards them.
+            shipments: state.refusedShipments ? state.refusedShipments.saved : state.shipments,
             textures: state.textures,
           })
         );
@@ -856,6 +877,7 @@ export const useProjectStore = defineStore("project", {
       item: RegistryMod,
       version?: string,
     ): Promise<MercsInkInstall> {
+      this.assertShipmentsWritable();
       this.busy = true;
       this.error = null;
       try {
@@ -2121,6 +2143,7 @@ export const useProjectStore = defineStore("project", {
      * at assemble time, so several script-touching Shipments compose instead of clobbering.
      */
     async importShipment(path: string): Promise<ShipmentRef> {
+      this.assertShipmentsWritable();
       this.busy = true;
       this.error = null;
       try {
@@ -2138,10 +2161,39 @@ export const useProjectStore = defineStore("project", {
     },
 
     /**
+     * Throw while the saved Shipment rows are refused: no Shipment may be added, replaced or
+     * removed until the player has chosen to discard the old rows, or they would be lost.
+     */
+    assertShipmentsWritable() {
+      if (this.refusedShipments) {
+        const msg =
+          `${this.refusedShipments.message}\nChoose "Discard old Shipments" first; until then ` +
+          "no Shipment can be added or removed.";
+        this.error = msg;
+        throw new Error(msg);
+      }
+    },
+
+    /**
+     * The player's explicit choice to rebuild: discard the refused saved Shipment rows. This is
+     * the only thing that removes them from storage.
+     */
+    discardRefusedShipments() {
+      this.refusedShipments = null;
+      this.shipments = [];
+      this.error = null;
+    },
+
+    /**
      * Start removing a Shipment: compute the whole chain it takes (the cascade, the capability
      * rule and the orphans) and hold it for confirmation. Nothing is removed here.
      */
     async planShipmentRemoval(id: string): Promise<void> {
+      try {
+        this.assertShipmentsWritable();
+      } catch {
+        return; // the refusal is already in `error`
+      }
       this.busy = true;
       this.error = null;
       try {
@@ -2170,6 +2222,7 @@ export const useProjectStore = defineStore("project", {
     async confirmShipmentRemoval(): Promise<void> {
       const plan = this.pendingShipmentRemoval;
       if (!plan) return;
+      this.assertShipmentsWritable();
       const rows = [
         plan.removed,
         ...plan.cascade.map((c) => c.shipment),
