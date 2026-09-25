@@ -16,9 +16,9 @@
 //!   goes below an installed version.
 //! * `capability` requirements are **not** auto-installed. Which provider to install is not
 //!   decided, and Modkit never infers an undeclared need. An unmet capability is reported by
-//!   preflight as M0204 (user, 2026-09-24).
+//!   preflight as M0204.
 //! * Re-resolving every dependency row on every build, and excluding prereleases, are not
-//!   done here (user, 2026-09-24).
+//!   done here.
 //!
 //! # Removal
 //!
