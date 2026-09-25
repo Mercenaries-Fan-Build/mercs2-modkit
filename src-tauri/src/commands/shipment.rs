@@ -18,9 +18,9 @@
 //!
 //! qm's native model is per-Shipment overlays + a link WAD mounted last. The game (and
 //! [`super::deploy_wad`]) load a single `vz-patch.wad`, so we collapse: each Shipment's overlay
-//! contributes its blocks **with the linker-owned blocks dropped** — both `scripts_vz` AND the
-//! resident framework block, the two qm's linker re-emits (the plan's `script_block_paths`) — and the
-//! linker's reconciled copies of those blocks are added once, last. Dropping the per-Shipment
+//! contributes its blocks **with the linker-owned blocks dropped** — `scripts_vz`, the resident
+//! framework block and every merged string-table block, which the plan lists as
+//! `link_block_paths` — and the linker's reconciled copies of those blocks are added once, last. Dropping the per-Shipment
 //! copies is what keeps `claim::resolve` from seeing a linker group partially overriding a larger
 //! overlay group (an atomic partial-overlap conflict) — and, for the resident block, from seeing
 //! two overlays collide on its ~7000 rows. Non-linker overlaps across Shipments still resolve
@@ -706,19 +706,20 @@ pub async fn shipment_groups(
     //    collected in that order, with link's last.
     let (files, warnings) = resolve_file_collisions(files);
     Ok(ShipmentBuild {
-        groups: collapse(overlays, link_blocks, &plan.script_block_paths, shipments.len()),
+        groups: collapse(overlays, link_blocks, &plan.link_block_paths, shipments.len()),
         files,
         warnings,
     })
 }
 
-/// Is this block one qm's linker owns? The plan lists them by path (`script_block_paths`:
-/// the second element of each `link::SCRIPT_BLOCKS` entry). Compared case-insensitively and
+/// Is this block one qm's linker owns? The plan lists them by path (`link_block_paths`):
+/// the script blocks and every string table link merges across Shipments (the last key in
+/// plan order wins). Compared case-insensitively and
 /// with either separator, because a PTHS path is a Windows path.
-fn is_link_owned(path_string: &str, script_block_paths: &[String]) -> bool {
+fn is_link_owned(path_string: &str, link_block_paths: &[String]) -> bool {
     let norm = |p: &str| p.replace('/', "\\").to_ascii_lowercase();
     let p = norm(path_string);
-    script_block_paths.iter().any(|s| norm(s) == p)
+    link_block_paths.iter().any(|s| norm(s) == p)
 }
 
 /// Fold per-Shipment overlays + the link WAD into final claim groups.
@@ -734,14 +735,14 @@ fn is_link_owned(path_string: &str, script_block_paths: &[String]) -> bool {
 fn collapse(
     overlays: Vec<(String, String, Vec<mercs2_formats::patch_wad::PatchBlock>)>,
     link_blocks: Vec<mercs2_formats::patch_wad::PatchBlock>,
-    script_block_paths: &[String],
+    link_block_paths: &[String],
     shipment_count: usize,
 ) -> Vec<ClaimGroup> {
     let mut groups: Vec<ClaimGroup> = Vec::new();
     for (id, name, blocks) in overlays {
         let kept: Vec<_> = blocks
             .into_iter()
-            .filter(|b| !is_link_owned(&b.path_string, script_block_paths))
+            .filter(|b| !is_link_owned(&b.path_string, link_block_paths))
             .collect();
         if kept.is_empty() {
             continue;
@@ -758,7 +759,7 @@ fn collapse(
         groups.push(ClaimGroup {
             mod_id: "qm-link:scripts".into(),
             mod_name: "Quartermaster link".into(),
-            label: format!("Reconciled scripts + resident ({shipment_count} Shipment(s))"),
+            label: format!("Linked scripts and string tables ({shipment_count} Shipment(s))"),
             atomic: true,
             blocks: link_blocks,
         });
@@ -960,18 +961,23 @@ mod tests {
         assert_eq!(r.origin.id, None);
     }
 
-    /// The two paths qm's `link::SCRIPT_BLOCKS` lists, as a plan's `script_block_paths` carries
-    /// them.
-    fn script_block_paths() -> Vec<String> {
+    /// A merged string-table block, in the single-entry `blocks\VZ\mod_<hash>.block` shape qm's
+    /// `edit_stringdb` lowering emits (qm `build.rs`, the add_language overlay block).
+    const STRING_TABLE: &str = r"blocks\VZ\mod_1a2b3c4d.block";
+
+    /// What a plan's `link_block_paths` carries: qm's two script blocks plus a merged string
+    /// table.
+    fn link_block_paths() -> Vec<String> {
         vec![
             r"blocks\VZ\scripts_vz_P000_Q3.block".into(),
             r"blocks\VZ\resident_P000_Q3.block".into(),
+            STRING_TABLE.into(),
         ]
     }
 
     #[test]
     fn link_owned_blocks_are_the_ones_the_plan_lists() {
-        let paths = script_block_paths();
+        let paths = link_block_paths();
         assert!(is_link_owned(r"blocks\VZ\scripts_vz_P000_Q3.block", &paths));
         // The resident framework block is ALSO linker-owned — qm re-emits it, so modkit must take
         // it from the link WAD and drop it from overlays. Missing this was the ~7000-asset collision.
@@ -1012,7 +1018,7 @@ mod tests {
 
     /// Every group's blocks that the plan lists as linker-owned, with the group's id.
     fn link_owned_in(groups: &[ClaimGroup]) -> Vec<(String, String)> {
-        let paths = script_block_paths();
+        let paths = link_block_paths();
         groups
             .iter()
             .flat_map(|g| {
@@ -1047,7 +1053,7 @@ mod tests {
         ];
         let link_blocks = vec![block(scripts, scripts_hash)];
 
-        let groups = collapse(overlays, link_blocks, &script_block_paths(), 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
         assert_eq!(
             link_owned_in(&groups),
             vec![("qm-link:scripts".to_string(), scripts.to_string())],
@@ -1086,7 +1092,7 @@ mod tests {
         // qm link re-emits the reconciled resident block once — collapse must take THIS one.
         let link_blocks = vec![block(resident, resident_hash)];
 
-        let groups = collapse(overlays, link_blocks, &script_block_paths(), 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
         assert_eq!(
             link_owned_in(&groups),
             vec![("qm-link:scripts".to_string(), resident.to_string())]
@@ -1100,6 +1106,34 @@ mod tests {
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
     }
 
+    /// Two Shipments both editing one string table each ship their own copy of its block; link
+    /// merges them per key. Both per-Shipment copies are dropped and link's merged one is kept,
+    /// once, last — no conflict.
+    #[test]
+    fn collapse_takes_the_merged_string_table_from_link() {
+        let table_hash = 0x1A2B_3C4D;
+        let overlays = vec![
+            (
+                "shipment:a".into(),
+                "A".into(),
+                vec![block(r"blocks\a\model.block", 0x1111), block(STRING_TABLE, table_hash)],
+            ),
+            ("shipment:b".into(), "B".into(), vec![block(STRING_TABLE, table_hash)]),
+        ];
+        let link_blocks = vec![block(STRING_TABLE, table_hash)];
+
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        assert_eq!(
+            link_owned_in(&groups),
+            vec![("qm-link:scripts".to_string(), STRING_TABLE.to_string())],
+            "only link's merged copy survives"
+        );
+        assert_eq!(groups.len(), 2, "B carried only the table, so it contributes no group");
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
+        validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
+    }
+
     /// **All** of the link WAD's blocks are kept, not only the listed ones.
     #[test]
     fn collapse_keeps_every_link_block() {
@@ -1107,7 +1141,7 @@ mod tests {
             block(r"blocks\VZ\scripts_vz_P000_Q3.block", 0x10),
             block(r"blocks\qm\modloader.block", 0x20),
         ];
-        let groups = collapse(Vec::new(), link_blocks, &script_block_paths(), 1);
+        let groups = collapse(Vec::new(), link_blocks, &link_block_paths(), 1);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].blocks.len(), 2);
     }
@@ -1119,7 +1153,7 @@ mod tests {
             ("shipment:b".into(), "B".into(), vec![block(r"blocks\b\x.block", 0x2)]),
             ("shipment:a".into(), "A".into(), vec![block(r"blocks\a\x.block", 0x1)]),
         ];
-        let groups = collapse(overlays, Vec::new(), &script_block_paths(), 2);
+        let groups = collapse(overlays, Vec::new(), &link_block_paths(), 2);
         let ids: Vec<&str> = groups.iter().map(|g| g.mod_id.as_str()).collect();
         assert_eq!(ids, vec!["shipment:b", "shipment:a"]);
     }
@@ -1180,7 +1214,7 @@ mod tests {
             "A".into(),
             vec![block("blocks\\a\\model.block", 0x1111)],
         )];
-        let groups = collapse(overlays, Vec::new(), &script_block_paths(), 1);
+        let groups = collapse(overlays, Vec::new(), &link_block_paths(), 1);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].blocks.len(), 1);
     }
