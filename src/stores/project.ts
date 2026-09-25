@@ -31,6 +31,8 @@ import type {
   ModelVariant,
   ModkitUpdate,
   MercsInkInstall,
+  RemovalOutcome,
+  ShipmentRemovalPlan,
   PrebuiltWad,
   RegistryFeed,
   RegistryMod,
@@ -314,6 +316,11 @@ interface ProjectState {
   prebuilt: PrebuiltWad[];
   /** Workshop Shipments (qm source projects) staged for the next build, in load order. */
   shipments: ShipmentRef[];
+  /**
+   * A Shipment removal waiting for the player's confirmation: the full chain it takes.
+   * Nothing is removed until {@link confirmShipmentRemoval}; cancelling removes nothing.
+   */
+  pendingShipmentRemoval: ShipmentRemovalPlan | null;
   /** Texture replacements queued for the next build. */
   textures: TextureSwap[];
   /** Every nameable texture in this install (browsable). Not persisted — cheap to rebuild. */
@@ -364,6 +371,7 @@ export const useProjectStore = defineStore("project", {
     wardrobe: [],
     prebuilt: [],
     shipments: [],
+    pendingShipmentRemoval: null,
     textures: [],
     textureCatalog: [],
     validation: null,
@@ -839,24 +847,33 @@ export const useProjectStore = defineStore("project", {
       this.busy = true;
       this.error = null;
       try {
+        // The resolver reads the installed rows' requirements through `qm preflight`, so it
+        // needs the library and the game folder.
         const res = await invoke<MercsInkInstall>("install_mercsink_shipment", {
           slug: item.slug,
           version: version ?? null,
+          installed: this.shipments,
+          gamePath: this.gamePath ?? "",
         });
         // Stamp a fresh staging revision so a reinstall dirties the load order like a new mod.
         // The backend re-extracted the staging dir, but at the same slug/version, so nothing in
         // the ShipmentRef would otherwise change — and the deployed WAD would look up to date
         // when it isn't. This marker is what moves `loadOrderSignature` on a reinstall.
-        res.shipment.stagedRev = Date.now();
-        // Dedupe on the staging path, as `importShipment` does — re-installing a mod
-        // overwrites its staging directory, so the same path is the same row.
-        const existing = this.shipments.findIndex(
-          (s) => s.path === res.shipment.path,
-        );
-        this.shipments =
-          existing >= 0
-            ? this.shipments.map((s, i) => (i === existing ? res.shipment : s))
-            : [...this.shipments, res.shipment];
+        const rev = Date.now();
+        // Dependencies first, then the Shipment itself: each replaces the row at the same
+        // staging path (re-installing overwrites that directory, so the same path is the same
+        // row) or is appended. The root carries `install_reason: "user"`, which promotes a row
+        // that was a dependency.
+        let rows = this.shipments;
+        for (const next of [...res.dependencies.map((d) => d.shipment), res.shipment]) {
+          next.stagedRev = rev;
+          const existing = rows.findIndex((s) => s.path === next.path);
+          rows =
+            existing >= 0
+              ? rows.map((s, i) => (i === existing ? next : s))
+              : [...rows, next];
+        }
+        this.shipments = rows;
         return res;
       } catch (e) {
         this.error = String(e);
@@ -2123,8 +2140,63 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    removeShipment(id: string) {
-      this.shipments = this.shipments.filter((s) => s.id !== id);
+    /**
+     * Start removing a Shipment: compute the whole chain it takes (the cascade, the capability
+     * rule and the orphans) and hold it for confirmation. Nothing is removed here.
+     */
+    async planShipmentRemoval(id: string): Promise<void> {
+      this.busy = true;
+      this.error = null;
+      try {
+        this.pendingShipmentRemoval = await invoke<ShipmentRemovalPlan>("plan_shipment_removal", {
+          id,
+          rows: this.shipments,
+          gamePath: this.gamePath ?? "",
+        });
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.busy = false;
+      }
+    },
+
+    /** Cancel a pending removal. Nothing was removed, and nothing is. */
+    cancelShipmentRemoval() {
+      this.pendingShipmentRemoval = null;
+    },
+
+    /**
+     * Remove exactly the confirmed chain. Each staging directory goes to Modkit's trash; a
+     * folder the player staged from disk is left alone. If a removal fails, the rows that were
+     * removed are dropped and the error names what was and was not removed.
+     */
+    async confirmShipmentRemoval(): Promise<void> {
+      const plan = this.pendingShipmentRemoval;
+      if (!plan) return;
+      const rows = [
+        plan.removed,
+        ...plan.cascade.map((c) => c.shipment),
+        ...plan.orphans,
+      ];
+      this.busy = true;
+      this.error = null;
+      try {
+        const out = await invoke<RemovalOutcome>("remove_shipments", { rows });
+        const gone = new Set(out.removed);
+        this.shipments = this.shipments.filter((s) => !gone.has(s.id));
+        if (out.failed) {
+          const name = (id: string) => rows.find((r) => r.id === id)?.name ?? id;
+          this.error =
+            `Could not remove ${name(out.failed.id)}: ${out.failed.error}\n` +
+            `Removed: ${out.removed.map(name).join(", ") || "nothing"}. ` +
+            `Not removed: ${[out.failed.id, ...out.not_attempted].map(name).join(", ")}.`;
+        }
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.pendingShipmentRemoval = null;
+        this.busy = false;
+      }
     },
 
     /** Move an imported WAD earlier/later. Later = overrides the ones above it. */
