@@ -727,7 +727,7 @@ export const useProjectStore = defineStore("project", {
           // The Shipment rows are checked by the backend (`restore_saved_shipments`). Rows saved
           // before dependency tracking, or rows that cannot be read, are NOT loaded and NOT
           // overwritten: they are kept verbatim in `refusedShipments`, persisted as they were,
-          // until the player explicitly discards them (user, 2026-09-24).
+          // until the player explicitly discards them.
           const savedShipments: unknown = lib.shipments ?? null;
           try {
             const restored = await invoke<SavedShipments>("restore_saved_shipments", {
