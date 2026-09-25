@@ -33,6 +33,7 @@
 pub mod asset_catalog;
 pub mod conflict_resolver;
 pub mod debug_bundle;
+pub mod dependencies;
 pub mod deploy;
 pub mod deploy_wad;
 pub mod dxwrapper;
@@ -42,6 +43,7 @@ pub mod installer;
 pub mod language;
 pub mod launch;
 pub mod license;
+pub mod load_plan;
 pub mod logprobe;
 pub mod managed;
 pub mod mercsink;
