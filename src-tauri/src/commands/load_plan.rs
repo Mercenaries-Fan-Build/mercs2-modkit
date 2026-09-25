@@ -106,7 +106,8 @@ pub struct LoadPlan {
     pub conflicts: Vec<ConflictRow>,
     pub supersedes: Vec<SupersedeRow>,
     /// Every block `qm link` re-emits: the script blocks plus the merged string-table blocks
-    /// (renamed from `script_block_paths`, user 2026-09-24).
+    /// (renamed from `script_block_paths`, which no longer fit once string tables joined the
+    /// list).
     pub link_block_paths: Vec<String>,
     pub findings: Vec<Finding>,
 }
