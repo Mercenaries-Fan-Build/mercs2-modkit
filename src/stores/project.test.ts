@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "./project";
-import type { ShipmentRef, ShipmentRemovalPlan } from "../types";
+import type { BuildResult, IncompatibilityCheck, ShipmentRef, ShipmentRemovalPlan } from "../types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -55,5 +55,47 @@ describe("Shipment removal", () => {
     expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["plan_shipment_removal"]);
     expect(invokeMock).not.toHaveBeenCalledWith("remove_shipments", expect.anything());
     expect(store.shipments).toEqual(before);
+  });
+});
+
+describe("Incompatibility check", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    invokeMock.mockReset();
+  });
+
+  const check: IncompatibilityCheck = {
+    list: {
+      state: "cached",
+      fetched_at: 1_000,
+      generated_at: "2026-09-25T10:00:00+00:00",
+      reason: "it answered HTTP 503",
+      message: "Couldn't check mercs.ink for incompatibility reports (it answered HTTP 503).",
+    },
+    notices: [],
+  };
+
+  function built(incompatibilities: IncompatibilityCheck | null): BuildResult {
+    return {
+      path: "",
+      staging_dir: "/build",
+      block_count: 0,
+      byte_size: 0,
+      sha256: "",
+      outcomes: [],
+      incompatibilities,
+    };
+  }
+
+  it("is set from a build and cleared by the next build, even one that fails", async () => {
+    const store = useProjectStore();
+    invokeMock.mockResolvedValueOnce(built(check));
+    await store.assemble();
+    expect(store.incompatibilityCheck).toEqual(check);
+
+    invokeMock.mockRejectedValueOnce("mercs.ink lists a confirmed incompatibility");
+    await expect(store.assemble()).rejects.toBe("mercs.ink lists a confirmed incompatibility");
+    expect(store.incompatibilityCheck).toBeNull();
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["assemble_patch_wad", "assemble_patch_wad"]);
   });
 });
