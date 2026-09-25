@@ -1610,6 +1610,11 @@ mod tests {
     /// A one-shot HTTP/1.1 server answering `n` requests from a canned script, recording each
     /// request's `If-None-Match`. Deliberately minimal: enough for reqwest, no more.
     fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        serve_bytes(responses.into_iter().map(String::into_bytes).collect())
+    }
+
+    /// [`serve`] for responses whose bodies are not text, such as a zip download.
+    fn serve_bytes(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
@@ -1625,7 +1630,7 @@ mod tests {
                     .map(|l| l[l.find(':').unwrap() + 1..].trim().to_string())
                     .unwrap_or_default();
                 seen.push(inm);
-                let _ = sock.write_all(body.as_bytes());
+                let _ = sock.write_all(&body);
                 let _ = sock.flush();
             }
             seen
@@ -1773,6 +1778,101 @@ mod tests {
         let err = rt.block_on(fetch(&c, &url, &cache)).unwrap_err();
         assert!(err.contains("404"), "got: {err}");
         assert!(err.contains("Not found."), "the server's own words: {err}");
+        let _ = handle.join();
+    }
+
+    /// A `200` whose body is raw bytes, as a release-asset download answers.
+    fn ok_bytes(body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// GitHub's by-tag release JSON with one asset carrying `digest`.
+    fn gh_release_json(tag: &str, asset: &str, digest: &str) -> String {
+        serde_json::json!({
+            "tag_name": tag,
+            "name": tag,
+            "assets": [{
+                "name": asset,
+                "browser_download_url": format!("https://example.invalid/{asset}"),
+                "digest": digest,
+                "state": "uploaded",
+            }],
+        })
+        .to_string()
+    }
+
+    /// The by-tag lookup reads the release a tag names, and the asset's digest comes back
+    /// exactly as GitHub published it.
+    #[test]
+    fn a_tag_lookup_resolves_the_asset_digest() {
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let body = gh_release_json("v0.7.0", "ess-v0.7.0.zip", &digest);
+        let (base, handle) = serve(vec![ok_with_etag("\"r1\"", &body)]);
+        let url = net::release::github_release_by_tag_url(&base, "o/r", "v0.7.0");
+
+        let gh = rt()
+            .block_on(net::release::github_release_by_tag_at(&client().unwrap(), &url, "o/r", "v0.7.0"))
+            .unwrap();
+        assert_eq!(gh.tag, "v0.7.0");
+        assert_eq!(gh.assets.len(), 1);
+        assert_eq!(gh.assets[0].name, "ess-v0.7.0.zip");
+        assert_eq!(gh.assets[0].digest.as_deref(), Some(digest.as_str()));
+        let _ = handle.join();
+    }
+
+    /// A tag GitHub does not know is a hard failure naming the project, the tag and the status,
+    /// never an empty release.
+    #[test]
+    fn a_missing_tag_is_a_hard_failure() {
+        let (base, handle) = serve(vec![error_body("404 Not Found", r#"{"message":"Not Found"}"#)]);
+        let url = net::release::github_release_by_tag_url(&base, "o/r", "v9.9.9");
+
+        let err = rt()
+            .block_on(net::release::github_release_by_tag_at(&client().unwrap(), &url, "o/r", "v9.9.9"))
+            .unwrap_err();
+        assert_eq!(err, "GitHub release lookup failed for o/r tag v9.9.9: 404 Not Found");
+        let _ = handle.join();
+    }
+
+    /// An exactly-named zip is taken without being opened, so the manifest check after the
+    /// digest is what refuses one that holds no manifest, even though its digest matches.
+    #[test]
+    fn a_named_zip_without_a_manifest_is_refused_after_its_digest_matches() {
+        let zip = zip_of(&["README.md", "src/a.lua"]);
+        let digest = format!("sha256:{}", sha256_hex(&zip));
+        let gh = gh_release_json("v0.7.0", "ess-v0.7.0.zip", &digest);
+        let (base, handle) = serve_bytes(vec![ok_bytes(&zip), ok_with_etag("\"r1\"", &gh).into_bytes()]);
+
+        let item: RegistryMod = serde_json::from_value(serde_json::json!({
+            "slug": "ess",
+            "repository": "https://github.com/o/r",
+        }))
+        .unwrap();
+        let release: RegistryRelease = serde_json::from_value(serde_json::json!({
+            "version": "0.7.0",
+            "tag": "v0.7.0",
+            "assets": [{
+                "name": "ess-v0.7.0.zip",
+                "download_url": format!("{base}/download/ess-v0.7.0.zip"),
+            }],
+        }))
+        .unwrap();
+
+        let err = rt()
+            .block_on(fetch_verified_zip_at(&client().unwrap(), &item, &release, &base))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "ess 0.7.0: ess-v0.7.0.zip holds no manifest.yaml/.yml/.json/.toml at its root or one \
+             folder down, so it is not a Quartermaster Shipment. (A finished vz-patch.wad goes \
+             through Import Patch WAD instead.)"
+        );
         let _ = handle.join();
     }
 }
