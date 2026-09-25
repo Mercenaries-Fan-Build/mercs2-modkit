@@ -30,6 +30,6 @@ pub mod release;
 pub use client::{client, USER_AGENT};
 pub use download::{download, DownloadOpts};
 pub use release::{
-    highest_satisfying, latest_release, list_releases, tag_version, Asset, AssetRule, Release,
+    github_release_by_tag, highest_satisfying, latest_release, list_releases, tag_version, Asset, AssetRule, Release,
     ReleaseHost,
 };
