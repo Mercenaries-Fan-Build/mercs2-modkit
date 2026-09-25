@@ -791,6 +791,14 @@ export interface ShipmentRemovalPlan {
   orphans: ShipmentRef[];
 }
 
+/**
+ * What the saved Shipment rows restore to. A library saved before dependency tracking is refused
+ * whole; its rows are kept untouched until the player discards them.
+ */
+export type SavedShipments =
+  | { state: "loaded"; rows: ShipmentRef[] }
+  | { state: "predates_dependency_tracking"; message: string; count: number };
+
 /** What happened to a confirmed removal; every row is accounted for. */
 export interface RemovalOutcome {
   removed: string[];
