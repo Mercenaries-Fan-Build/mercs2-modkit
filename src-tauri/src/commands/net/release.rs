@@ -403,21 +403,6 @@ pub async fn latest_release(
     }
 }
 
-/// One GitHub release, addressed by its tag: `GET /repos/{project}/releases/tags/{tag}`.
-///
-/// The Shipment installer's digest lookup: mercs.ink relays release
-/// metadata but no digest, so the chosen zip's `digest` is read from GitHub itself, one call per
-/// release. `project` is `owner/repo`. Any non-2xx answer is an error naming the release; a tag
-/// the forge reports but that parses to no release is an error too, never an empty release.
-pub async fn github_release_by_tag(
-    client: &reqwest::Client,
-    project: &str,
-    tag: &str,
-) -> Result<Release, String> {
-    let url = github_release_by_tag_url(GITHUB_API, project, tag);
-    github_release_by_tag_at(client, &url, project, tag).await
-}
-
 /// The GitHub REST API root the digest lookup addresses.
 pub(crate) const GITHUB_API: &str = "https://api.github.com";
 
@@ -427,8 +412,14 @@ pub(crate) fn github_release_by_tag_url(api: &str, project: &str, tag: &str) -> 
     format!("{api}/repos/{project}/releases/tags/{}", encode_tag(tag))
 }
 
-/// [`github_release_by_tag`] against a full lookup URL. The public function passes the real
-/// GitHub URL; tests pass one on a loopback listener. `project` and `tag` only name the release
+/// One GitHub release, addressed by its tag, from a full lookup URL built by
+/// [`github_release_by_tag_url`]: `GET {api}/repos/{project}/releases/tags/{tag}`.
+///
+/// The Shipment installer's digest lookup: mercs.ink relays release metadata but no digest, so
+/// the chosen zip's `digest` is read from GitHub itself, one call per release. `project` is
+/// `owner/repo`. Any non-2xx answer is an error naming the release; a tag the forge reports but
+/// that parses to no release is an error too, never an empty release. The installer passes the
+/// real GitHub root; tests pass a loopback listener. `project` and `tag` only name the release
 /// in error messages.
 pub(crate) async fn github_release_by_tag_at(
     client: &reqwest::Client,
