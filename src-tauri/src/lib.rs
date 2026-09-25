@@ -35,10 +35,7 @@ use commands::save_backup::{
     backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
     set_saves_dir,
 };
-use commands::setup::{
-    crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, resolve_shipment_dependencies,
-    update_game,
-};
+use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, update_game};
 use commands::shipment::{inspect_shipment, take_pending_shipment, PendingShipment};
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
@@ -162,7 +159,6 @@ pub fn run() {
             deploy_asi,
             trash_paths,
             install_pmc_bb,
-            resolve_shipment_dependencies,
             resolve_pmc_bb,
             pmc_bb_variants,
             managed_status,
