@@ -47,6 +47,7 @@ use mercs2_formats::patch_wad::read_patch_wad;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
+use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
 use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, REQUEST_FILE};
 use super::placement::{self, StagedFile};
 use super::proc::NoWindow;
@@ -512,6 +513,9 @@ pub struct ShipmentBuild {
     pub files: Vec<StagedFile>,
     /// Non-fatal advisories: currently, one per destination two Shipments both claimed.
     pub warnings: Vec<String>,
+    /// Unconfirmed reports from mercs.ink's incompatibility list that apply to the set. A
+    /// confirmed one refuses the build instead.
+    pub notices: Vec<Notice>,
 }
 
 /// Reduce the per-Shipment file lists to one file per destination, later-wins, warning about each
@@ -583,11 +587,17 @@ pub(crate) async fn preflight_rows(
 ///
 /// `corpus_hint` is an optional explicit reference-bundle path; when `None`, the corpus is resolved
 /// from the environment / the installed toolset.
+///
+/// `incompatibilities` is mercs.ink's community list, or `None` when it has never been
+/// downloaded. The set is checked against it twice: before preflight at the versions recorded at
+/// install, and after preflight at the versions qm read. Any confirmed report refuses the build,
+/// in one refusal that also carries preflight's findings when preflight refused.
 pub async fn shipment_groups(
     window: Window,
     shipments: &[ShipmentRef],
     game_path: &str,
     corpus_hint: Option<&Path>,
+    incompatibilities: Option<&IncompatibilityIndex>,
 ) -> Result<ShipmentBuild, String> {
     if shipments.is_empty() {
         return Ok(ShipmentBuild::default());
@@ -605,8 +615,40 @@ pub async fn shipment_groups(
     //    the tie-break qm's ordering uses.
     let preflight_dir = work_dir("preflight")?;
     let request = LoadRequest::for_rows(shipments);
+
+    // Checked before preflight as well as after, so a refusal from preflight still names any
+    // confirmed incompatibility at the versions recorded at install.
+    let before = match incompatibilities {
+        Some(index) => incompatibility::evaluate(
+            index,
+            shipments,
+            &incompatibility::recorded_versions(shipments),
+            VersionBasis::Recorded,
+        )?,
+        None => Vec::new(),
+    };
+
     let plan = super::load_plan::run_preflight(&qm, shipments, &game_arg, &preflight_dir)?;
-    plan.refuse_unless_ok(shipments)?;
+    if let Err(refused) = plan.refuse_unless_ok(shipments) {
+        return Err(match incompatibilities {
+            Some(index) => incompatibility::with_preflight_refusal(refused, index, shipments, &before),
+            None => refused,
+        });
+    }
+
+    // And again at the versions qm read from the manifests it is about to build.
+    let notices = match incompatibilities {
+        Some(index) => {
+            let after = incompatibility::evaluate(
+                index,
+                shipments,
+                &incompatibility::manifest_versions(&plan, shipments)?,
+                VersionBasis::Manifest,
+            )?;
+            incompatibility::gate(index, shipments, &incompatibility::merge(before, after))?
+        }
+        None => Vec::new(),
+    };
 
     // Every row maps back through `order` exactly once. `ok` is true here, and
     // a plan without `order` always carries the cycle error, so a missing order is unreachable
@@ -709,6 +751,7 @@ pub async fn shipment_groups(
         groups: collapse(overlays, link_blocks, &plan.link_block_paths, shipments.len()),
         files,
         warnings,
+        notices,
     })
 }
 
