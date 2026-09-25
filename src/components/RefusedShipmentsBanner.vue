@@ -2,7 +2,7 @@
 /**
  * Shown while the saved Shipment rows are refused (a library saved before dependency tracking,
  * or rows the backend cannot read). The rows stay in storage untouched; the only way to remove
- * them is this explicit action (user, 2026-09-24).
+ * them is this explicit action.
  */
 import { ref } from "vue";
 import { storeToRefs } from "pinia";
