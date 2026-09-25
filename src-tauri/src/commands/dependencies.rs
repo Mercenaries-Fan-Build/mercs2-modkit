@@ -865,7 +865,7 @@ mod tests {
             capabilities: vec![],
             conflicts: vec![],
             supersedes: vec![],
-            script_block_paths: vec![],
+            link_block_paths: vec![],
             findings: vec![],
         }
     }
