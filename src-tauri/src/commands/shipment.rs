@@ -173,8 +173,8 @@ struct ShipmentRefWire {
 pub(crate) fn missing_install_reason(name: &str) -> String {
     format!(
         "The Shipment \"{name}\" in your saved library has no install reason: the library \
-         predates dependency tracking and must be rebuilt. Remove its Shipments and install \
-         them again."
+         predates dependency tracking and must be rebuilt. Your saved Shipments are kept \
+         untouched until you choose to discard them and install them again."
     )
 }
 
@@ -193,6 +193,55 @@ impl TryFrom<ShipmentRefWire> for ShipmentRef {
             install_reason,
         })
     }
+}
+
+/// What the saved library's Shipment rows restore to (user, 2026-09-24).
+///
+/// A library saved before dependency tracking has rows with no `install_reason`. Those rows are
+/// not loaded, and not defaulted; the frontend keeps them in storage untouched and refuses to
+/// write Shipment rows until the player explicitly chooses to discard them and rebuild.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SavedShipments {
+    Loaded { rows: Vec<ShipmentRef> },
+    PredatesDependencyTracking { message: String, count: usize },
+}
+
+/// Decide what the saved Shipment rows restore to. `null` (nothing saved) is an empty library.
+/// Any row without an `install_reason` makes the whole set [`SavedShipments::PredatesDependencyTracking`].
+/// Anything else that does not read as a row is an error naming its position.
+pub fn read_saved_shipments(saved: &serde_json::Value) -> Result<SavedShipments, String> {
+    if saved.is_null() {
+        return Ok(SavedShipments::Loaded { rows: Vec::new() });
+    }
+    let list = saved
+        .as_array()
+        .ok_or("The saved library's Shipment list is not a list, so it cannot be read.")?;
+    let untracked = list
+        .iter()
+        .find(|row| row.get("install_reason").is_none_or(serde_json::Value::is_null));
+    if let Some(row) = untracked {
+        let name = row.get("name").and_then(|n| n.as_str()).unwrap_or("(unnamed)");
+        return Ok(SavedShipments::PredatesDependencyTracking {
+            message: missing_install_reason(name),
+            count: list.len(),
+        });
+    }
+    let rows = list
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            serde_json::from_value::<ShipmentRef>(row.clone())
+                .map_err(|e| format!("Saved Shipment row {} cannot be read: {e}", i + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SavedShipments::Loaded { rows })
+}
+
+/// [`read_saved_shipments`] for the frontend's library restore.
+#[tauri::command]
+pub fn restore_saved_shipments(saved: serde_json::Value) -> Result<SavedShipments, String> {
+    read_saved_shipments(&saved)
 }
 
 /// See [`ShipmentRef::install_reason`].
@@ -849,6 +898,55 @@ mod tests {
             serde_json::from_str::<ShipmentRef>(ok).unwrap().install_reason,
             InstallReason::Dependency
         );
+    }
+
+    fn row_json(name: &str, reason: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({ "id": format!("shipment:{name}"), "name": name, "path": "/p" });
+        if let Some(r) = reason {
+            v["install_reason"] = serde_json::json!(r);
+        }
+        v
+    }
+
+    #[test]
+    fn saved_rows_with_install_reasons_load() {
+        let saved = serde_json::json!([row_json("ess", Some("user")), row_json("lua-bridge", Some("dependency"))]);
+        match read_saved_shipments(&saved).unwrap() {
+            SavedShipments::Loaded { rows } => assert_eq!(rows.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            read_saved_shipments(&serde_json::Value::Null).unwrap(),
+            SavedShipments::Loaded { rows } if rows.is_empty()
+        ));
+    }
+
+    /// One untracked row refuses the whole set, naming the row, and reports how many rows are
+    /// being kept. The rows are not defaulted and not partly loaded.
+    #[test]
+    fn a_saved_library_without_install_reasons_is_refused_whole() {
+        let saved = serde_json::json!([row_json("ess", Some("user")), row_json("old-mod", None)]);
+        match read_saved_shipments(&saved).unwrap() {
+            SavedShipments::PredatesDependencyTracking { message, count } => {
+                assert_eq!(count, 2);
+                assert!(message.contains("\"old-mod\""), "{message}");
+                assert!(message.contains("predates dependency tracking"), "{message}");
+                assert!(message.contains("kept untouched"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let null_reason = serde_json::json!([{ "id": "shipment:x", "name": "x", "path": "/p", "install_reason": null }]);
+        assert!(matches!(
+            read_saved_shipments(&null_reason).unwrap(),
+            SavedShipments::PredatesDependencyTracking { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_saved_row_is_an_error_not_a_skip() {
+        let saved = serde_json::json!([row_json("ess", Some("sometimes"))]);
+        assert!(read_saved_shipments(&saved).unwrap_err().contains("row 1"));
+        assert!(read_saved_shipments(&serde_json::json!({ "a": 1 })).is_err());
     }
 
     /// A Shipment row persisted before origins existed must still load — as "staged locally,
