@@ -23,6 +23,7 @@ import type {
   Origin,
   ExeCandidate,
   GameInfo,
+  IncompatibilityCheck,
   InstallDllResult,
   InstallResult,
   LoadedMod,
@@ -288,6 +289,12 @@ interface ProjectState {
   conflictGraph: ConflictGraph | null;
   resolutions: Record<string, Resolution>;
   buildResult: BuildResult | null;
+  /**
+   * What mercs.ink's community incompatibility list said about the last build's Shipments: the
+   * list it was checked against and the unconfirmed reports that apply. Cleared when a build
+   * starts, so a banner never outlives the build it describes.
+   */
+  incompatibilityCheck: IncompatibilityCheck | null;
   /** Snapshots of every vz-patch.wad a deploy has displaced — the undo list. */
   wadBackups: WadBackup[];
   /**
@@ -366,6 +373,7 @@ export const useProjectStore = defineStore("project", {
     conflictGraph: null,
     resolutions: {},
     buildResult: null,
+    incompatibilityCheck: null,
     wadBackups: [],
     deployedWad: null,
     deployedSignature: null,
@@ -1793,10 +1801,12 @@ export const useProjectStore = defineStore("project", {
       this.busy = true;
       this.error = null;
       this.buildResult = null;
+      this.incompatibilityCheck = null;
       try {
         this.buildResult = await invoke<BuildResult>("assemble_patch_wad", {
           options: this.buildOptions(opts.outputDir ?? null),
         });
+        this.incompatibilityCheck = this.buildResult.incompatibilities;
         return this.buildResult;
       } catch (e) {
         this.error = String(e);
