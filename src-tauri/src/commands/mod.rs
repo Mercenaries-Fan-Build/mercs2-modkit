@@ -39,6 +39,7 @@ pub mod deploy_wad;
 pub mod dxwrapper;
 pub mod game;
 pub mod human_skins;
+pub mod incompatibility;
 pub mod installer;
 pub mod language;
 pub mod launch;
