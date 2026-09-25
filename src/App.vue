@@ -11,6 +11,7 @@ import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
 import ShipmentRemovalDialog from "./components/ShipmentRemovalDialog.vue";
 import RefusedShipmentsBanner from "./components/RefusedShipmentsBanner.vue";
+import IncompatibilityBanner from "./components/IncompatibilityBanner.vue";
 
 const store = useProjectStore();
 const router = useRouter();
@@ -274,6 +275,7 @@ onMounted(async () => {
     <div class="flex flex-1 flex-col overflow-hidden">
       <GameBar />
       <RefusedShipmentsBanner />
+      <IncompatibilityBanner />
       <main class="flex-1 overflow-y-auto">
         <RouterView />
       </main>
