@@ -716,7 +716,20 @@ export const useProjectStore = defineStore("project", {
           this.enabled = lib.enabled ?? {};
           this.wardrobe = lib.wardrobe ?? [];
           this.prebuilt = lib.prebuilt ?? [];
-          this.shipments = lib.shipments ?? [];
+          // A Shipment row saved before dependency tracking has no `install_reason`. It is not
+          // defaulted: the Shipment rows are refused, and the player is told the library must
+          // be rebuilt (user, 2026-09-24). The Rust side refuses such a row the same way.
+          const saved: ShipmentRef[] = lib.shipments ?? [];
+          const untracked = saved.find((s) => s.install_reason == null);
+          if (untracked) {
+            this.shipments = [];
+            this.error =
+              `The Shipment "${untracked.name}" in your saved library has no install reason: ` +
+              "the library predates dependency tracking and must be rebuilt. Its Shipments " +
+              "were not loaded; install them again.";
+          } else {
+            this.shipments = saved;
+          }
           this.textures = lib.textures ?? [];
         }
       } catch {
