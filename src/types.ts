@@ -485,6 +485,13 @@ export interface ShipmentRef {
   /** `local` with a null id for anything staged from disk. */
   origin: Origin;
   /**
+   * Why the row is in the library. `user` for anything the player added;
+   * `dependency` for a Shipment the resolver installed because something required it. Orphan
+   * removal reads it: a `dependency` row nothing requires any more is removed with the chain
+   * that stopped requiring it, and a `user` row never is.
+   */
+  install_reason: InstallReason;
+  /**
    * A client-side "these bytes were just (re)staged" marker, set by the frontend at install time
    * and never by the backend. A reinstall re-extracts the same staging path at the same version,
    * so `id`/`version` alone can't tell the build the content changed; bumping this makes the load
@@ -493,6 +500,8 @@ export interface ShipmentRef {
    */
   stagedRev?: number;
 }
+
+export type InstallReason = "user" | "dependency";
 
 /** A snapshot of a `vz-patch.wad` that a deploy displaced. */
 export interface WadBackup {
@@ -747,6 +756,46 @@ export interface MercsInkInstall {
   target: string | null;
   assets: string[];
   staged_files: number;
+  /** What the resolver installed or updated alongside it, in the order it resolved them. */
+  dependencies: DependencyInstall[];
+}
+
+/** A Shipment installed or updated because something required it. */
+export interface DependencyInstall {
+  shipment: ShipmentRef;
+  release_version: string;
+  /** The version it replaced, when this was an update of an installed row. */
+  updated_from: string | null;
+  asset: string;
+}
+
+/** The requirement of a Shipment's that pulled it into a removal. */
+export interface PulledBy {
+  kind: "shipment" | "capability";
+  /** The required Shipment name or capability token. */
+  target: string;
+  range: string | null;
+}
+
+/** One Shipment a removal cascades to. */
+export interface CascadedShipment {
+  shipment: ShipmentRef;
+  pulled_by: PulledBy;
+}
+
+/** The full chain a removal takes, shown before anything is removed. */
+export interface ShipmentRemovalPlan {
+  removed: ShipmentRef;
+  cascade: CascadedShipment[];
+  /** Dependencies nothing will require any more. */
+  orphans: ShipmentRef[];
+}
+
+/** What happened to a confirmed removal; every row is accounted for. */
+export interface RemovalOutcome {
+  removed: string[];
+  failed: { id: string; error: string } | null;
+  not_attempted: string[];
 }
 
 export interface InstallResult {
