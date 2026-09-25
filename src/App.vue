@@ -9,6 +9,7 @@ import { useProjectStore } from "./stores/project";
 import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
+import ShipmentRemovalDialog from "./components/ShipmentRemovalDialog.vue";
 
 const store = useProjectStore();
 const router = useRouter();
@@ -275,6 +276,8 @@ onMounted(async () => {
         <RouterView />
       </main>
     </div>
+    <!-- One instance for every view that removes a Shipment: the chain is confirmed here. -->
+    <ShipmentRemovalDialog />
   </div>
 </template>
 
