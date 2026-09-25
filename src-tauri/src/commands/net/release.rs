@@ -278,7 +278,7 @@ fn asset_from_github(a: &serde_json::Value) -> Option<Asset> {
 
 /// Parse one GitHub release JSON object into a `Release`. `None` when it carries no usable tag,
 /// which skips a tagless/placeholder entry rather than turning it into a release with an empty tag.
-fn release_from_github(v: &serde_json::Value) -> Option<Release> {
+pub(crate) fn release_from_github(v: &serde_json::Value) -> Option<Release> {
     let tag = v["tag_name"].as_str().filter(|s| !s.is_empty())?.to_string();
     let name = v["name"]
         .as_str()
@@ -401,6 +401,51 @@ pub async fn latest_release(
         ReleaseHost::GitHub => github_latest(client, project).await,
         ReleaseHost::GitLab => gitlab_latest(client, project).await,
     }
+}
+
+/// One GitHub release, addressed by its tag: `GET /repos/{project}/releases/tags/{tag}`.
+///
+/// The Shipment installer's digest lookup: mercs.ink relays release
+/// metadata but no digest, so the chosen zip's `digest` is read from GitHub itself, one call per
+/// release. `project` is `owner/repo`. Any non-2xx answer is an error naming the release; a tag
+/// the forge reports but that parses to no release is an error too, never an empty release.
+pub async fn github_release_by_tag(
+    client: &reqwest::Client,
+    project: &str,
+    tag: &str,
+) -> Result<Release, String> {
+    let api = format!(
+        "https://api.github.com/repos/{project}/releases/tags/{}",
+        encode_tag(tag)
+    );
+    let resp = super::client::get(client, &api).await?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!(
+            "GitHub release lookup failed for {project} tag {tag}: {status}"
+        ));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Could not parse the GitHub release JSON for {project} {tag}: {e}"))?;
+    release_from_github(&v)
+        .ok_or_else(|| format!("GitHub returned no usable release for {project} tag {tag}"))
+}
+
+/// Percent-encode a tag for one URL path segment. A tag is author-chosen text and may carry a
+/// `/`, which would otherwise address a different route.
+fn encode_tag(tag: &str) -> String {
+    let mut out = String::with_capacity(tag.len());
+    for b in tag.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Every published release of `project` on `host`, as the forge returns them (newest first).
@@ -776,6 +821,12 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("no asset for"), "{err}");
         assert!(err.contains("pmc_bb_log_only.dll"), "{err}");
+    }
+
+    #[test]
+    fn a_tag_is_encoded_as_one_path_segment() {
+        assert_eq!(encode_tag("v1.0.0"), "v1.0.0");
+        assert_eq!(encode_tag("release/1.0"), "release%2F1.0");
     }
 
     #[test]
