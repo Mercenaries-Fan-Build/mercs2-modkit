@@ -70,7 +70,9 @@ use tauri::Window;
 use crate::commands::dependencies::{
     installed_from_plan, relayed_shipment_needs, resolve, Action, Candidate, Step,
 };
+use crate::commands::incompatibility::{parse_index, IncompatibilityIndex, ListState, LoadedList};
 use crate::commands::installer::{download_bytes, extract_zip, stage_file_count};
+use crate::commands::managed::ledger::now_unix;
 use crate::commands::managed::place::sha256_hex;
 use crate::commands::net;
 use crate::commands::paths::{app_data_dir, downloading_dir, staging_dir};
@@ -360,10 +362,108 @@ fn retry_after(resp: &reqwest::Response) -> Duration {
         .unwrap_or(DEFAULT_BACKOFF)
 }
 
+/// Why mercs.ink could not answer a conditional GET. Both are recoverable: a client holding a
+/// cached copy uses it instead.
+#[derive(Debug)]
+enum Unreachable {
+    /// The request never got an HTTP answer.
+    Network(String),
+    /// A `5xx`, or a `429` that was still a `429` after one retry. Carries [`error_detail`].
+    Answered(String),
+}
+
+impl Unreachable {
+    /// Why, as a clause that reads inside parentheses.
+    fn reason(&self) -> String {
+        match self {
+            Unreachable::Network(e) => format!("could not connect: {e}"),
+            Unreachable::Answered(detail) => format!("it answered {detail}"),
+        }
+    }
+}
+
+/// What one conditional GET established.
+#[derive(Debug)]
+enum Revalidated {
+    /// A `2xx` with a new body. `etag` is empty when the server sent none.
+    Fresh { etag: String, body: String },
+    /// A `304`: the body behind the validator sent is still current.
+    NotModified,
+    Unreachable(Unreachable),
+}
+
+/// GET `url`, sending `known_etag` as `If-None-Match`, and honouring the rate limit.
+///
+/// | Server says | Result |
+/// |---|---|
+/// | `304` | [`Revalidated::NotModified`] |
+/// | `2xx` | [`Revalidated::Fresh`] |
+/// | `429` | Sleep `Retry-After` (capped) and retry **once**; a second `429` is unreachable |
+/// | `5xx` | [`Unreachable::Answered`] |
+/// | network error | [`Unreachable::Network`] |
+/// | any other 4xx | `Err`, carrying the server's own `message` — a `404` is a real answer |
+///
+/// Deciding what a cached copy is worth in each case is the caller's business.
+async fn revalidate(
+    client: &reqwest::Client,
+    url: &str,
+    known_etag: Option<&str>,
+) -> Result<Revalidated, String> {
+    // One retry, which is all a 429 gets: this is on an interactive path, and the second 429
+    // means the bucket is genuinely exhausted rather than momentarily tight.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+
+        let mut req = client.get(url);
+        if let Some(etag) = known_etag.filter(|e| !e.is_empty()) {
+            req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Ok(Revalidated::Unreachable(Unreachable::Network(e.to_string()))),
+        };
+
+        let status = resp.status();
+
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(Revalidated::NotModified);
+        }
+
+        if status.is_success() {
+            let etag = resp
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| format!("Could not read the mercs.ink response for {url}: {e}"))?;
+            return Ok(Revalidated::Fresh { etag, body });
+        }
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts == 1 {
+            let wait = retry_after(&resp).min(MAX_BACKOFF);
+            tokio::time::sleep(wait).await;
+            continue;
+        }
+
+        let code = status.as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        let detail = error_detail(code, &body);
+
+        if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(Revalidated::Unreachable(Unreachable::Answered(detail)));
+        }
+        return Err(format!("mercs.ink returned {detail} for {url}"));
+    }
+}
+
 /// Fetch `url`, revalidating against the stored ETag, honouring the rate limit, and falling
 /// back to the cache when the server cannot answer.
-///
-/// The outcomes, in the order they are decided:
 ///
 /// | Server says | What happens |
 /// |---|---|
@@ -380,90 +480,44 @@ async fn fetch(client: &reqwest::Client, url: &str, cache_file: &Path) -> Result
     let mut cache = read_cache_at(cache_file);
     let known = cache.get(url).cloned();
 
-    // One retry, which is all a 429 gets: this is on an interactive path, and the second 429
-    // means the bucket is genuinely exhausted rather than momentarily tight.
-    let mut attempts = 0;
-    loop {
-        attempts += 1;
-
-        let mut req = client.get(url);
-        if let Some(hit) = &known {
-            if !hit.etag.is_empty() {
-                req = req.header(reqwest::header::IF_NONE_MATCH, hit.etag.clone());
-            }
-        }
-
-        let resp = match req.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return match known {
-                    Some(hit) => Ok(Fetched {
-                        body: hit.body,
-                        stale: true,
-                        warning: Some(format!(
-                            "Couldn't reach mercs.ink — showing the last copy modkit downloaded. ({e})"
-                        )),
-                    }),
-                    None => Err(format!("Could not reach mercs.ink ({url}): {e}")),
-                }
-            }
-        };
-
-        let status = resp.status();
-
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            return match known {
-                Some(hit) => Ok(Fetched { body: hit.body, stale: false, warning: None }),
-                // Only sent when we hold a validator, so this is a misbehaving proxy rather
-                // than the server. Read as a plain failure instead of unwrapping.
-                None => Err(format!(
-                    "mercs.ink answered 304 for {url} but modkit had nothing cached to serve"
-                )),
-            };
-        }
-
-        if status.is_success() {
-            let etag = resp
-                .headers()
-                .get(reqwest::header::ETAG)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| format!("Could not read the mercs.ink response for {url}: {e}"))?;
-
+    match revalidate(client, url, known.as_ref().map(|k| k.etag.as_str())).await? {
+        Revalidated::NotModified => match known {
+            Some(hit) => Ok(Fetched { body: hit.body, stale: false, warning: None }),
+            // Only sent when we hold a validator, so this is a misbehaving proxy rather
+            // than the server. Read as a plain failure instead of unwrapping.
+            None => Err(format!(
+                "mercs.ink answered 304 for {url} but modkit had nothing cached to serve"
+            )),
+        },
+        Revalidated::Fresh { etag, body } => {
             // Only a validated body is worth storing; an ETag-less response is served straight
             // through so the next poll never sends `If-None-Match: ""`.
             if !etag.is_empty() {
                 cache.insert(url.to_string(), CachedResponse { etag, body: body.clone() });
                 write_cache_at(cache_file, &cache);
             }
-            return Ok(Fetched { body, stale: false, warning: None });
+            Ok(Fetched { body, stale: false, warning: None })
         }
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempts == 1 {
-            let wait = retry_after(&resp).min(MAX_BACKOFF);
-            tokio::time::sleep(wait).await;
-            continue;
-        }
-
-        let code = status.as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        let detail = error_detail(code, &body);
-
-        let recoverable = status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
-        return match (recoverable, known) {
-            (true, Some(hit)) => Ok(Fetched {
+        Revalidated::Unreachable(why) => match (why, known) {
+            (Unreachable::Network(e), Some(hit)) => Ok(Fetched {
+                body: hit.body,
+                stale: true,
+                warning: Some(format!(
+                    "Couldn't reach mercs.ink — showing the last copy modkit downloaded. ({e})"
+                )),
+            }),
+            (Unreachable::Network(e), None) => Err(format!("Could not reach mercs.ink ({url}): {e}")),
+            (Unreachable::Answered(detail), Some(hit)) => Ok(Fetched {
                 body: hit.body,
                 stale: true,
                 warning: Some(format!(
                     "mercs.ink answered {detail} — showing the last copy modkit downloaded."
                 )),
             }),
-            _ => Err(format!("mercs.ink returned {detail} for {url}")),
-        };
+            (Unreachable::Answered(detail), None) => {
+                Err(format!("mercs.ink returned {detail} for {url}"))
+            }
+        },
     }
 }
 
@@ -527,6 +581,140 @@ pub async fn fetch_mercsink_release(
 ) -> Result<RegistryRelease, String> {
     let got = fetch(&client()?, &release_url(&slug, &version), &cache_path()?).await?;
     unwrap_envelope(&got.body, "release")
+}
+
+// ---------------------------------------------------------------------------------------
+// The community incompatibility list
+//
+// Cached apart from `FetchCache`, and strictly. That cache treats a bad file as a miss, which
+// is right for a catalogue a user browses. This list decides whether a build is refused, so a
+// cache that can't be read is an error, and a cached copy records when it was fetched: when
+// mercs.ink can't be reached, the build says how old the list it checked against is.
+// ---------------------------------------------------------------------------------------
+
+/// One cached copy of the incompatibility list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachedList {
+    etag: String,
+    body: String,
+    /// Seconds since the epoch of the last `200` or `304`. mercs.ink's own `generated_at` can be
+    /// served from its response cache, so it is not the list's age here.
+    fetched_at: u64,
+}
+
+/// URL → the list last fetched from it.
+type ListCache = BTreeMap<String, CachedList>;
+
+fn incompatibility_cache_path() -> Result<PathBuf, String> {
+    Ok(app_data_dir()?.join("mercsink-incompatibilities.json"))
+}
+
+/// No file is an empty cache. A file that exists but can't be read is an error naming it.
+fn read_list_cache(path: &Path) -> Result<ListCache, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ListCache::new()),
+        Err(e) => {
+            return Err(format!(
+                "Could not read the cached incompatibility list at {}: {e}",
+                path.display()
+            ))
+        }
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "The cached incompatibility list at {} is not in the form Modkit writes, so nothing \
+             was built: {e}",
+            path.display()
+        )
+    })
+}
+
+fn write_list_cache(path: &Path, cache: &ListCache) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string(cache)
+        .map_err(|e| format!("Could not serialize the incompatibility list cache: {e}"))?;
+    std::fs::write(path, text)
+        .map_err(|e| format!("Could not write the incompatibility list cache {}: {e}", path.display()))
+}
+
+/// Parse a list mercs.ink just sent. A list it can't use refuses the build, and is never
+/// cached.
+fn parse_fresh_list(body: &str) -> Result<IncompatibilityIndex, String> {
+    parse_index(body).map_err(|e| {
+        format!("mercs.ink sent an incompatibility list Modkit cannot use, so nothing was built:\n{e}")
+    })
+}
+
+/// Parse the cached copy for `url`.
+fn parse_cached_list(hit: &CachedList, cache_file: &Path) -> Result<IncompatibilityIndex, String> {
+    parse_index(&hit.body).map_err(|e| {
+        format!(
+            "The incompatibility list cached at {} cannot be used, so nothing was built:\n{e}",
+            cache_file.display()
+        )
+    })
+}
+
+/// Fetch the incompatibility list at `url`, keeping the cache in `cache_file` current. `now` is
+/// seconds since the epoch.
+///
+/// | mercs.ink | Cached copy | Result |
+/// |---|---|---|
+/// | `200` | any | parsed, then cached with `fetched_at = now`; current |
+/// | `304` | yes | re-parsed, `fetched_at = now`; current |
+/// | unreachable | yes | the cached copy, with its age |
+/// | unreachable | no | no list: the build goes ahead and says it was not checked |
+/// | any other 4xx | any | error |
+///
+/// A body is parsed before it is cached, so a list Modkit can't use never replaces one it can.
+async fn load_incompatibilities(
+    client: &reqwest::Client,
+    url: &str,
+    cache_file: &Path,
+    now: u64,
+) -> Result<LoadedList, String> {
+    let mut cache = read_list_cache(cache_file)?;
+    let known = cache.get(url).cloned();
+
+    match revalidate(client, url, known.as_ref().map(|k| k.etag.as_str())).await? {
+        Revalidated::Fresh { etag, body } => {
+            let index = parse_fresh_list(&body)?;
+            cache.insert(url.to_string(), CachedList { etag, body, fetched_at: now });
+            write_list_cache(cache_file, &cache)?;
+            Ok(LoadedList { state: ListState::Current { fetched_at: now }, index: Some(index) })
+        }
+        Revalidated::NotModified => {
+            let Some(hit) = known else {
+                return Err(format!(
+                    "mercs.ink answered 304 for {url} but modkit had nothing cached to serve"
+                ));
+            };
+            let index = parse_cached_list(&hit, cache_file)?;
+            cache.insert(url.to_string(), CachedList { fetched_at: now, ..hit });
+            write_list_cache(cache_file, &cache)?;
+            Ok(LoadedList { state: ListState::Current { fetched_at: now }, index: Some(index) })
+        }
+        Revalidated::Unreachable(why) => match known {
+            Some(hit) => {
+                let index = parse_cached_list(&hit, cache_file)?;
+                let state =
+                    ListState::cached(hit.fetched_at, index.generated_at.clone(), why.reason(), now);
+                Ok(LoadedList { state, index: Some(index) })
+            }
+            None => Ok(LoadedList { state: ListState::never_fetched(why.reason()), index: None }),
+        },
+    }
+}
+
+/// The incompatibility list a Shipment build is checked against.
+pub(crate) async fn load_incompatibility_list() -> Result<LoadedList, String> {
+    let url = format!("{}/api/v1/incompatibilities", base_url());
+    load_incompatibilities(&client()?, &url, &incompatibility_cache_path()?, now_unix()).await
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1873,6 +2061,199 @@ mod tests {
              folder down, so it is not a Quartermaster Shipment. (A finished vz-patch.wad goes \
              through Import Patch WAD instead.)"
         );
+        let _ = handle.join();
+    }
+
+    // ------------------------------------------------------------------------------------
+    // The incompatibility list, against a loopback listener.
+    // ------------------------------------------------------------------------------------
+
+    use crate::commands::incompatibility::tests::EXAMPLE;
+
+    /// A base URL nothing listens on: the port was bound and released.
+    fn refused_base() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    }
+
+    fn list_url(base: &str) -> String {
+        format!("{base}/api/v1/incompatibilities")
+    }
+
+    fn load(url: &str, cache: &Path, now: u64) -> Result<LoadedList, String> {
+        rt().block_on(load_incompatibilities(&client().unwrap(), url, cache, now))
+    }
+
+    /// Put a cached copy of [`EXAMPLE`] for `url` into `cache`, fetched at `fetched_at`.
+    fn seed(cache: &Path, url: &str, fetched_at: u64) {
+        let mut c = ListCache::new();
+        c.insert(url.into(), CachedList { etag: "\"v1\"".into(), body: EXAMPLE.into(), fetched_at });
+        write_list_cache(cache, &c).unwrap();
+    }
+
+    #[test]
+    fn a_first_200_is_stored_and_current() {
+        let (base, handle) = serve(vec![ok_with_etag("\"v1\"", EXAMPLE)]);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        let url = list_url(&base);
+
+        let got = load(&url, &cache, 100).unwrap();
+        assert_eq!(got.state, ListState::Current { fetched_at: 100 });
+        assert_eq!(got.index.unwrap().rows.len(), 2);
+        let stored = &read_list_cache(&cache).unwrap()[&url];
+        assert_eq!((stored.etag.as_str(), stored.body.as_str(), stored.fetched_at), ("\"v1\"", EXAMPLE, 100));
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn a_304_is_current_and_rewrites_fetched_at() {
+        let (base, handle) = serve(vec![
+            ok_with_etag("\"v1\"", EXAMPLE),
+            status_only("304 Not Modified", "ETag: \"v1\"\r\n"),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        let url = list_url(&base);
+
+        load(&url, &cache, 100).unwrap();
+        let got = load(&url, &cache, 500).unwrap();
+        assert_eq!(got.state, ListState::Current { fetched_at: 500 });
+        assert_eq!(got.index.unwrap().rows.len(), 2);
+        assert_eq!(read_list_cache(&cache).unwrap()[&url].fetched_at, 500);
+        assert_eq!(handle.join().unwrap()[1], "\"v1\"", "the stored validator is sent back");
+    }
+
+    #[test]
+    fn a_500_with_a_cache_uses_it_and_gives_its_age() {
+        let (base, handle) = serve(vec![status_only("500 Internal Server Error", "")]);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        let url = list_url(&base);
+        seed(&cache, &url, 1_000);
+
+        let got = load(&url, &cache, 1_000 + 3 * 3_600).unwrap();
+        assert_eq!(got.state, ListState::cached(
+            1_000,
+            "2026-09-25T10:00:00+00:00".into(),
+            "it answered HTTP 500".into(),
+            1_000 + 3 * 3_600,
+        ));
+        match &got.state {
+            ListState::Cached { message, .. } => assert!(message.contains("downloaded 3 hours ago"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(got.index.unwrap().rows.len(), 2);
+        assert_eq!(read_list_cache(&cache).unwrap()[&url].fetched_at, 1_000, "the age is not reset");
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn a_refused_connection_with_a_cache_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        let url = list_url(&refused_base());
+        seed(&cache, &url, 1_000);
+
+        let got = load(&url, &cache, 1_060).unwrap();
+        match &got.state {
+            ListState::Cached { fetched_at, reason, .. } => {
+                assert_eq!(*fetched_at, 1_000);
+                assert!(reason.starts_with("could not connect"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(got.index.is_some());
+    }
+
+    #[test]
+    fn with_no_cache_an_unreachable_server_means_never_fetched() {
+        let (base, handle) = serve(vec![status_only("503 Service Unavailable", "")]);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+
+        let got = load(&list_url(&base), &cache, 100).unwrap();
+        assert_eq!(got.state, ListState::never_fetched("it answered HTTP 503".into()));
+        assert!(got.index.is_none());
+        assert!(!cache.exists(), "nothing was fetched, so nothing is cached");
+        let _ = handle.join();
+
+        let got = load(&list_url(&refused_base()), &cache, 100).unwrap();
+        assert!(matches!(&got.state, ListState::NeverFetched { reason, .. } if reason.starts_with("could not connect")));
+        assert!(got.index.is_none());
+    }
+
+    #[test]
+    fn a_404_is_an_error() {
+        let (base, handle) = serve(vec![error_body("404 Not Found", r#"{"message":"Not found."}"#)]);
+        let dir = tempfile::tempdir().unwrap();
+        let err = load(&list_url(&base), &dir.path().join("list.json"), 100).unwrap_err();
+        assert!(err.contains("404") && err.contains("Not found."), "{err}");
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn a_429_then_a_200_is_current() {
+        let (base, handle) = serve(vec![
+            status_only("429 Too Many Requests", "Retry-After: 0\r\n"),
+            ok_with_etag("\"v1\"", EXAMPLE),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let got = load(&list_url(&base), &dir.path().join("list.json"), 100).unwrap();
+        assert_eq!(got.state, ListState::Current { fetched_at: 100 });
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn a_corrupt_cache_is_an_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        std::fs::write(&cache, "{ not json").unwrap();
+        let err = load(&list_url(&refused_base()), &cache, 100).unwrap_err();
+        assert!(err.contains(&cache.display().to_string()), "{err}");
+
+        // A key Modkit does not write is not the form Modkit writes.
+        std::fs::write(&cache, r#"{"u":{"etag":"","body":"","fetched_at":1,"extra":true}}"#).unwrap();
+        assert!(load(&list_url(&refused_base()), &cache, 100).is_err());
+    }
+
+    #[test]
+    fn a_cache_entry_for_another_base_url_is_never_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        seed(&cache, "https://staging.example/api/v1/incompatibilities", 1_000);
+        let got = load(&list_url(&refused_base()), &cache, 2_000).unwrap();
+        assert!(matches!(got.state, ListState::NeverFetched { .. }), "{:?}", got.state);
+        assert!(got.index.is_none());
+    }
+
+    /// Each list breaks the contract a different way. Every one is refused, and the good cached
+    /// copy is left byte for byte as it was.
+    #[test]
+    fn a_list_modkit_cannot_use_is_an_error_and_never_replaces_the_cache() {
+        let bad = [
+            EXAMPLE.replace(r#""status": "confirmed""#, r#""status": "maybe""#),
+            EXAMPLE.replace(r#""reason": "crash_on_load""#, r#""reason": "slow""#),
+            EXAMPLE.replace(r#""subject_range": "^1.0.0""#, r#""subject_range": "one-ish""#),
+            EXAMPLE.replace(r#""other_range": ">=0.7.0, <0.8.0""#, r#""other_range": null"#),
+        ];
+        for b in &bad {
+            assert_ne!(b, EXAMPLE, "each fixture must change the body");
+        }
+        let (base, handle) = serve(bad.iter().map(|b| ok_with_etag("\"v2\"", b)).collect());
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("list.json");
+        let url = list_url(&base);
+        seed(&cache, &url, 1_000);
+        let before = std::fs::read(&cache).unwrap();
+
+        for _ in &bad {
+            let err = load(&url, &cache, 2_000).unwrap_err();
+            assert!(err.starts_with("mercs.ink sent an incompatibility list Modkit cannot use"), "{err}");
+            assert_eq!(std::fs::read(&cache).unwrap(), before, "the cache is untouched");
+        }
         let _ = handle.join();
     }
 }
