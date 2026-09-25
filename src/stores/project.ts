@@ -38,7 +38,6 @@ import type {
   RegistryMod,
   ReleaseInfo,
   Resolution,
-  ResolveDepsResult,
   ShipmentRef,
   RuntimeInfo,
   RuntimeOverrides,
@@ -1939,21 +1938,6 @@ export const useProjectStore = defineStore("project", {
             asi_target: this.asiTarget,
           },
         });
-        // Auto-on-deploy: install each deployed Shipment's managed dependencies (its
-        // `load.requires`) at the version its semver range resolves to. A Shipment with none
-        // does no work — the backend reads the manifest and returns before touching the network.
-        // A managed dependency is dev infrastructure (a shared library), not something a player
-        // manages: resolution is silent to the user, logged to the console for a developer.
-        for (const s of this.shipments) {
-          const { resolved } = await this.resolveShipmentDependencies(s.path);
-          for (const d of resolved) {
-            console.debug(
-              d.installedTag
-                ? `[deps] ${s.name}: ${d.name} ${d.versionReq} -> ${d.installedTag}`
-                : `[deps] ${s.name}: ${d.name} ${d.versionReq} - ${d.note ?? "unresolved"}`
-            );
-          }
-        }
         await this.refreshGame();
         await this.loadWadBackups();
         await this.loadDeployedWad();
@@ -2287,21 +2271,6 @@ export const useProjectStore = defineStore("project", {
       } finally {
         this.busy = false;
       }
-    },
-
-    /**
-     * Resolve and install a Shipment's managed dependencies (its `load.requires`) — the
-     * auto-on-deploy step, also callable on its own. Does not manage `busy`: the deploy that
-     * calls it already owns that flag. The backend installs the highest release satisfying each
-     * range, so a mod always gets a compatible, shared, up-to-date runtime without being re-cut.
-     */
-    async resolveShipmentDependencies(shipmentDir: string): Promise<ResolveDepsResult> {
-      const root = this.gameInfo?.root;
-      if (!root) throw new Error("Set the game folder first");
-      return await invoke<ResolveDepsResult>("resolve_shipment_dependencies", {
-        shipmentDir,
-        gameRoot: root,
-      });
     },
 
     /**
