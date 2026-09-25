@@ -10,6 +10,7 @@ import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
 import ShipmentRemovalDialog from "./components/ShipmentRemovalDialog.vue";
+import RefusedShipmentsBanner from "./components/RefusedShipmentsBanner.vue";
 
 const store = useProjectStore();
 const router = useRouter();
@@ -272,6 +273,7 @@ onMounted(async () => {
     <!-- Main content -->
     <div class="flex flex-1 flex-col overflow-hidden">
       <GameBar />
+      <RefusedShipmentsBanner />
       <main class="flex-1 overflow-y-auto">
         <RouterView />
       </main>
