@@ -777,11 +777,22 @@ struct VerifiedZip {
     bytes: Vec<u8>,
 }
 
-/// Select, download and verify one release's Shipment zip.
+/// Select, download and verify one release's Shipment zip, reading its digest from GitHub.
 async fn fetch_verified_zip(
     client: &reqwest::Client,
     item: &RegistryMod,
     release: &RegistryRelease,
+) -> Result<VerifiedZip, String> {
+    fetch_verified_zip_at(client, item, release, net::release::GITHUB_API).await
+}
+
+/// [`fetch_verified_zip`] with the GitHub API root the digest lookup addresses.
+/// [`fetch_verified_zip`] passes the real GitHub root; tests pass a loopback listener.
+async fn fetch_verified_zip_at(
+    client: &reqwest::Client,
+    item: &RegistryMod,
+    release: &RegistryRelease,
+    github_api: &str,
 ) -> Result<VerifiedZip, String> {
     let what = format!("{} {}", item.slug, release.version);
     let head_name = release
@@ -814,7 +825,8 @@ async fn fetch_verified_zip(
         }
     };
 
-    let gh = net::github_release_by_tag(client, &project, tag).await?;
+    let lookup = net::release::github_release_by_tag_url(github_api, &project, tag);
+    let gh = net::release::github_release_by_tag_at(client, &lookup, &project, tag).await?;
     verify_asset_digest(&gh, &asset.name, &bytes)?;
 
     // After verification the chosen zip must hold a manifest — a named zip included.
