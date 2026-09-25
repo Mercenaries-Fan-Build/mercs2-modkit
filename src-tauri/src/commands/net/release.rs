@@ -414,11 +414,29 @@ pub async fn github_release_by_tag(
     project: &str,
     tag: &str,
 ) -> Result<Release, String> {
-    let api = format!(
-        "https://api.github.com/repos/{project}/releases/tags/{}",
-        encode_tag(tag)
-    );
-    let resp = super::client::get(client, &api).await?;
+    let url = github_release_by_tag_url(GITHUB_API, project, tag);
+    github_release_by_tag_at(client, &url, project, tag).await
+}
+
+/// The GitHub REST API root the digest lookup addresses.
+pub(crate) const GITHUB_API: &str = "https://api.github.com";
+
+/// The by-tag release URL under the API root `api`: `{api}/repos/{project}/releases/tags/{tag}`,
+/// with the tag percent-encoded as one path segment.
+pub(crate) fn github_release_by_tag_url(api: &str, project: &str, tag: &str) -> String {
+    format!("{api}/repos/{project}/releases/tags/{}", encode_tag(tag))
+}
+
+/// [`github_release_by_tag`] against a full lookup URL. The public function passes the real
+/// GitHub URL; tests pass one on a loopback listener. `project` and `tag` only name the release
+/// in error messages.
+pub(crate) async fn github_release_by_tag_at(
+    client: &reqwest::Client,
+    url: &str,
+    project: &str,
+    tag: &str,
+) -> Result<Release, String> {
+    let resp = super::client::get(client, url).await?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!(
