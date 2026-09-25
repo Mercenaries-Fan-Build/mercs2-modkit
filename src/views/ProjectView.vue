@@ -113,7 +113,9 @@ async function confirmRemoval() {
 }
 
 function removeShipment(s: ShipmentRef) {
-  store.removeShipment(s.id);
+  // Computes the chain the removal takes and opens the confirmation (App's
+  // ShipmentRemovalDialog); nothing is removed until the player confirms.
+  store.planShipmentRemoval(s.id);
 }
 function removePrebuilt(p: PrebuiltWad) {
   store.removePrebuilt(p.id);

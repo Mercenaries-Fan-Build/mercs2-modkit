@@ -17,6 +17,7 @@ use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
 use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
+use commands::dependencies::{plan_shipment_removal, remove_shipments};
 use commands::language::{clear_added_language, scan_languages, set_added_language, set_language};
 use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
 use commands::license::detect_license;
@@ -34,11 +35,10 @@ use commands::save_backup::{
     backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
     set_saves_dir,
 };
-use commands::setup::{
-    crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, resolve_shipment_dependencies,
-    update_game,
+use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, update_game};
+use commands::shipment::{
+    inspect_shipment, restore_saved_shipments, take_pending_shipment, PendingShipment,
 };
-use commands::shipment::{inspect_shipment, take_pending_shipment, PendingShipment};
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
     uninstall_tool, ToolProcesses,
@@ -161,7 +161,6 @@ pub fn run() {
             deploy_asi,
             trash_paths,
             install_pmc_bb,
-            resolve_shipment_dependencies,
             resolve_pmc_bb,
             pmc_bb_variants,
             managed_status,
@@ -195,12 +194,15 @@ pub fn run() {
             delete_save_backup,
             set_saves_dir,
             inspect_shipment,
+            restore_saved_shipments,
             take_pending_shipment,
             fetch_mercsink_registry,
             fetch_mercsink_mod,
             fetch_mercsink_releases,
             fetch_mercsink_release,
             install_mercsink_shipment,
+            plan_shipment_removal,
+            remove_shipments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

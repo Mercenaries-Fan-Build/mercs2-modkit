@@ -18,9 +18,9 @@
 //!
 //! qm's native model is per-Shipment overlays + a link WAD mounted last. The game (and
 //! [`super::deploy_wad`]) load a single `vz-patch.wad`, so we collapse: each Shipment's overlay
-//! contributes its blocks **with the linker-owned blocks dropped** — both `scripts_vz` AND the
-//! resident framework block, the two qm's linker re-emits (see [`is_scripts_block`]) — and the
-//! linker's reconciled copies of those blocks are added once, last. Dropping the per-Shipment
+//! contributes its blocks **with the linker-owned blocks dropped** — `scripts_vz`, the resident
+//! framework block and every merged string-table block, which the plan lists as
+//! `link_block_paths` — and the linker's reconciled copies of those blocks are added once, last. Dropping the per-Shipment
 //! copies is what keeps `claim::resolve` from seeing a linker group partially overriding a larger
 //! overlay group (an atomic partial-overlap conflict) — and, for the resident block, from seeing
 //! two overlays collide on its ~7000 rows. Non-linker overlaps across Shipments still resolve
@@ -47,6 +47,8 @@ use mercs2_formats::patch_wad::read_patch_wad;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
+use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
+use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, REQUEST_FILE};
 use super::placement::{self, StagedFile};
 use super::proc::NoWindow;
 use super::toolchain::{ensure_tool, installed_tool_path};
@@ -113,7 +115,11 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// A Workshop Shipment staged in the load order (a qm source directory, later wins).
+///
+/// Deserialized through [`ShipmentRefWire`] so that a saved row without `install_reason` fails
+/// with a message the player can act on rather than a bare serde error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "ShipmentRefWire")]
 pub struct ShipmentRef {
     /// Stable id used in the load order and for dedupe. Folder-derived, and therefore **local
     /// only**: two checkouts of the same Shipment are two rows here, which is what the load
@@ -139,10 +145,116 @@ pub struct ShipmentRef {
     /// no id; guessing a repository from a slug would merge every fork into one row.
     #[serde(default = "Origin::local_unknown")]
     pub origin: Origin,
+    /// Why this row is in the library. `user` for anything the player added, and
+    /// `dependency` for a Shipment the resolver installed because something required it.
+    ///
+    /// Orphan removal reads it: a `dependency` row that nothing requires any more is removed
+    /// automatically, and a `user` row never is. Explicitly installing a `dependency`
+    /// row promotes it to `user`; nothing demotes one.
+    pub install_reason: InstallReason,
+}
+
+/// [`ShipmentRef`] as it arrives, before `install_reason` is checked. Only `install_reason` is
+/// optional here, and only so its absence can be named; it is never defaulted.
+#[derive(Deserialize)]
+struct ShipmentRefWire {
+    id: String,
+    name: String,
+    path: String,
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default = "Origin::local_unknown")]
+    origin: Origin,
+    install_reason: Option<InstallReason>,
+}
+
+/// The refusal for a row saved before dependency tracking existed.
+pub(crate) fn missing_install_reason(name: &str) -> String {
+    format!(
+        "The Shipment \"{name}\" in your saved library has no install reason: the library \
+         predates dependency tracking and must be rebuilt. Your saved Shipments are kept \
+         untouched until you choose to discard them and install them again."
+    )
+}
+
+impl TryFrom<ShipmentRefWire> for ShipmentRef {
+    type Error = String;
+
+    fn try_from(w: ShipmentRefWire) -> Result<Self, String> {
+        let install_reason = w.install_reason.ok_or_else(|| missing_install_reason(&w.name))?;
+        Ok(ShipmentRef {
+            id: w.id,
+            name: w.name,
+            path: w.path,
+            slug: w.slug,
+            version: w.version,
+            origin: w.origin,
+            install_reason,
+        })
+    }
+}
+
+/// What the saved library's Shipment rows restore to.
+///
+/// A library saved before dependency tracking has rows with no `install_reason`. Those rows are
+/// not loaded, and not defaulted; the frontend keeps them in storage untouched and refuses to
+/// write Shipment rows until the player explicitly chooses to discard them and rebuild.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum SavedShipments {
+    Loaded { rows: Vec<ShipmentRef> },
+    PredatesDependencyTracking { message: String, count: usize },
+}
+
+/// Decide what the saved Shipment rows restore to. `null` (nothing saved) is an empty library.
+/// Any row without an `install_reason` makes the whole set [`SavedShipments::PredatesDependencyTracking`].
+/// Anything else that does not read as a row is an error naming its position.
+pub fn read_saved_shipments(saved: &serde_json::Value) -> Result<SavedShipments, String> {
+    if saved.is_null() {
+        return Ok(SavedShipments::Loaded { rows: Vec::new() });
+    }
+    let list = saved
+        .as_array()
+        .ok_or("The saved library's Shipment list is not a list, so it cannot be read.")?;
+    let untracked = list
+        .iter()
+        .find(|row| row.get("install_reason").is_none_or(serde_json::Value::is_null));
+    if let Some(row) = untracked {
+        let name = row.get("name").and_then(|n| n.as_str()).unwrap_or("(unnamed)");
+        return Ok(SavedShipments::PredatesDependencyTracking {
+            message: missing_install_reason(name),
+            count: list.len(),
+        });
+    }
+    let rows = list
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            serde_json::from_value::<ShipmentRef>(row.clone())
+                .map_err(|e| format!("Saved Shipment row {} cannot be read: {e}", i + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SavedShipments::Loaded { rows })
+}
+
+/// [`read_saved_shipments`] for the frontend's library restore.
+#[tauri::command]
+pub fn restore_saved_shipments(saved: serde_json::Value) -> Result<SavedShipments, String> {
+    read_saved_shipments(&saved)
+}
+
+/// See [`ShipmentRef::install_reason`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallReason {
+    User,
+    Dependency,
 }
 
 /// The manifest filenames `qm` accepts, in the order it looks.
-const MANIFEST_NAMES: [&str; 4] = [
+pub(crate) const MANIFEST_NAMES: [&str; 4] = [
     "manifest.yaml",
     "manifest.yml",
     "manifest.json",
@@ -179,8 +291,6 @@ pub fn has_manifest(dir: &Path) -> bool {
 struct ManifestHead {
     #[serde(default)]
     shipment: ShipmentHead,
-    #[serde(default)]
-    load: LoadHead,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -189,25 +299,6 @@ struct ShipmentHead {
     name: Option<String>,
     #[serde(default)]
     version: Option<String>,
-}
-
-/// Just enough of `load:` to see a Shipment's managed dependencies. Same discipline as the head:
-/// qm owns the schema, so everything else is ignored and a missing `load` reads as "no deps".
-#[derive(Debug, Default, Deserialize)]
-struct LoadHead {
-    #[serde(default)]
-    requires: Vec<RequireHead>,
-}
-
-/// One `load.requires` entry, in qm's untagged spelling. Only the MANAGED form (`{name,version}`)
-/// is captured — a bare-string Shipment dep or an `{url,sha256}` External is a different kind of
-/// reference modkit does not resolve here, so it deserializes into `Ignored` and is dropped. The
-/// `Ignored` arm is what keeps a manifest that mixes forms parseable rather than failing whole.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RequireHead {
-    Managed { name: String, version: String },
-    Ignored(serde::de::IgnoredAny),
 }
 
 /// Read `shipment.{name,version}` out of a qm manifest, dispatching on the extension the way qm
@@ -221,7 +312,7 @@ fn read_manifest_head(path: &Path) -> Option<ShipmentHead> {
     Some(parse_manifest(path)?.shipment)
 }
 
-/// Parse a qm manifest's head-and-load fields, dispatching on the extension the way qm does.
+/// Parse a qm manifest's head fields, dispatching on the extension the way qm does.
 /// `None` on anything that does not parse — see [`read_manifest_head`] for why refusing would be
 /// wrong: modkit is not the authority on the schema, `qm build` is.
 fn parse_manifest(path: &Path) -> Option<ManifestHead> {
@@ -239,49 +330,11 @@ fn parse_manifest(path: &Path) -> Option<ManifestHead> {
     }
 }
 
-/// A Shipment's MANAGED dependencies as `(name, version-range)` pairs — the input to auto-on-deploy
-/// resolution. Empty when the manifest lists none, does not parse, or carries only non-managed
-/// (`Shipment` / `External`) deps.
-pub(crate) fn read_managed_requirements(path: &Path) -> Vec<(String, String)> {
-    parse_manifest(path)
-        .map(|m| {
-            m.load
-                .requires
-                .into_iter()
-                .filter_map(|r| match r {
-                    RequireHead::Managed { name, version } => Some((name, version)),
-                    RequireHead::Ignored(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Blank a value that is present but empty. A manifest with `name: ""` declares no more identity
 /// than one with no `name` at all, and letting `""` through would put an empty slug in the load
 /// order and, later, on the wire.
 fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
-}
-
-/// A block is a linker-owned script carrier if its PTHS path names `scripts_vz` OR the resident
-/// framework block — the two blocks qm's linker splices into (`SCRIPT_BLOCKS` in
-/// `mercs2_quartermaster::link`: `scripts_vz` holds the 114 content scripts, `resident` holds the
-/// ~240 `Mrx*` framework modules that `patch_lua` targets like `mrxplayer` live in). BOTH are
-/// re-emitted whole by `qm link`, so BOTH must be taken from the reconciled link WAD and dropped
-/// from every per-Shipment overlay.
-///
-/// Matching only `scripts_vz` here left each overlay shipping its own ~7000-row
-/// `resident_P000_Q3.block`, and two Shipments that both touch the resident block then collide on
-/// it — the "overlap on N assets, neither contains the other" build failure — while the link WAD's
-/// already-reconciled resident block was discarded.
-///
-/// The resident needle is ANCHORED on a leading separator so it cannot also match a *different*
-/// block whose name merely ends the same way (e.g. `sound_resident_P000_Q3.block`) — the same
-/// anchoring qm's `SCRIPT_BLOCKS` uses for exactly this reason.
-fn is_scripts_block(path_string: &str) -> bool {
-    let p = path_string.to_lowercase();
-    p.contains("scripts_vz") || p.contains(r"\resident_p000_q3.block")
 }
 
 /// Validate a Shipment source directory and describe it for the load order, without building it.
@@ -331,6 +384,8 @@ pub fn inspect_shipment(path: String) -> Result<ShipmentRef, String> {
         // in the other half.
         origin: Origin::local(version.clone()),
         version,
+        // Staged by the player's own hand (a folder or a Workshop deep link).
+        install_reason: InstallReason::User,
     })
 }
 
@@ -358,7 +413,7 @@ fn resolve_corpus_bundle(qm: &Path, hint: Option<&Path>) -> Option<PathBuf> {
 
 /// Fresh, empty working directory under the app's managed area (cleared first so a prior build's
 /// WADs can't be mistaken for this one's).
-fn work_dir(sub: &str) -> Result<PathBuf, String> {
+pub(crate) fn work_dir(sub: &str) -> Result<PathBuf, String> {
     let dir = super::paths::app_data_dir()?.join("qm-work").join(sub);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create work dir: {e}"))?;
@@ -417,7 +472,9 @@ pub fn synthesize_wardrobe_shipment(
         .collect();
 
     let manifest = serde_json::json!({
-        "format": 1,
+        // Format 2 is the only manifest format qm 3.0.0 accepts; this manifest declares
+        // nothing format 2 changed, so the number is the whole change.
+        "format": 2,
         "shipment": { "name": "modkit-wardrobe", "version": "1.0.0", "target": "retail" },
         "contributions": contributions,
     });
@@ -437,6 +494,8 @@ pub fn synthesize_wardrobe_shipment(
         slug: Some("modkit-wardrobe".into()),
         version: None,
         origin: Origin::modkit(MODKIT_WARDROBE_ID),
+        // Modkit writes it from the player's own wardrobe picks; nothing requires it.
+        install_reason: InstallReason::User,
     }))
 }
 
@@ -454,6 +513,9 @@ pub struct ShipmentBuild {
     pub files: Vec<StagedFile>,
     /// Non-fatal advisories: currently, one per destination two Shipments both claimed.
     pub warnings: Vec<String>,
+    /// Unconfirmed reports from mercs.ink's incompatibility list that apply to the set. A
+    /// confirmed one refuses the build instead.
+    pub notices: Vec<Notice>,
 }
 
 /// Reduce the per-Shipment file lists to one file per destination, later-wins, warning about each
@@ -481,17 +543,61 @@ fn resolve_file_collisions(files: Vec<StagedFile>) -> (Vec<StagedFile>, Vec<Stri
     (kept.into_iter().flatten().collect(), warnings)
 }
 
+/// The `--game` argument every qm call gets: the game's `vz.wad`.
+///
+/// qm's explicit `--game` takes the path RAW: unlike its own discovery it does NOT resolve an
+/// install folder down to `data/vz.wad`, and `GameStack::open` then `File::open`s whatever it was
+/// handed. On Windows, opening the install *directory* as a file is "Access is denied (os error 5)".
+/// So resolve to the actual `vz.wad` here — exactly as qm's discovery would — before handing it over.
+pub(crate) fn game_arg_for(game_path: &str) -> Result<std::ffi::OsString, String> {
+    if game_path.trim().is_empty() {
+        return Err("Set the game folder before building Shipments.".into());
+    }
+    let vz_wad = mercs2_formats::game_paths::wad_under(Path::new(game_path), "vz.wad")
+        .ok_or_else(|| format!("Could not find vz.wad under the game folder ({game_path})."))?;
+    Ok(vz_wad.as_os_str().to_os_string())
+}
+
+/// The qm binary. Prefer an already-installed qm (this is called on a build, and we don't want to
+/// block a build on a download unless we must); `ensure_tool` otherwise fetches it.
+pub(crate) async fn qm_tool(window: Window) -> Result<PathBuf, String> {
+    match installed_tool_path("qm") {
+        Some(p) => Ok(p),
+        None => ensure_tool(window, "qm").await,
+    }
+}
+
+/// Run `qm preflight` over `rows` in a fresh work dir, returning the plan whether or not it is
+/// `ok`. Used by the dependency resolver and the removal cascade, which read the plan's
+/// requirement data; a build uses [`shipment_groups`], which refuses a plan that is not ok.
+pub(crate) async fn preflight_rows(
+    window: Window,
+    rows: &[ShipmentRef],
+    game_path: &str,
+) -> Result<super::load_plan::LoadPlan, String> {
+    let game_arg = game_arg_for(game_path)?;
+    let qm = qm_tool(window).await?;
+    let dir = work_dir("preflight")?;
+    super::load_plan::run_preflight(&qm, rows, &game_arg, &dir)
+}
+
 /// Build each staged Shipment with `qm`, link their Lua across the whole set, and return the claim
 /// groups to fold into `vz-patch.wad` plus the loose files to install alongside it. See the module
 /// docs for the collapse rules.
 ///
 /// `corpus_hint` is an optional explicit reference-bundle path; when `None`, the corpus is resolved
 /// from the environment / the installed toolset.
+///
+/// `incompatibilities` is mercs.ink's community list, or `None` when it has never been
+/// downloaded. The set is checked against it twice: before preflight at the versions recorded at
+/// install, and after preflight at the versions qm read. Any confirmed report refuses the build,
+/// in one refusal that also carries preflight's findings when preflight refused.
 pub async fn shipment_groups(
     window: Window,
     shipments: &[ShipmentRef],
     game_path: &str,
     corpus_hint: Option<&Path>,
+    incompatibilities: Option<&IncompatibilityIndex>,
 ) -> Result<ShipmentBuild, String> {
     if shipments.is_empty() {
         return Ok(ShipmentBuild::default());
@@ -500,22 +606,61 @@ pub async fn shipment_groups(
         return Err("Set the game folder before building Shipments.".into());
     }
 
-    // qm's explicit `--game` takes the path RAW: unlike its own discovery it does NOT resolve an
-    // install folder down to `data/vz.wad`, and `GameStack::open` then `File::open`s whatever it was
-    // handed. On Windows, opening the install *directory* as a file is "Access is denied (os error 5)".
-    // So resolve to the actual `vz.wad` here — exactly as qm's discovery would — before handing it over.
-    let vz_wad =
-        mercs2_formats::game_paths::wad_under(std::path::Path::new(game_path), "vz.wad")
-            .ok_or_else(|| format!("Could not find vz.wad under the game folder ({game_path})."))?;
-    let game_arg = vz_wad.as_os_str().to_os_string();
-
-    // Prefer an already-installed qm (this is called on a build, and we don't want to block a build
-    // on a download unless we must); ensure_tool otherwise fetches it.
-    let qm = match installed_tool_path("qm") {
-        Some(p) => p,
-        None => ensure_tool(window, "qm").await?,
-    };
+    let game_arg = game_arg_for(game_path)?;
+    let qm = qm_tool(window).await?;
     let corpus = resolve_corpus_bundle(&qm, corpus_hint);
+
+    // 0) Preflight the whole set before building anything, and refuse when qm says it is not ok.
+    //    The request lists the rows in the order given, which is
+    //    the tie-break qm's ordering uses.
+    let preflight_dir = work_dir("preflight")?;
+    let request = LoadRequest::for_rows(shipments);
+
+    // Checked before preflight as well as after, so a refusal from preflight still names any
+    // confirmed incompatibility at the versions recorded at install.
+    let before = match incompatibilities {
+        Some(index) => incompatibility::evaluate(
+            index,
+            shipments,
+            &incompatibility::recorded_versions(shipments),
+            VersionBasis::Recorded,
+        )?,
+        None => Vec::new(),
+    };
+
+    let plan = super::load_plan::run_preflight(&qm, shipments, &game_arg, &preflight_dir)?;
+    if let Err(refused) = plan.refuse_unless_ok(shipments) {
+        return Err(match incompatibilities {
+            Some(index) => incompatibility::with_preflight_refusal(refused, index, shipments, &before),
+            None => refused,
+        });
+    }
+
+    // And again at the versions qm read from the manifests it is about to build.
+    let notices = match incompatibilities {
+        Some(index) => {
+            let after = incompatibility::evaluate(
+                index,
+                shipments,
+                &incompatibility::manifest_versions(&plan, shipments)?,
+                VersionBasis::Manifest,
+            )?;
+            incompatibility::gate(index, shipments, &incompatibility::merge(before, after))?
+        }
+        None => Vec::new(),
+    };
+
+    // Every row maps back through `order` exactly once. `ok` is true here, and
+    // a plan without `order` always carries the cycle error, so a missing order is unreachable
+    // past the refusal above; it is still a hard error rather than an assumption.
+    let order = plan
+        .order
+        .as_ref()
+        .ok_or("qm preflight returned ok with no order, which its schema does not allow")?;
+    let ordered: Vec<&ShipmentRef> = map_order(order, &request)?
+        .into_iter()
+        .map(|i| &shipments[i])
+        .collect();
 
     let os = |s: &str| std::ffi::OsString::from(s);
     let corpus_args: Vec<std::ffi::OsString> = match &corpus {
@@ -523,11 +668,12 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
-    // 1) Build each Shipment's overlay and keep all of its blocks (the collapse drops scripts_vz),
-    //    plus every loose file its placement record names.
+    // 1) Build each Shipment's overlay, in the plan's order, and keep all of its
+    //    blocks (the collapse drops the linker-owned ones), plus every loose file its placement
+    //    record names.
     let mut overlays: Vec<(String, String, Vec<mercs2_formats::patch_wad::PatchBlock>)> = Vec::new();
     let mut files: Vec<StagedFile> = Vec::new();
-    for (i, ship) in shipments.iter().enumerate() {
+    for (i, ship) in ordered.iter().enumerate() {
         let out = work_dir(&format!("build-{i}"))?;
         let mut args: Vec<std::ffi::OsString> = vec![
             os("build"),
@@ -562,32 +708,33 @@ pub async fn shipment_groups(
         }
     }
 
-    // 2) Link the whole set's Lua into one reconciled scripts_vz, mounted last. Emits no WAD when no
-    //    Shipment touches scripts — then `link_scripts` stays empty and nothing is added.
+    // 2) Link the whole set's Lua, with the SAME request preflight was given.
+    //    Emits no WAD when no Shipment touches scripts — then `link_blocks` stays empty and
+    //    nothing is added.
     let link_out = work_dir("link")?;
-    let mut link_args: Vec<std::ffi::OsString> = vec![os("link")];
-    for ship in shipments {
-        link_args.push(os(&ship.path));
-    }
-    link_args.extend([
+    let mut link_args: Vec<std::ffi::OsString> = vec![
+        os("link"),
+        os("--request"),
+        preflight_dir.join(REQUEST_FILE).into_os_string(),
         os("--game"),
         game_arg.clone(),
         os("--out"),
         link_out.as_os_str().to_os_string(),
-    ]);
+    ];
     link_args.extend(corpus_args.iter().cloned());
     let link_refs: Vec<&std::ffi::OsStr> = link_args.iter().map(|a| a.as_os_str()).collect();
     run_qm(&qm, &link_refs, "qm link")?;
 
-    // `link_installed` emits `zz-quartermaster-link.wad`, and in releases before the record was
-    // added on that path it emits NO `placement.json` — so this consumer must work either way.
-    // `read_output` handles both: with a record the WAD is named, without one the name-sorted scan
-    // picks it, and the file list is simply empty. Any `game_folder` entry a future qm does record
-    // here flows through the same path as a build's, rather than needing a second one.
+    // Link writes its own plan beside `placement.json`. It must agree with preflight's.
+    let link_plan = read_link_plan(&link_out, &request)?;
+    assert_same_plan(&plan, &link_plan)?;
+
+    // `read_output` reads link's `placement.json`: with a record the WAD is named, and any
+    // `game_folder` entry it records flows through the same path as a build's.
     let (link_wad, link_files) = placement::read_output(&link_out, "Quartermaster link")?;
     files.extend(link_files);
 
-    let link_scripts = match link_wad {
+    let link_blocks = match link_wad {
         Some(wad) => {
             let bytes = std::fs::read(&wad).map_err(|e| format!("reading the link WAD: {e}"))?;
             read_patch_wad(&bytes)
@@ -597,35 +744,48 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
+    // 3) Loose-file collisions resolve in the plan's order: `files` was
+    //    collected in that order, with link's last.
     let (files, warnings) = resolve_file_collisions(files);
     Ok(ShipmentBuild {
-        groups: collapse(overlays, link_scripts, shipments.len()),
+        groups: collapse(overlays, link_blocks, &plan.link_block_paths, shipments.len()),
         files,
         warnings,
+        notices,
     })
 }
 
-/// Fold per-Shipment overlays + the linker's reconciled script blocks into final claim groups.
+/// Is this block one qm's linker owns? The plan lists them by path (`link_block_paths`):
+/// the script blocks and every string table link merges across Shipments (the last key in
+/// plan order wins). Compared case-insensitively and
+/// with either separator, because a PTHS path is a Windows path.
+fn is_link_owned(path_string: &str, link_block_paths: &[String]) -> bool {
+    let norm = |p: &str| p.replace('/', "\\").to_ascii_lowercase();
+    let p = norm(path_string);
+    link_block_paths.iter().any(|s| norm(s) == p)
+}
+
+/// Fold per-Shipment overlays + the link WAD into final claim groups.
 ///
-/// Each Shipment contributes its non-linker-owned blocks — everything that is neither `scripts_vz`
-/// nor the resident framework block (a pure Lua/residency Shipment therefore contributes no group);
-/// the linker supplies the single reconciled group carrying BOTH linker-owned blocks, appended
-/// **last** so it wins them on last-in-load-order resolution. Because every per-Shipment copy of
-/// those blocks is removed, the linker group never *partially* overrides an overlay group — which
-/// would be an atomic-group conflict. Dropping only `scripts_vz` (not the resident block) is what
-/// let two Shipments' resident blocks survive and collide.
+/// Each Shipment contributes its blocks minus the linker-owned ones, which the plan lists (a pure
+/// Lua Shipment therefore contributes no group). The link WAD's blocks are **all** kept, as one
+/// group appended **last**, so it wins on last-in-load-order resolution. Because every
+/// per-Shipment copy of a linker-owned block is removed, the linker group never *partially*
+/// overrides an overlay group — which would be an atomic-group conflict. `overlays` arrive in the
+/// plan's order, so the groups do too.
 ///
 /// Pure and side-effect-free so the residency invariant is unit-testable without `qm` or a game.
 fn collapse(
     overlays: Vec<(String, String, Vec<mercs2_formats::patch_wad::PatchBlock>)>,
-    link_scripts: Vec<mercs2_formats::patch_wad::PatchBlock>,
+    link_blocks: Vec<mercs2_formats::patch_wad::PatchBlock>,
+    link_block_paths: &[String],
     shipment_count: usize,
 ) -> Vec<ClaimGroup> {
     let mut groups: Vec<ClaimGroup> = Vec::new();
     for (id, name, blocks) in overlays {
         let kept: Vec<_> = blocks
             .into_iter()
-            .filter(|b| !is_scripts_block(&b.path_string))
+            .filter(|b| !is_link_owned(&b.path_string, link_block_paths))
             .collect();
         if kept.is_empty() {
             continue;
@@ -638,17 +798,13 @@ fn collapse(
             blocks: kept,
         });
     }
-    let scripts: Vec<_> = link_scripts
-        .into_iter()
-        .filter(|b| is_scripts_block(&b.path_string))
-        .collect();
-    if !scripts.is_empty() {
+    if !link_blocks.is_empty() {
         groups.push(ClaimGroup {
             mod_id: "qm-link:scripts".into(),
             mod_name: "Quartermaster link".into(),
-            label: format!("Reconciled scripts + resident ({shipment_count} Shipment(s))"),
+            label: format!("Linked scripts and string tables ({shipment_count} Shipment(s))"),
             atomic: true,
-            blocks: scripts,
+            blocks: link_blocks,
         });
     }
     groups
@@ -684,7 +840,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("manifest.yaml"),
-            "format: 1\nshipment:\n  name: solano-vehicle-pack\n  version: 2.1.0\n  target: retail\ncontributions: []\n",
+            "format: 2\nshipment:\n  name: solano-vehicle-pack\n  version: 2.1.0\n  target: retail\ncontributions: []\n",
         )
         .unwrap();
 
@@ -704,7 +860,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("manifest.json"),
-            r#"{"format":1,"shipment":{"name":"my-mod","version":"0.3.0"}}"#,
+            r#"{"format":2,"shipment":{"name":"my-mod","version":"0.3.0"}}"#,
         )
         .unwrap();
 
@@ -764,26 +920,115 @@ mod tests {
         assert_eq!(info.name, "blank");
     }
 
+    /// A saved row with no `install_reason` predates dependency tracking. It fails with a message
+    /// saying the library must be rebuilt — not a bare serde error, and not a defaulted reason.
+    #[test]
+    fn a_row_without_an_install_reason_fails_with_a_rebuild_message() {
+        let old = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","slug":"ess","version":"0.7.0"}"#;
+        let err = serde_json::from_str::<ShipmentRef>(old).unwrap_err().to_string();
+        assert!(err.contains("predates dependency tracking"), "{err}");
+        assert!(err.contains("must be rebuilt"), "{err}");
+        assert!(err.contains("\"Ess\""), "names the row: {err}");
+        assert!(!err.contains("missing field"), "not a bare serde error: {err}");
+
+        let null = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","install_reason":null}"#;
+        assert!(serde_json::from_str::<ShipmentRef>(null).unwrap_err().to_string().contains("must be rebuilt"));
+
+        let bad = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","install_reason":"maybe"}"#;
+        assert!(serde_json::from_str::<ShipmentRef>(bad).is_err());
+
+        let ok = r#"{"id":"shipment:x","name":"Ess","path":"/tmp/x","install_reason":"dependency"}"#;
+        assert_eq!(
+            serde_json::from_str::<ShipmentRef>(ok).unwrap().install_reason,
+            InstallReason::Dependency
+        );
+    }
+
+    fn row_json(name: &str, reason: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({ "id": format!("shipment:{name}"), "name": name, "path": "/p" });
+        if let Some(r) = reason {
+            v["install_reason"] = serde_json::json!(r);
+        }
+        v
+    }
+
+    #[test]
+    fn saved_rows_with_install_reasons_load() {
+        let saved = serde_json::json!([row_json("ess", Some("user")), row_json("lua-bridge", Some("dependency"))]);
+        match read_saved_shipments(&saved).unwrap() {
+            SavedShipments::Loaded { rows } => assert_eq!(rows.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            read_saved_shipments(&serde_json::Value::Null).unwrap(),
+            SavedShipments::Loaded { rows } if rows.is_empty()
+        ));
+    }
+
+    /// One untracked row refuses the whole set, naming the row, and reports how many rows are
+    /// being kept. The rows are not defaulted and not partly loaded.
+    #[test]
+    fn a_saved_library_without_install_reasons_is_refused_whole() {
+        let saved = serde_json::json!([row_json("ess", Some("user")), row_json("old-mod", None)]);
+        match read_saved_shipments(&saved).unwrap() {
+            SavedShipments::PredatesDependencyTracking { message, count } => {
+                assert_eq!(count, 2);
+                assert!(message.contains("\"old-mod\""), "{message}");
+                assert!(message.contains("predates dependency tracking"), "{message}");
+                assert!(message.contains("kept untouched"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let null_reason = serde_json::json!([{ "id": "shipment:x", "name": "x", "path": "/p", "install_reason": null }]);
+        assert!(matches!(
+            read_saved_shipments(&null_reason).unwrap(),
+            SavedShipments::PredatesDependencyTracking { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_saved_row_is_an_error_not_a_skip() {
+        let saved = serde_json::json!([row_json("ess", Some("sometimes"))]);
+        assert!(read_saved_shipments(&saved).unwrap_err().contains("row 1"));
+        assert!(read_saved_shipments(&serde_json::json!({ "a": 1 })).is_err());
+    }
+
     /// A Shipment row persisted before origins existed must still load — as "staged locally,
     /// nothing known", which is the truth about it.
     #[test]
     fn a_pre_origin_shipment_row_deserializes() {
-        let old = r#"{"id":"shipment:x","name":"x","path":"/tmp/x"}"#;
+        let old = r#"{"id":"shipment:x","name":"x","path":"/tmp/x","install_reason":"user"}"#;
         let r: ShipmentRef = serde_json::from_str(old).unwrap();
         assert_eq!(r.slug, None);
         assert_eq!(r.origin.source, crate::models::origin::OriginSource::Local);
         assert_eq!(r.origin.id, None);
     }
 
+    /// A merged string-table block, in the single-entry `blocks\VZ\mod_<hash>.block` shape qm's
+    /// `edit_stringdb` lowering emits (qm `build.rs`, the add_language overlay block).
+    const STRING_TABLE: &str = r"blocks\VZ\mod_1a2b3c4d.block";
+
+    /// What a plan's `link_block_paths` carries: qm's two script blocks plus a merged string
+    /// table.
+    fn link_block_paths() -> Vec<String> {
+        vec![
+            r"blocks\VZ\scripts_vz_P000_Q3.block".into(),
+            r"blocks\VZ\resident_P000_Q3.block".into(),
+            STRING_TABLE.into(),
+        ]
+    }
+
     #[test]
-    fn scripts_block_is_detected_by_path() {
-        assert!(is_scripts_block("blocks\\VZ\\scripts_vz_P000_Q3.block"));
+    fn link_owned_blocks_are_the_ones_the_plan_lists() {
+        let paths = link_block_paths();
+        assert!(is_link_owned(r"blocks\VZ\scripts_vz_P000_Q3.block", &paths));
         // The resident framework block is ALSO linker-owned — qm re-emits it, so modkit must take
         // it from the link WAD and drop it from overlays. Missing this was the ~7000-asset collision.
-        assert!(is_scripts_block("blocks\\VZ\\resident_P000_Q3.block"));
-        // Anchored: a different block that merely ends in `resident_P000_Q3.block` is NOT one of them.
-        assert!(!is_scripts_block("blocks\\VZ\\sound_resident_P000_Q3.block"));
-        assert!(!is_scripts_block("blocks\\modkit\\some_model.block"));
+        assert!(is_link_owned(r"blocks\VZ\resident_P000_Q3.block", &paths));
+        assert!(is_link_owned("BLOCKS/vz/RESIDENT_P000_Q3.BLOCK", &paths), "case and separator");
+        // A different block that merely ends in `resident_P000_Q3.block` is NOT one of them.
+        assert!(!is_link_owned(r"blocks\VZ\sound_resident_P000_Q3.block", &paths));
+        assert!(!is_link_owned(r"blocks\modkit\some_model.block", &paths));
     }
 
     /// The exact URL the Workshop's `modkit_ship_url` emits must decode back to the original path,
@@ -800,66 +1045,6 @@ mod tests {
         assert_eq!(parse_ship_url("https://example.com"), None);
     }
 
-    // --- load.requires: managed dependencies for auto-on-deploy ---
-
-    fn managed_reqs(name: &str, body: &str) -> Vec<(String, String)> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(name);
-        std::fs::write(&path, body).unwrap();
-        read_managed_requirements(&path)
-    }
-
-    #[test]
-    fn a_managed_requirement_reads_as_name_and_range() {
-        let got = managed_reqs(
-            "manifest.yaml",
-r#"shipment: { name: x, version: 1.0.0 }
-load:
-  requires:
-    - name: m2-sdk
-      version: "^0.1"
-contributions: []
-"#,
-        );
-        assert_eq!(got, vec![("m2-sdk".to_string(), "^0.1".to_string())]);
-    }
-
-    /// The whole reason `RequireHead` has an `Ignored` arm: a bare-string Shipment dep and an
-    /// `{url,sha256}` External dep are NOT managed components — they must be skipped, and their
-    /// presence must not stop the managed dep in the same list from being read.
-    #[test]
-    fn non_managed_requirement_forms_are_skipped_not_fatal() {
-        let got = managed_reqs(
-            "manifest.yaml",
-r#"shipment: { name: x, version: 1.0.0 }
-load:
-  requires:
-    - some-other-shipment
-    - url: https://example.com/x.asi
-      sha256: abc
-    - name: m2-sdk
-      version: "^0.1"
-contributions: []
-"#,
-        );
-        assert_eq!(got, vec![("m2-sdk".to_string(), "^0.1".to_string())]);
-    }
-
-    #[test]
-    fn no_requires_means_no_managed_dependencies() {
-        assert!(managed_reqs("manifest.yaml", "shipment: { name: x }\ncontributions: []\n").is_empty());
-    }
-
-    /// Untagged disambiguation must hold across formats, not just YAML.
-    #[test]
-    fn a_managed_requirement_reads_from_json_too() {
-        let got = managed_reqs(
-            "manifest.json",
-            r#"{"shipment":{"name":"x"},"load":{"requires":[{"name":"m2-sdk","version":"^0.1"}]}}"#,
-        );
-        assert_eq!(got, vec![("m2-sdk".to_string(), "^0.1".to_string())]);
-    }
-
     use mercs2_formats::patch_wad::{
         build_patch_wad_multi, validate_blocks, AsetEntry, PatchBlock, FFCS_CERT_BLOB,
     };
@@ -874,6 +1059,21 @@ contributions: []
         .unwrap()
     }
 
+    /// Every group's blocks that the plan lists as linker-owned, with the group's id.
+    fn link_owned_in(groups: &[ClaimGroup]) -> Vec<(String, String)> {
+        let paths = link_block_paths();
+        groups
+            .iter()
+            .flat_map(|g| {
+                g.blocks
+                    .iter()
+                    .filter(|b| is_link_owned(&b.path_string, &paths))
+                    .map(|b| (g.mod_id.clone(), b.path_string.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// The residency headline: two script-touching Shipments, each with its own standalone
     /// `scripts_vz`, collapse so the FINAL merged WAD carries exactly **one** scripts block — the
     /// linker's reconciled one — and never a partial-override conflict.
@@ -881,44 +1081,34 @@ contributions: []
     fn collapse_yields_a_single_reconciled_scripts_block() {
         // Reuse one scripts hash across both overlays and the link, as the real blocks do.
         let scripts_hash = 0x5C21_7000;
+        let scripts = r"blocks\VZ\scripts_vz_P000_Q3.block";
         let overlays = vec![
             (
                 "shipment:a".into(),
                 "A".into(),
-                vec![
-                    block("blocks\\a\\model.block", 0x1111),
-                    block("blocks\\VZ\\scripts_vz_A.block", scripts_hash),
-                ],
+                vec![block(r"blocks\a\model.block", 0x1111), block(scripts, scripts_hash)],
             ),
             (
                 "shipment:b".into(),
                 "B".into(),
-                vec![
-                    block("blocks\\b\\texture.block", 0x2222),
-                    block("blocks\\VZ\\scripts_vz_B.block", scripts_hash),
-                ],
+                vec![block(r"blocks\b\texture.block", 0x2222), block(scripts, scripts_hash)],
             ),
         ];
-        let link_scripts = vec![block("blocks\\VZ\\scripts_vz_linked.block", scripts_hash)];
+        let link_blocks = vec![block(scripts, scripts_hash)];
 
-        let groups = collapse(overlays, link_scripts, 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        assert_eq!(
+            link_owned_in(&groups),
+            vec![("qm-link:scripts".to_string(), scripts.to_string())],
+            "exactly one scripts_vz survives, and it is the linker's"
+        );
+        assert_eq!(groups.last().unwrap().mod_id, "qm-link:scripts", "link group last");
+
         let resolved = crate::models::claim::resolve(&groups);
         assert!(
             resolved.conflicts.is_empty(),
             "no atomic partial-overlap: {:?}",
             resolved.conflicts
-        );
-
-        let scripts: Vec<_> = resolved
-            .blocks
-            .iter()
-            .filter(|b| is_scripts_block(&b.path_string))
-            .collect();
-        assert_eq!(scripts.len(), 1, "exactly one scripts_vz survives");
-        assert!(
-            scripts[0].path_string.contains("linked"),
-            "and it is the linker's: {}",
-            scripts[0].path_string
         );
         // Both Shipments' non-script assets survive alongside it.
         assert_eq!(resolved.blocks.len(), 3);
@@ -937,35 +1127,78 @@ contributions: []
     #[test]
     fn collapse_reconciles_the_resident_block_across_shipments() {
         let resident_hash = 0x1234_5678;
+        let resident = r"blocks\VZ\resident_P000_Q3.block";
         let overlays = vec![
-            (
-                "shipment:a".into(),
-                "A".into(),
-                vec![block("blocks\\VZ\\resident_P000_Q3.block", resident_hash)],
-            ),
-            (
-                "shipment:b".into(),
-                "B".into(),
-                vec![block("blocks\\VZ\\resident_P000_Q3.block", resident_hash)],
-            ),
+            ("shipment:a".into(), "A".into(), vec![block(resident, resident_hash)]),
+            ("shipment:b".into(), "B".into(), vec![block(resident, resident_hash)]),
         ];
         // qm link re-emits the reconciled resident block once — collapse must take THIS one.
-        let link_scripts = vec![block("blocks\\VZ\\resident_P000_Q3.block", resident_hash)];
+        let link_blocks = vec![block(resident, resident_hash)];
 
-        let groups = collapse(overlays, link_scripts, 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        assert_eq!(
+            link_owned_in(&groups),
+            vec![("qm-link:scripts".to_string(), resident.to_string())]
+        );
         let resolved = crate::models::claim::resolve(&groups);
         assert!(
             resolved.conflicts.is_empty(),
             "the resident block must reconcile, not conflict: {:?}",
             resolved.conflicts
         );
-        let resident: Vec<_> = resolved
-            .blocks
-            .iter()
-            .filter(|b| is_scripts_block(&b.path_string))
-            .collect();
-        assert_eq!(resident.len(), 1, "exactly one resident block survives");
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
+    }
+
+    /// Two Shipments both editing one string table each ship their own copy of its block; link
+    /// merges them per key. Both per-Shipment copies are dropped and link's merged one is kept,
+    /// once, last — no conflict.
+    #[test]
+    fn collapse_takes_the_merged_string_table_from_link() {
+        let table_hash = 0x1A2B_3C4D;
+        let overlays = vec![
+            (
+                "shipment:a".into(),
+                "A".into(),
+                vec![block(r"blocks\a\model.block", 0x1111), block(STRING_TABLE, table_hash)],
+            ),
+            ("shipment:b".into(), "B".into(), vec![block(STRING_TABLE, table_hash)]),
+        ];
+        let link_blocks = vec![block(STRING_TABLE, table_hash)];
+
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        assert_eq!(
+            link_owned_in(&groups),
+            vec![("qm-link:scripts".to_string(), STRING_TABLE.to_string())],
+            "only link's merged copy survives"
+        );
+        assert_eq!(groups.len(), 2, "B carried only the table, so it contributes no group");
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
+        validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
+    }
+
+    /// **All** of the link WAD's blocks are kept, not only the listed ones.
+    #[test]
+    fn collapse_keeps_every_link_block() {
+        let link_blocks = vec![
+            block(r"blocks\VZ\scripts_vz_P000_Q3.block", 0x10),
+            block(r"blocks\qm\modloader.block", 0x20),
+        ];
+        let groups = collapse(Vec::new(), link_blocks, &link_block_paths(), 1);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].blocks.len(), 2);
+    }
+
+    /// Groups come out in the order the overlays were built in, which is the plan's `order`.
+    #[test]
+    fn collapse_keeps_the_overlay_order() {
+        let overlays = vec![
+            ("shipment:b".into(), "B".into(), vec![block(r"blocks\b\x.block", 0x2)]),
+            ("shipment:a".into(), "A".into(), vec![block(r"blocks\a\x.block", 0x1)]),
+        ];
+        let groups = collapse(overlays, Vec::new(), &link_block_paths(), 2);
+        let ids: Vec<&str> = groups.iter().map(|g| g.mod_id.as_str()).collect();
+        assert_eq!(ids, vec!["shipment:b", "shipment:a"]);
     }
 
     fn staged(shipment: &str, relative: &str) -> StagedFile {
@@ -1024,7 +1257,7 @@ contributions: []
             "A".into(),
             vec![block("blocks\\a\\model.block", 0x1111)],
         )];
-        let groups = collapse(overlays, Vec::new(), 1);
+        let groups = collapse(overlays, Vec::new(), &link_block_paths(), 1);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].blocks.len(), 1);
     }

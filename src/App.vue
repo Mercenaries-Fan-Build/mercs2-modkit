@@ -9,6 +9,9 @@ import { useProjectStore } from "./stores/project";
 import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
+import ShipmentRemovalDialog from "./components/ShipmentRemovalDialog.vue";
+import RefusedShipmentsBanner from "./components/RefusedShipmentsBanner.vue";
+import IncompatibilityBanner from "./components/IncompatibilityBanner.vue";
 
 const store = useProjectStore();
 const router = useRouter();
@@ -271,10 +274,14 @@ onMounted(async () => {
     <!-- Main content -->
     <div class="flex flex-1 flex-col overflow-hidden">
       <GameBar />
+      <RefusedShipmentsBanner />
+      <IncompatibilityBanner />
       <main class="flex-1 overflow-y-auto">
         <RouterView />
       </main>
     </div>
+    <!-- One instance for every view that removes a Shipment: the chain is confirmed here. -->
+    <ShipmentRemovalDialog />
   </div>
 </template>
 

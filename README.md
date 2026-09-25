@@ -18,6 +18,35 @@ Built with **Tauri 2** (Rust) + **Vue 3** + **Tailwind CSS** + **Headless UI**.
 - **Validate** the output with
   [`wad_simulator`](https://crates.io/crates/wad_simulator) before deploying.
 
+## Community incompatibility reports
+
+Before building any Shipments, Modkit fetches mercs.ink's community list of
+incompatibilities (`GET /api/v1/incompatibilities`) and checks the Shipments
+against it.
+
+- **Matching** is by mercs.ink public id. Only Shipments installed from
+  mercs.ink carry one. A folder staged from disk is never matched, even if it
+  has the same name. Reports whose other party is a catalog mod can't match a
+  Shipment and are ignored.
+- **The check runs twice.** It runs before `qm preflight` with the versions
+  recorded at install, and again after with the versions qm read from the
+  manifests. The refusal says which versions were compared.
+- **Only a `confirmed` report blocks the build.** Every confirmed match goes
+  into one refusal. If preflight also refused, its findings are in the same
+  message.
+- **Other statuses only warn.** `reported`, `disputed` and `resolved` reports
+  appear in a banner after the build.
+- **Caching:** the list is cached in `mercsink-incompatibilities.json` in the
+  app data folder, and revalidated with its ETag.
+  - If mercs.ink can't be reached, the cached copy is used, and the banner
+    says when it was downloaded.
+  - With no cached copy, the build goes ahead, and the banner says it wasn't
+    checked.
+  - Any other error fails the build: a 4xx other than 429, a list that breaks
+    the contract (unknown status, reason or source, or a range that isn't
+    semver), or a cache file that can't be read. A list Modkit can't use never
+    replaces the cached copy.
+
 ## Mod manifest
 
 ```json

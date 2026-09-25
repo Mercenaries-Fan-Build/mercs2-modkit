@@ -171,6 +171,35 @@ export interface BuildResult {
   warnings?: string[];
   /** Files that will be dropped into the game folder on install. An `.asi` is native code. */
   placed_files?: StagedFile[];
+  /** What mercs.ink's community incompatibility list said about the Shipments. `null` when the
+   *  build had no Shipments (and always from the preview), since the list is not consulted. */
+  incompatibilities: IncompatibilityCheck | null;
+}
+
+/** Which incompatibility list a build was checked against. Every `message` is composed by the
+ *  backend and shown as is. */
+export type IncompatibilityListState =
+  /** mercs.ink answered. `fetched_at` is seconds since the epoch. */
+  | { state: "current"; fetched_at: number }
+  /** mercs.ink could not be reached, so the last downloaded list was used. */
+  | { state: "cached"; fetched_at: number; generated_at: string; reason: string; message: string }
+  /** mercs.ink could not be reached and the list was never downloaded: the build was not checked. */
+  | { state: "never_fetched"; reason: string; message: string };
+
+/** An unconfirmed community report that applies to the build. Shown; never blocks. */
+export interface IncompatibilityNotice {
+  status: "reported" | "confirmed" | "disputed" | "resolved";
+  reason: "crash_on_load" | "hang" | "feature_broken" | "save_damage" | "other";
+  message: string;
+  subject: { name: string; version: string; id: string };
+  other: { name: string; version: string; ref: string };
+  reports: number;
+  updated_on: string;
+}
+
+export interface IncompatibilityCheck {
+  list: IncompatibilityListState;
+  notices: IncompatibilityNotice[];
 }
 
 /**
@@ -485,6 +514,13 @@ export interface ShipmentRef {
   /** `local` with a null id for anything staged from disk. */
   origin: Origin;
   /**
+   * Why the row is in the library. `user` for anything the player added;
+   * `dependency` for a Shipment the resolver installed because something required it. Orphan
+   * removal reads it: a `dependency` row nothing requires any more is removed with the chain
+   * that stopped requiring it, and a `user` row never is.
+   */
+  install_reason: InstallReason;
+  /**
    * A client-side "these bytes were just (re)staged" marker, set by the frontend at install time
    * and never by the backend. A reinstall re-extracts the same staging path at the same version,
    * so `id`/`version` alone can't tell the build the content changed; bumping this makes the load
@@ -493,6 +529,8 @@ export interface ShipmentRef {
    */
   stagedRev?: number;
 }
+
+export type InstallReason = "user" | "dependency";
 
 /** A snapshot of a `vz-patch.wad` that a deploy displaced. */
 export interface WadBackup {
@@ -747,6 +785,54 @@ export interface MercsInkInstall {
   target: string | null;
   assets: string[];
   staged_files: number;
+  /** What the resolver installed or updated alongside it, in the order it resolved them. */
+  dependencies: DependencyInstall[];
+}
+
+/** A Shipment installed or updated because something required it. */
+export interface DependencyInstall {
+  shipment: ShipmentRef;
+  release_version: string;
+  /** The version it replaced, when this was an update of an installed row. */
+  updated_from: string | null;
+  asset: string;
+}
+
+/** The requirement of a Shipment's that pulled it into a removal. */
+export interface PulledBy {
+  kind: "shipment" | "capability";
+  /** The required Shipment name or capability token. */
+  target: string;
+  range: string | null;
+}
+
+/** One Shipment a removal cascades to. */
+export interface CascadedShipment {
+  shipment: ShipmentRef;
+  pulled_by: PulledBy;
+}
+
+/** The full chain a removal takes, shown before anything is removed. */
+export interface ShipmentRemovalPlan {
+  removed: ShipmentRef;
+  cascade: CascadedShipment[];
+  /** Dependencies nothing will require any more. */
+  orphans: ShipmentRef[];
+}
+
+/**
+ * What the saved Shipment rows restore to. A library saved before dependency tracking is refused
+ * whole; its rows are kept untouched until the player discards them.
+ */
+export type SavedShipments =
+  | { state: "loaded"; rows: ShipmentRef[] }
+  | { state: "predates_dependency_tracking"; message: string; count: number };
+
+/** What happened to a confirmed removal; every row is accounted for. */
+export interface RemovalOutcome {
+  removed: string[];
+  failed: { id: string; error: string } | null;
+  not_attempted: string[];
 }
 
 export interface InstallResult {
@@ -958,21 +1044,6 @@ export interface InstallDllResult {
   features: PmcBbFeatures;
   reason: string;
   overridden: boolean;
-}
-
-/** One managed dependency after an auto-on-deploy resolution pass. */
-export interface ResolvedDependency {
-  name: string;
-  versionReq: string;
-  /** Release tag installed, or null when the dependency was skipped (see `note`). */
-  installedTag: string | null;
-  /** Why it was skipped, when it was. */
-  note: string | null;
-}
-
-/** Result of resolving a Shipment's managed `load.requires` on deploy. */
-export interface ResolveDepsResult {
-  resolved: ResolvedDependency[];
 }
 
 /**
