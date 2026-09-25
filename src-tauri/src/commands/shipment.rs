@@ -116,7 +116,7 @@ fn percent_decode(s: &str) -> String {
 /// A Workshop Shipment staged in the load order (a qm source directory, later wins).
 ///
 /// Deserialized through [`ShipmentRefWire`] so that a saved row without `install_reason` fails
-/// with a message the player can act on rather than a bare serde error (user, 2026-09-24).
+/// with a message the player can act on rather than a bare serde error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "ShipmentRefWire")]
 pub struct ShipmentRef {
@@ -195,7 +195,7 @@ impl TryFrom<ShipmentRefWire> for ShipmentRef {
     }
 }
 
-/// What the saved library's Shipment rows restore to (user, 2026-09-24).
+/// What the saved library's Shipment rows restore to.
 ///
 /// A library saved before dependency tracking has rows with no `install_reason`. Those rows are
 /// not loaded, and not defaulted; the frontend keeps them in storage untouched and refuses to
