@@ -42,7 +42,7 @@ pub const PLAN_FILE: &str = "load-plan.json";
 
 /// A key that is always present but may be `null`. serde reads a *missing* `Option` field as
 /// `None` unless a `deserialize_with` is set; setting one makes a missing key an error.
-fn nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+pub(crate) fn nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
