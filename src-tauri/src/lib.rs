@@ -36,7 +36,9 @@ use commands::save_backup::{
     set_saves_dir,
 };
 use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, update_game};
-use commands::shipment::{inspect_shipment, take_pending_shipment, PendingShipment};
+use commands::shipment::{
+    inspect_shipment, restore_saved_shipments, take_pending_shipment, PendingShipment,
+};
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
     uninstall_tool, ToolProcesses,
@@ -192,6 +194,7 @@ pub fn run() {
             delete_save_backup,
             set_saves_dir,
             inspect_shipment,
+            restore_saved_shipments,
             take_pending_shipment,
             fetch_mercsink_registry,
             fetch_mercsink_mod,
