@@ -171,6 +171,35 @@ export interface BuildResult {
   warnings?: string[];
   /** Files that will be dropped into the game folder on install. An `.asi` is native code. */
   placed_files?: StagedFile[];
+  /** What mercs.ink's community incompatibility list said about the Shipments. `null` when the
+   *  build had no Shipments (and always from the preview), since the list is not consulted. */
+  incompatibilities: IncompatibilityCheck | null;
+}
+
+/** Which incompatibility list a build was checked against. Every `message` is composed by the
+ *  backend and shown as is. */
+export type IncompatibilityListState =
+  /** mercs.ink answered. `fetched_at` is seconds since the epoch. */
+  | { state: "current"; fetched_at: number }
+  /** mercs.ink could not be reached, so the last downloaded list was used. */
+  | { state: "cached"; fetched_at: number; generated_at: string; reason: string; message: string }
+  /** mercs.ink could not be reached and the list was never downloaded: the build was not checked. */
+  | { state: "never_fetched"; reason: string; message: string };
+
+/** An unconfirmed community report that applies to the build. Shown; never blocks. */
+export interface IncompatibilityNotice {
+  status: "reported" | "confirmed" | "disputed" | "resolved";
+  reason: "crash_on_load" | "hang" | "feature_broken" | "save_damage" | "other";
+  message: string;
+  subject: { name: string; version: string; id: string };
+  other: { name: string; version: string; ref: string };
+  reports: number;
+  updated_on: string;
+}
+
+export interface IncompatibilityCheck {
+  list: IncompatibilityListState;
+  notices: IncompatibilityNotice[];
 }
 
 /**
