@@ -366,7 +366,9 @@ fn decode_uncompressed(name: &str, container: &[u8], cap: u32) -> Option<Texture
 
     // D3D stores these as BGRA in memory order; PNG wants RGBA.
     let mut rgba = Vec::with_capacity(needed);
-    for px in body[..needed].chunks_exact(4) {
+    // `needed` is a multiple of 4, so there is never a remainder to drop.
+    let (pixels, _) = body[..needed].as_chunks::<4>();
+    for px in pixels {
         rgba.extend_from_slice(&[px[2], px[1], px[0], if fmt == D3DFMT_X8R8G8B8 { 255 } else { px[3] }]);
     }
     let img = image::RgbaImage::from_raw(width, height, rgba)?;
