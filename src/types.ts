@@ -1013,12 +1013,13 @@ export interface ComponentStatus {
   url: string | null;
 }
 
+// camelCase: setup.rs serializes CrackResult with `rename_all = "camelCase"`.
 export interface CrackResult {
   ok: boolean;
-  output_path: string;
+  outputPath: string;
   stdout: string;
   stderr: string;
-  tool_version: string; // apply_crack release tag that was downloaded & run
+  toolVersion: string; // apply_crack release tag that was downloaded & run
 }
 
 /**

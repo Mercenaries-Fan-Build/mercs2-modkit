@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
 import type { PmcBbChoice, PmcBbVariant } from "../types";
+import CrackPanel from "../components/CrackPanel.vue";
+import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
 
 const store = useProjectStore();
 const {
@@ -272,8 +274,8 @@ async function normalizeRegion() {
               <RouterLink to="/setup" class="underline">Setup</RouterLink>).
             </template>
             <template v-else>
-              Needs v1.1 + cracked exe + pmc_bb.dll. Finish in
-              <RouterLink to="/setup" class="underline">Setup</RouterLink>.
+              Needs v1.1 + cracked exe + pmc_bb.dll — crack it below (or in
+              <RouterLink to="/setup" class="underline">Setup</RouterLink>).
             </template>
           </template>
         </p>
@@ -547,6 +549,11 @@ async function normalizeRegion() {
           </button>
         </div>
       </section>
+
+      <!-- Exe: official v1.1 update and the crack. Shown on every setup path and
+           for every exe — the only gate is each panel's own "already done". -->
+      <ExeUpdatePanel class="mt-4" />
+      <CrackPanel class="mt-4" />
 
       <!-- dxwrapper -->
       <section
