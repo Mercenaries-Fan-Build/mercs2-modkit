@@ -644,6 +644,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cmac"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8543454e3c3f5126effff9cd44d562af4e31fb8ce1cc0d3dcd8f084515dbc1aa"
+dependencies = [
+ "cipher",
+ "dbl",
+ "digest",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -917,6 +928,15 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "dbl"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd2735a791158376708f9347fe8faba9667589d82427ef3aed6794a8981de3d9"
+dependencies = [
+ "generic-array",
 ]
 
 [[package]]
@@ -2467,9 +2487,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "loadprobe"
-version = "2.2.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "154a402f087cf8096fce2240cf5296bce491aa64967fefc0a3ee1f5514064468"
+checksum = "c4b832ddffe513c9bfb01494d35bd2a015670217f356068a96b943af69244844"
 dependencies = [
  "clap",
  "colored",
@@ -2589,28 +2609,30 @@ dependencies = [
 
 [[package]]
 name = "mercs2_formats"
-version = "3.5.1"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe66fa68d69655ecc7443933a5ef586762ae9b3473e4e37465cb293d2ac78a9a"
+checksum = "4001f155065b5dbb192db4a0df72768b5d458f42b7b33989c94ec262ea2a6cb8"
 dependencies = [
+ "aes",
+ "cmac",
  "flate2",
  "gltf",
 ]
 
 [[package]]
 name = "mercs2_luac"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afe17d93b34844655e325f4afc139fa2835124d7a9ea051435d761b2fb2ac9b5"
+checksum = "97a6671585f3f9de3aaa0a0acd59380271af60111d9b9c1f8217fb3bb8675883"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "mercs2_mesh"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeb6764beda07c063c914643a99253f5b3e4fd0b8457a0e44256765160b551b6"
+checksum = "2d2e60a9e79acfb989cfee5ce48a243d9e034ce75b682f7a140754d58c924a04"
 dependencies = [
  "bytemuck",
  "mercs2_formats",
