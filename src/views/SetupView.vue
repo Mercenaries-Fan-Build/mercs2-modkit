@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { save } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
-import type { CrackResult, DxwrapperResult } from "../types";
+import type { DxwrapperResult } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
+import CrackPanel from "../components/CrackPanel.vue";
+import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
 
 const store = useProjectStore();
-const { gameInfo, busy, error, componentUpdates, pmcBbVersion, crackVersion, license } =
-  storeToRefs(store);
+const { gameInfo, busy, error, componentUpdates, pmcBbVersion, license } = storeToRefs(store);
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
-const crackUpdate = computed(() => componentUpdates.value["apply_crack"]);
 
 // The UI shows the path detection resolved, but the user can switch between the
 // crack and licensed (dxwrapper) flows. "drm_free" isn't an override — it's a
@@ -22,13 +21,10 @@ const effectivePath = computed(() => {
   return pathOverride.value ?? store.setupPath;
 });
 
-const outputPath = ref<string | null>(null);
 const showAnyway = ref(false);
 const stage = ref("");
 const pmcMsg = ref<string | null>(null);
-const crackResult = ref<CrackResult | null>(null);
 const dxResult = ref<DxwrapperResult | null>(null);
-const updateResult = ref<CrackResult | null>(null);
 
 async function installPmcBb() {
   stage.value = "Downloading pmc_bb.dll…";
@@ -36,39 +32,6 @@ async function installPmcBb() {
   try {
     const res = await store.installPmcBb();
     pmcMsg.value = `Installed pmc_bb.dll ${res.version} → ${res.path}`;
-  } catch {
-    /* surfaced via store.error */
-  } finally {
-    stage.value = "";
-  }
-}
-
-async function pickOutput() {
-  const f = await save({
-    title: "Save cracked exe as…",
-    defaultPath: "Mercenaries2.cracked.exe",
-    filters: [{ name: "Executable", extensions: ["exe"] }],
-  });
-  if (typeof f === "string") outputPath.value = f;
-}
-
-async function runCrack() {
-  stage.value = "Downloading apply_crack & patching…";
-  crackResult.value = null;
-  try {
-    crackResult.value = await store.crackGame({ outputPath: outputPath.value });
-  } catch {
-    /* surfaced via store.error */
-  } finally {
-    stage.value = "";
-  }
-}
-
-async function runUpdate() {
-  stage.value = "Updating exe to v1.1 (official patch, no crack)…";
-  updateResult.value = null;
-  try {
-    updateResult.value = await store.updateGame();
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -231,36 +194,11 @@ async function runDxwrapper() {
         <!-- ========================= LICENSED PATH ========================= -->
         <template v-else-if="effectivePath === 'licensed'">
           <!-- Optional: update v1.0 → v1.1 (official patch, keeps DRM) -->
-          <section
+          <ExeUpdatePanel
             v-if="gameInfo.version === 'v1.0'"
-            class="guilloche mt-6 rounded-xl border border-zinc-800 p-5"
-          >
-            <div class="flex items-start justify-between gap-4">
-              <div>
-                <h3 class="plate-title text-sm">Optional · Update to v1.1 (official patch)</h3>
-                <p class="mt-1 text-sm text-zinc-400">
-                  Applies EA's official v1.0 → v1.1 update — <span class="text-zinc-300">not a crack</span>.
-                  The exe stays SecuROM-protected and your activation carries over. Your original is
-                  backed up to <span class="font-mono text-xs">BACKUP/</span>.
-                </p>
-              </div>
-              <button
-                class="shrink-0 rounded-lg bg-zinc-700 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-600 disabled:opacity-50"
-                :disabled="busy"
-                @click="runUpdate"
-              >
-                Update
-              </button>
-            </div>
-            <p
-              v-if="updateResult"
-              class="mt-3 text-sm"
-              :class="updateResult.ok ? 'text-emerald-400' : 'text-red-400'"
-            >
-              {{ updateResult.ok ? "Updated to v1.1 (DRM intact)" : "Update failed" }} —
-              {{ updateResult.stdout || updateResult.stderr }}
-            </p>
-          </section>
+            title="Optional · Update to v1.1 (official patch)"
+            class="mt-6"
+          />
 
           <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
             <div class="flex items-start justify-between gap-4">
@@ -353,53 +291,7 @@ async function runDxwrapper() {
             </p>
           </section>
 
-          <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
-            <h3 class="plate-title text-sm">2 · Crack the exe</h3>
-            <p class="mt-1 text-sm text-zinc-400">
-              Applies the SecuROM bypass (auto-updating v1.0 → v1.1 first), writing a
-              new cracked exe that loads pmc_bb.dll.
-            </p>
-            <p
-              v-if="crackVersion"
-              class="mt-1 text-xs"
-              :class="crackUpdate?.available ? 'text-amber-300' : 'text-zinc-500'"
-            >
-              <template v-if="crackUpdate?.available">
-                <span class="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-400 align-middle" />New
-                apply_crack release → {{ crackUpdate.latest }} (you last ran {{ crackVersion }}).
-              </template>
-              <template v-else>Last ran apply_crack {{ crackVersion }}.</template>
-            </p>
-
-            <div class="mt-3">
-              <label class="mb-1 block text-xs text-zinc-500">Output exe (optional)</label>
-              <div class="flex gap-2">
-                <input
-                  :value="outputPath ?? ''"
-                  readonly
-                  placeholder="Default: Mercenaries2.cracked.exe next to the original"
-                  class="field flex-1"
-                />
-                <button class="btn-outline" @click="pickOutput">Browse</button>
-              </div>
-            </div>
-
-            <button class="btn-plate mt-4" :disabled="busy" @click="runCrack">Crack</button>
-
-            <div v-if="crackResult" class="mt-4">
-              <p class="text-sm" :class="crackResult.ok ? 'text-emerald-400' : 'text-red-400'">
-                {{ crackResult.ok ? "Success" : "Failed" }} → {{ crackResult.output_path }}
-              </p>
-              <pre
-                class="mt-2 max-h-60 overflow-auto rounded-lg border border-zinc-800 bg-black/40 p-3 text-xs text-zinc-400"
-              >{{ crackResult.stdout || crackResult.stderr || "(no output)" }}</pre>
-            </div>
-          </section>
-
-          <p class="mt-4 text-xs text-zinc-600">
-            Tip: install pmc_bb.dll first, then crack — the cracked exe references
-            pmc_bb.dll, which must be present in the folder.
-          </p>
+          <CrackPanel title="2 · Crack the exe" class="mt-4" />
         </template>
       </template>
     </template>
