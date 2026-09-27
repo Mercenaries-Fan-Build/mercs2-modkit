@@ -273,7 +273,7 @@ function outcomeText(o: GroupOutcome): string {
               <p class="truncate text-sm text-zinc-200">{{ s.name }}</p>
               <p class="truncate font-mono text-xs text-zinc-500">{{ s.path }}</p>
             </div>
-            <button class="btn-secondary px-2 py-1" @click="store.removeShipment(s.id)">
+            <button class="btn-secondary px-2 py-1" @click="store.planShipmentRemoval(s.id)">
               ✕
             </button>
           </li>

@@ -24,6 +24,8 @@ use mercs2_formats::types::*;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
+use crate::commands::incompatibility::IncompatibilityCheck;
+use crate::commands::mercsink;
 use crate::commands::placement::StagedFile;
 use crate::commands::prebuilt::{self, PrebuiltWad};
 use crate::commands::shipment::{self, ShipmentRef};
@@ -94,6 +96,11 @@ pub struct BuildResult {
     /// install before they install it. An `.asi` is unrestricted native code in the game process.
     #[serde(default)]
     pub placed_files: Vec<StagedFile>,
+    /// What mercs.ink's community incompatibility list said about the Shipments: which list was
+    /// used (current, a cached copy and its age, or none ever downloaded) and the unconfirmed
+    /// reports that apply. A confirmed report refuses the build, so it never appears here.
+    /// `None` when the build has no Shipments, since the list is not consulted.
+    pub incompatibilities: Option<IncompatibilityCheck>,
 }
 
 /// A build refused because the load order is incoherent.
@@ -238,6 +245,7 @@ pub async fn assemble_patch_wad(
 
     let mut groups = all_groups(&options, !route_wardrobe_through_qm)?;
     let mut placed_files: Vec<StagedFile> = Vec::new();
+    let mut incompatibilities: Option<IncompatibilityCheck> = None;
 
     if !options.shipments.is_empty() {
         let game_path = options
@@ -250,10 +258,13 @@ pub async fn assemble_patch_wad(
                 ship_refs.push(wr);
             }
         }
-        let built = shipment::shipment_groups(window, &ship_refs, game_path, None).await?;
+        let list = mercsink::load_incompatibility_list().await?;
+        let built =
+            shipment::shipment_groups(window, &ship_refs, game_path, None, list.index.as_ref()).await?;
         groups.extend(built.groups);
         warnings.extend(built.warnings);
         placed_files = built.files;
+        incompatibilities = Some(IncompatibilityCheck { list: list.state, notices: built.notices });
     }
 
     let resolved = claim::resolve(&groups);
@@ -315,6 +326,7 @@ pub async fn assemble_patch_wad(
         outcomes: resolved.outcomes,
         warnings,
         placed_files,
+        incompatibilities,
     })
 }
 
@@ -406,6 +418,8 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
         warnings: Vec::new(),
         // Same: the placements come out of a qm build, which preview deliberately does not run.
         placed_files: Vec::new(),
+        // The list is consulted only by a build with Shipments, and preview builds none.
+        incompatibilities: None,
     })
 }
 
