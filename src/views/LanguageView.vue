@@ -290,6 +290,13 @@ watch(
                   >
                     Active
                   </span>
+                  <span
+                    v-if="!l.installedByModkit"
+                    class="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-normal text-amber-300"
+                    title="Modkit has no record of installing this WAD, so no display name was declared for it"
+                  >
+                    Not installed by Modkit
+                  </span>
                 </p>
                 <p class="mt-1 text-xs text-zinc-500">
                   {{ l.wadName }}: {{ fmtBytes(l.wadSize) }}
