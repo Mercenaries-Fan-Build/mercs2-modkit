@@ -524,6 +524,13 @@ function outcomeText(o: GroupOutcome): string {
             <span class="font-mono">{{ placement.removed.join(", ") }}</span>
           </p>
           <p
+            v-if="placement.restored.length"
+            class="rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-2 text-zinc-400"
+          >
+            Files a previous install had renamed to <code>.bak</code> were moved back:
+            <span class="font-mono">{{ placement.restored.join(", ") }}</span>
+          </p>
+          <p
             v-if="placement.backed_up.length"
             class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-300"
           >
