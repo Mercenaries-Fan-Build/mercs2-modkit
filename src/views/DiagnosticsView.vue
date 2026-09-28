@@ -306,6 +306,19 @@ function verdictTone(kind: string): string {
           </template>
         </div>
 
+        <div v-if="verifyReport.modkitDeployed.length" class="mt-3">
+          <h4 class="text-xs font-semibold uppercase tracking-[0.22em] text-sky-300">
+            Deployed by Modkit ({{ verifyReport.modkitDeployed.length }})
+          </h4>
+          <ul
+            class="mt-2 max-h-48 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs text-sky-300/90"
+          >
+            <li v-for="d in verifyReport.modkitDeployed" :key="d.path">
+              {{ d.path }} — <span class="text-zinc-500">{{ d.message }}</span>
+            </li>
+          </ul>
+        </div>
+
         <div v-if="verifyReport.missing.length" class="mt-3">
           <h4 class="text-xs font-semibold uppercase tracking-[0.22em] text-red-300">
             Missing files ({{ verifyReport.missing.length }})
