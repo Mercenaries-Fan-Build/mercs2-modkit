@@ -47,6 +47,16 @@
 //! plan lists as linker-owned dropped from the per-Shipment copies. [`ShipmentBuild`] carries one
 //! set of claim groups per language and one for the shell; [`super::wad_builder`] resolves each into
 //! its WAD.
+//!
+//! # Data files
+//!
+//! A shader kind edits a game data file (`data/shader3.bin`, `data/shader3Low.bin`) whole. The
+//! preflight plan's items name the files each Shipment edits (`data_files`); before the first
+//! build of such a set the originals in the game folder are banked (see [`super::data_files`]), and
+//! every `qm build` and `qm link` gets `--original-data`, a directory holding the banked originals
+//! under the names qm reads. Link emits one store per file for the set, and the plan lists them in
+//! `link_file_paths`: each Shipment's own store for a listed file is dropped and link's is kept. A
+//! Shipment's store for a file the list does not name is refused.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -57,9 +67,10 @@ use mercs2_formats::patch_wad::read_patch_wad;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
+use super::data_files::{self, DataFileRel, DataFileStore};
 use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
 use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, REQUEST_FILE};
-use super::placement::{self, StagedFile, StreamCopy};
+use super::placement::{self, StagedDataFile, StagedFile, StreamCopy};
 use super::proc::NoWindow;
 use super::toolchain::{ensure_tool, installed_tool_path};
 use crate::models::claim::ClaimGroup;
@@ -528,6 +539,8 @@ pub struct ShipmentBuild {
     pub shell_patch: Vec<ClaimGroup>,
     /// Copies to make inside the game folder, in load order, one per destination.
     pub stream_copies: Vec<StreamCopy>,
+    /// Replacement game data files: link's, one per path the plan's `link_file_paths` lists.
+    pub data_files: Vec<StagedDataFile>,
     /// Non-fatal advisories: one per destination two Shipments both claimed.
     pub warnings: Vec<String>,
     /// Unconfirmed reports from mercs.ink's incompatibility list that apply to the set. A
@@ -696,10 +709,22 @@ pub async fn shipment_groups(
         .collect();
 
     let os = |s: &str| std::ffi::OsString::from(s);
-    let corpus_args: Vec<std::ffi::OsString> = match &corpus {
+    let mut corpus_args: Vec<std::ffi::OsString> = match &corpus {
         Some(dir) => vec![os("--workshop-data"), dir.as_os_str().to_os_string()],
         None => Vec::new(),
     };
+
+    // Bank the original of every data file the set edits before qm reads it, and hand qm the
+    // banked originals.
+    let wanted = plan.data_files();
+    if !wanted.is_empty() {
+        let game_root = game_root_of(&game_arg)?;
+        let store = DataFileStore::app()?;
+        data_files::bank_originals(&store, &game_root, &wanted)?;
+        let original = data_files::stage_original_data(&store, &wanted, &work_dir("original-data")?)?;
+        corpus_args.push(os("--original-data"));
+        corpus_args.push(original.into_os_string());
+    }
 
     // 1) Build each Shipment, in the plan's order, and keep all of its overlay, language-patch and
     //    shell-patch blocks (the collapse drops the linker-owned ones), plus every loose file and
@@ -709,6 +734,7 @@ pub async fn shipment_groups(
     let mut shell_overlays: Vec<Overlay> = Vec::new();
     let mut files: Vec<StagedFile> = Vec::new();
     let mut stream_copies: Vec<StreamCopy> = Vec::new();
+    let mut shipment_data_files: Vec<StagedDataFile> = Vec::new();
     for (i, ship) in ordered.iter().enumerate() {
         let out = work_dir(&format!("build-{i}"))?;
         let mut args: Vec<std::ffi::OsString> = vec![
@@ -748,6 +774,7 @@ pub async fn shipment_groups(
         }
         files.extend(output.files);
         stream_copies.extend(output.stream_copies);
+        shipment_data_files.extend(output.data_files);
     }
 
     // 2) Link the whole set's Lua, with the SAME request preflight was given.
@@ -795,6 +822,7 @@ pub async fn shipment_groups(
     };
     files.extend(link.files);
     stream_copies.extend(link.stream_copies);
+    let data_files = collapse_data_files(shipment_data_files, link.data_files, &plan.link_file_paths)?;
 
     // 3) Every target collapses the same way, link's group last.
     let paths = &plan.link_block_paths;
@@ -817,10 +845,54 @@ pub async fn shipment_groups(
         language_patches,
         shell_patch,
         stream_copies,
+        data_files,
         files,
         warnings,
         notices,
     })
+}
+
+/// The install root above the `data/` folder holding `vz_wad`, the folder data-file paths are
+/// relative to.
+fn game_root_of(vz_wad: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    Path::new(vz_wad)
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{} has no install folder above its data folder", Path::new(vz_wad).display()))
+}
+
+/// Keep link's data files and drop every Shipment's own.
+///
+/// Every Shipment's data file must be one the plan lists in `link_file_paths`, and link's must be
+/// exactly the listed ones.
+fn collapse_data_files(
+    shipments: Vec<StagedDataFile>,
+    link: Vec<StagedDataFile>,
+    link_file_paths: &[DataFileRel],
+) -> Result<Vec<StagedDataFile>, String> {
+    for file in &shipments {
+        if !link_file_paths.contains(&file.relative) {
+            return Err(format!(
+                "qm build for \"{}\" placed {}, which the plan's link_file_paths does not list.",
+                file.shipment, file.relative
+            ));
+        }
+    }
+    for file in &link {
+        if !link_file_paths.contains(&file.relative) {
+            return Err(format!(
+                "qm link placed {}, which the plan's link_file_paths does not list.",
+                file.relative
+            ));
+        }
+    }
+    for rel in link_file_paths {
+        if !link.iter().any(|f| f.relative == *rel) {
+            return Err(format!("The plan's link_file_paths lists {rel}, and qm link placed none."));
+        }
+    }
+    Ok(link)
 }
 
 /// One Shipment's patch WAD for one target: `(mod id, name, blocks)`.
@@ -1605,6 +1677,59 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(files[0].relative, "scripts/a.asi");
         assert_eq!(files[2].relative, "scripts/OnBoot/b.lua");
+    }
+
+    fn data_file(shipment: &str, rel: DataFileRel, sha: char) -> StagedDataFile {
+        StagedDataFile {
+            source: format!("/out/{shipment}/{}", rel.relative()),
+            relative: rel,
+            bytes: 4,
+            sha256: sha.to_string().repeat(64),
+            base_sha256: "b".repeat(64),
+            shipment: shipment.into(),
+        }
+    }
+
+    /// Every Shipment's store for a path link emits is dropped, and link's is kept.
+    #[test]
+    fn link_owned_data_files_are_dropped_for_links() {
+        let shipments = vec![
+            data_file("A", DataFileRel::Shader3, 'a'),
+            data_file("B", DataFileRel::Shader3, 'c'),
+            data_file("B", DataFileRel::Shader3Low, 'd'),
+        ];
+        let link = vec![
+            data_file("Quartermaster link", DataFileRel::Shader3, 'e'),
+            data_file("Quartermaster link", DataFileRel::Shader3Low, 'f'),
+        ];
+        let kept =
+            collapse_data_files(shipments, link.clone(), &[DataFileRel::Shader3, DataFileRel::Shader3Low]).unwrap();
+        assert_eq!(kept, link);
+    }
+
+    /// A Shipment's store for a path link does not emit is refused.
+    #[test]
+    fn a_data_file_outside_link_file_paths_is_refused() {
+        let err = collapse_data_files(
+            vec![data_file("A", DataFileRel::Shader3Low, 'a')],
+            vec![data_file("Quartermaster link", DataFileRel::Shader3, 'e')],
+            &[DataFileRel::Shader3],
+        )
+        .unwrap_err();
+        assert!(err.contains("\"A\" placed data/shader3Low.bin") && err.contains("does not list"), "{err}");
+
+        let err = collapse_data_files(Vec::new(), vec![data_file("Quartermaster link", DataFileRel::Shader3Low, 'e')], &[])
+            .unwrap_err();
+        assert!(err.contains("qm link placed data/shader3Low.bin"), "{err}");
+
+        let err = collapse_data_files(Vec::new(), Vec::new(), &[DataFileRel::Shader3]).unwrap_err();
+        assert!(err.contains("qm link placed none"), "{err}");
+    }
+
+    #[test]
+    fn the_game_root_is_above_the_data_folder() {
+        let vz = std::path::Path::new("/games/Mercs2/data/vz.wad");
+        assert_eq!(game_root_of(vz.as_os_str()).unwrap(), PathBuf::from("/games/Mercs2"));
     }
 
     /// A set with no script Shipments adds no linker group and keeps every overlay block.
