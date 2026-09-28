@@ -20,6 +20,10 @@
 //! modified / missing / added blocks (and how many catalogued assets they cover,
 //! i.e. the scope of what changed). This is diagnosis only — it identifies
 //! damage, it does not repair it.
+//!
+//! A game data file the data-file ledger records as deployed by Modkit (a shader store, see
+//! [`super::data_files`]) is reported apart from the manifest pass while its bytes are the ones
+//! Modkit placed: "deployed by Modkit; original banked, sha …".
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -33,6 +37,8 @@ use serde::{Deserialize, Serialize};
 use tauri::path::BaseDirectory;
 use tauri::{Emitter, Manager, Window};
 
+use crate::commands::data_files::{DataFileRow, DataFileStore};
+use crate::commands::managed::place::sha256_of_file;
 use crate::commands::paths::app_data_dir;
 
 /// Manifest filename, both as the in-app generator output and the bundled
@@ -210,6 +216,16 @@ pub struct WadDiff {
     pub affected_assets: usize,
 }
 
+/// A game data file Modkit deployed, whose bytes are the ones the data-file ledger records.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModkitDeployedFile {
+    pub path: String,
+    pub original_sha256: String,
+    pub deployed_sha256: String,
+    pub message: String,
+}
+
 /// Outcome of a verify run.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +238,8 @@ pub struct VerifyReport {
     pub exes: Vec<ExeReport>,
     /// Block-level breakdown for each mismatched WAD.
     pub wad_details: Vec<WadDiff>,
+    /// Data files Modkit deployed over a banked original, left out of the manifest pass.
+    pub modkit_deployed: Vec<ModkitDeployedFile>,
     pub manifest_source: String,
 }
 
@@ -700,6 +718,7 @@ pub async fn verify_game(
     // Already validated by `parse_manifest`; resolved again here because the diff needs the
     // value, and a user-picked older manifest is verified with the digest it was written with.
     let algo = HashAlgo::parse(&manifest.algo)?;
+    let deployed = DataFileStore::app()?.read()?;
 
     let report = tauri::async_runtime::spawn_blocking(move || {
         let status_win = window.clone();
@@ -709,7 +728,7 @@ pub async fn verify_game(
         let status = move |m: &str| {
             let _ = status_win.emit("verify-status", m.to_string());
         };
-        run_verify(&root, manifest, algo, source, &progress, &status)
+        run_verify(&root, manifest, algo, source, &deployed, &progress, &status)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -717,35 +736,57 @@ pub async fn verify_game(
 }
 
 /// Verify an install against a manifest with no UI plumbing — used by the
-/// offline `verify_offline` example and any non-Tauri caller.
+/// offline `verify_offline` example and any non-Tauri caller. Reads the app's data-file ledger.
 pub fn verify_install(
     root: &Path,
     manifest: Manifest,
     source: String,
 ) -> Result<VerifyReport, String> {
     let algo = HashAlgo::parse(&manifest.algo)?;
-    Ok(run_verify(root, manifest, algo, source, &|_, _| {}, &|_| {}))
+    let deployed = DataFileStore::app()?.read()?;
+    Ok(run_verify(root, manifest, algo, source, &deployed, &|_, _| {}, &|_| {}))
 }
 
 /// The CPU/IO-bound diff: file-level pass, then block drill-down on mismatched
 /// WADs, plus executable identification. `progress` ticks per hashed file;
-/// `status` announces each phase.
+/// `status` announces each phase. A file in `deployed` whose bytes are Modkit's deployed store is
+/// reported in `modkit_deployed` and left out of the manifest pass.
 fn run_verify(
     root: &Path,
     manifest: Manifest,
     algo: HashAlgo,
     source: String,
+    deployed: &[DataFileRow],
     progress: Progress,
     status: &dyn Fn(&str),
 ) -> VerifyReport {
     let (on_disk, ignored) = collect_files(root);
+
+    let mut modkit_deployed = Vec::new();
+    let mut ours: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in deployed {
+        let Some(deployed_sha256) = &row.deployed_sha256 else { continue };
+        let key = row.relative.relative().to_ascii_lowercase();
+        let Some((_, path)) = on_disk.iter().find(|(k, _)| *k == key) else { continue };
+        if sha256_of_file(path).ok().as_ref() == Some(deployed_sha256) {
+            modkit_deployed.push(ModkitDeployedFile {
+                path: key.clone(),
+                original_sha256: row.original_sha256.clone(),
+                deployed_sha256: deployed_sha256.clone(),
+                message: format!("deployed by Modkit; original banked, sha {}", row.original_sha256),
+            });
+            ours.insert(key);
+        }
+    }
+    let on_disk: Vec<(String, PathBuf)> =
+        on_disk.into_iter().filter(|(k, _)| !ours.contains(k)).collect();
     let disk_keys: std::collections::HashSet<&str> =
         on_disk.iter().map(|(k, _)| k.as_str()).collect();
 
     let mut missing: Vec<String> = manifest
         .files
         .keys()
-        .filter(|k| !disk_keys.contains(k.as_str()))
+        .filter(|k| !disk_keys.contains(k.as_str()) && !ours.contains(k.as_str()))
         .cloned()
         .collect();
     missing.sort();
@@ -828,6 +869,7 @@ fn run_verify(
         ignored,
         exes,
         wad_details,
+        modkit_deployed,
         manifest_source: source,
     }
 }
@@ -1225,6 +1267,53 @@ mod tests {
         assert!(r.identified_as.is_none());
         assert_eq!(r.notes.len(), 1);
         assert!(r.notes[0].contains("Unrecognized"));
+    }
+
+    /// A shader store the ledger records as Modkit's is reported as deployed by Modkit with its
+    /// original's sha; once it is not Modkit's bytes it is verified like any other file.
+    #[test]
+    fn a_ledger_listed_store_is_reported_as_deployed_by_modkit() {
+        use crate::commands::data_files::DataFileRel;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::write(dir.path().join("data/shader3.bin"), b"linked").unwrap();
+        std::fs::write(dir.path().join("data/shader3Low.bin"), b"retail low").unwrap();
+        let sha = |b: &[u8]| loadprobe::sha256::sha256_hex(b);
+        let manifest = || Manifest {
+            algo: "sha256".into(),
+            files: [
+                ("data/shader3.bin".to_string(), ManifestEntry { size: 6, hash: sha(b"retail") }),
+                ("data/shader3low.bin".to_string(), ManifestEntry { size: 10, hash: sha(b"retail low") }),
+            ]
+            .into_iter()
+            .collect(),
+            exes: vec![],
+            wads: BTreeMap::new(),
+        };
+        let rows = vec![DataFileRow {
+            relative: DataFileRel::Shader3,
+            original_sha256: sha(b"retail"),
+            bank_path: "/bank/shader3.bin".into(),
+            deployed_sha256: Some(sha(b"linked")),
+        }];
+
+        let r = run_verify(dir.path(), manifest(), HashAlgo::Sha256, "t".into(), &rows, &|_, _| {}, &|_| {});
+        assert_eq!(r.ok, 1);
+        assert!(r.corrupt.is_empty() && r.missing.is_empty() && r.extra.is_empty(), "{r:?}");
+        assert_eq!(r.modkit_deployed.len(), 1);
+        assert_eq!(r.modkit_deployed[0].path, "data/shader3.bin");
+        assert_eq!(
+            r.modkit_deployed[0].message,
+            format!("deployed by Modkit; original banked, sha {}", sha(b"retail"))
+        );
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["modkitDeployed"][0]["originalSha256"], sha(b"retail"));
+
+        std::fs::write(dir.path().join("data/shader3.bin"), b"hand edited").unwrap();
+        let r = run_verify(dir.path(), manifest(), HashAlgo::Sha256, "t".into(), &rows, &|_, _| {}, &|_| {});
+        assert!(r.modkit_deployed.is_empty());
+        assert_eq!(r.corrupt.len(), 1);
+        assert_eq!(r.corrupt[0].path, "data/shader3.bin");
     }
 
     #[test]
