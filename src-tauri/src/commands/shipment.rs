@@ -725,7 +725,7 @@ pub async fn shipment_groups(
 
         let output = placement::read_output(&out, &ship.name)?;
         // A Shipment whose only contributions are `native_hook` / `place_file` emits loose files
-        // and no overlay at all, which is a real build. One that emits nothing is not.
+        // and no overlay; an output with nothing to merge, copy or place is an error.
         if output.is_empty() {
             return Err(format!(
                 "qm build for \"{}\" produced nothing to merge, copy or place",
