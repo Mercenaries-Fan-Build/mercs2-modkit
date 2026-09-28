@@ -1146,12 +1146,17 @@ mod tests {
     /// `edit_stringdb` lowering emits (qm `build.rs`, the add_language overlay block).
     const STRING_TABLE: &str = r"blocks\VZ\mod_1a2b3c4d.block";
 
-    /// What a plan's `link_block_paths` carries: qm's two script blocks plus a merged string
-    /// table.
+    /// The front end's scripts block in `shell.wad`, which qm's link re-emits with the front-end
+    /// sound loader.
+    const SHELL_SCRIPTS: &str = r"blocks\Shell\resident_P000_Q3.block";
+
+    /// What a plan's `link_block_paths` carries: qm's `vz.wad` script blocks, the `shell.wad`
+    /// script block, and a merged string table.
     fn link_block_paths() -> Vec<String> {
         vec![
             r"blocks\VZ\scripts_vz_P000_Q3.block".into(),
             r"blocks\VZ\resident_P000_Q3.block".into(),
+            SHELL_SCRIPTS.into(),
             STRING_TABLE.into(),
         ]
     }
@@ -1455,6 +1460,36 @@ mod tests {
         );
         let resolved = crate::models::claim::resolve(&groups);
         assert!(resolved.conflicts.is_empty());
+        assert_eq!(resolved.blocks.len(), 4);
+        validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
+    }
+
+    /// The front end's scripts block: each Shipment's own shell patch carries a copy linked for it
+    /// alone; both copies are dropped as linker-owned, link's copy (with every Shipment's front-end
+    /// loads) is the one kept, and link's group is last.
+    #[test]
+    fn a_shipments_shell_scripts_block_is_dropped_and_links_is_kept_last() {
+        let scripts_hash = 0x5E11_0001;
+        let shell = vec![
+            overlay("a", vec![block(SHELL_SCRIPTS, scripts_hash), block(r"blocks\VZ\mod_0000a001.block", 0xA001)]),
+            overlay("b", vec![block(SHELL_SCRIPTS, scripts_hash), block(r"blocks\VZ\mod_0000b001.block", 0xB001)]),
+        ];
+        let link_shell = vec![block(SHELL_SCRIPTS, scripts_hash), block(r"blocks\VZ\mod_0000c001.block", 0xC001)];
+        let (_, groups) =
+            collapse_patches(BTreeMap::new(), BTreeMap::new(), shell, link_shell, &link_block_paths(), 2);
+        assert_eq!(
+            groups.iter().map(|g| g.mod_id.as_str()).collect::<Vec<_>>(),
+            vec!["shipment:a", "shipment:b", "qm-link:shell-patch.wad"],
+            "load order, link last"
+        );
+        assert_eq!(groups_holding(&groups, SHELL_SCRIPTS), vec!["qm-link:shell-patch.wad".to_string()]);
+        assert_eq!(
+            link_owned_in(&groups),
+            vec![("qm-link:shell-patch.wad".to_string(), SHELL_SCRIPTS.to_string())],
+            "exactly one front-end scripts block survives, and it is the linker's"
+        );
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
         assert_eq!(resolved.blocks.len(), 4);
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
     }
