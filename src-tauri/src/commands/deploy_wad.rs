@@ -47,11 +47,18 @@
 //! which are made only when the source's sha256 is the one qm recorded. An existing file is matched
 //! case-insensitively, because the game's filesystem is: an `English-patch.wad` is the file an
 //! `english-patch.wad` replaces.
+//!
+//! # Data files
+//!
+//! A build whose set edits `data/shader3.bin` or `data/shader3Low.bin` stages link's store for
+//! each. Deploy places them over the banked originals and uninstall restores the originals; the
+//! checks and the ledger are in [`super::data_files`]. Both run before the WAD is touched.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::commands::data_files::{self, DataFileOutcome, DataFileStore};
 use crate::commands::paths::{deployed_dir, trash_dir};
 use crate::commands::placement::{self, StagedFile, StreamCopy};
 
@@ -130,6 +137,8 @@ pub struct DeployWadResult {
     /// The loose-file half of the deploy.
     #[serde(default)]
     pub files: PlacementOutcome,
+    /// The game data files placed or restored.
+    pub data_files: DataFileOutcome,
 }
 
 /// A durable record of the `vz-patch.wad` modkit currently has installed.
@@ -658,6 +667,23 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
 
     let guard_warnings = collect_guard_warnings(args.staging_dir.as_deref(), game_root.as_deref())?;
 
+    // The data files go first: every check they make runs before anything in the install moves.
+    let data_store = DataFileStore::app()?;
+    let data_files = match &game_root {
+        Some(root) => data_files::install_data_files(&data_store, &staged.data_files, root)?,
+        None => {
+            let rows = data_store.read()?;
+            if !rows.is_empty() {
+                return Err(format!(
+                    "Modkit has banked {} and deploys or restores it on every deploy, and this \
+                     deploy gives no game root.",
+                    rows.iter().map(|r| r.relative.relative()).collect::<Vec<_>>().join(" and ")
+                ));
+            }
+            DataFileOutcome::default()
+        }
+    };
+
     // No WAD is a legitimate build outcome now, so an empty path installs the files and leaves the
     // installed patch WAD alone rather than erroring.
     let src = PathBuf::from(&args.wad_path);
@@ -679,6 +705,7 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
             byte_size: 0,
             backed_up: None,
             files,
+            data_files,
         });
     }
     if !src.is_file() {
@@ -764,6 +791,7 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
         byte_size,
         backed_up,
         files,
+        data_files,
     })
 }
 
@@ -800,6 +828,8 @@ pub struct RestoreWadArgs {
     /// Backup file name from `list_patch_wad_backups`; omit to just remove the patch.
     pub file: Option<String>,
     pub data_dir: String,
+    /// The game install root. Removing the patch restores the banked data files under it.
+    pub game_root: String,
 }
 
 /// Restore a previous `vz-patch.wad` — or, with no `file`, remove the patch entirely
@@ -812,6 +842,8 @@ pub struct RestoreWadArgs {
 /// exists to avoid. Restoring a *specific* older WAD deliberately leaves them: the snapshots are
 /// WADs only, so there is no matching older file set to put back, and silently deleting the current
 /// one would be a change nobody asked for.
+///
+/// Removing the patch restores every banked data file first, before the WAD is removed.
 #[tauri::command(async)]
 pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String> {
     let dest = patch_target(&args.data_dir);
@@ -860,10 +892,16 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
                 sha256: got,
                 backed_up,
                 files: PlacementOutcome::default(),
+                data_files: DataFileOutcome::default(),
             })
         }
         // No file: uninstall the patch entirely. Stock game.
         None => {
+            let game_root = PathBuf::from(&args.game_root);
+            if !game_root.is_dir() {
+                return Err(format!("Game folder not found: {}", game_root.display()));
+            }
+            let data_files = data_files::uninstall_data_files(&DataFileStore::app()?, &game_root)?;
             if dest.is_file() {
                 std::fs::remove_file(&dest)
                     .map_err(|e| format!("Failed to remove the patch WAD: {e} — is the game running?"))?;
@@ -876,6 +914,7 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
                 sha256: String::new(),
                 backed_up,
                 files: uninstall_placements(&PlacementStore::app()?)?,
+                data_files,
             })
         }
     }
