@@ -38,8 +38,7 @@
 //! deploy with no undo record is the same class of defect as a deploy that does nothing, pointing
 //! the other way.
 //!
-//! Nothing here hard-deletes on the file half either: a displaced foreign file is moved to
-//! `<name>.bak` beside it and recorded with the placement that displaced it, removal moves modkit's
+//! On the file half, a displaced foreign file is moved to `<name>.bak` beside it and recorded with the placement that displaced it, removal moves modkit's
 //! file to the recoverable trash, and the displaced file is then moved back.
 //!
 //! The file half covers everything the staged build names: loose files, `data_wad` language WADs
@@ -298,7 +297,7 @@ impl PlacementStore {
     /// at `<name>.bak`, since the path it would go back to is occupied.
     ///
     /// A displaced file that cannot be moved back is an error. The ledger is then rewritten to the
-    /// entries not yet handled, the failing one first, so a retry resumes where this stopped.
+    /// unhandled entries, the failing one first, so a retry resumes where this stopped.
     fn remove_placed(
         &self,
         files: &[PlacedFile],
@@ -1272,7 +1271,7 @@ mod tests {
     }
 
     /// A stream copy whose source matches the digest qm recorded is made, recorded, and removed on
-    /// uninstall; the source is never touched.
+    /// uninstall; the source keeps its bytes.
     #[test]
     fn a_stream_copy_with_a_matching_source_is_made_and_undone() {
         let tmp = tempfile::tempdir().unwrap();
