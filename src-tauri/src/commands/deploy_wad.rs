@@ -38,15 +38,23 @@
 //! deploy with no undo record is the same class of defect as a deploy that does nothing, pointing
 //! the other way.
 //!
-//! Nothing here hard-deletes on the file half either: a displaced foreign file is snapshotted, and
-//! removal moves to the recoverable trash.
+//! Nothing here hard-deletes on the file half either: a displaced foreign file is moved to
+//! `<name>.bak` beside it and recorded with the placement that displaced it, removal moves modkit's
+//! file to the recoverable trash, and the displaced file is then moved back.
+//!
+//! The file half covers everything the staged build names: loose files, `data_wad` language WADs
+//! (whose display name the ledger keeps for the language screen), the merged
+//! `data/<language>-patch.wad` and `data/shell-patch.wad`, and `stream_copy` copies of game data,
+//! which are made only when the source's sha256 is the one qm recorded. An existing file is matched
+//! case-insensitively, because the game's filesystem is: an `English-patch.wad` is the file an
+//! `english-patch.wad` replaces.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::commands::paths::{deployed_dir, trash_dir};
-use crate::commands::placement::{self, StagedFile};
+use crate::commands::placement::{self, StagedFile, StreamCopy};
 
 const PATCH_NAME: &str = "vz-patch.wad";
 
@@ -65,7 +73,7 @@ pub struct WadBackup {
     pub sha256: String,
 }
 
-/// One loose file this deploy put into the game folder, as recorded in the ledger.
+/// One file this deploy put into the game folder, as recorded in the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacedFile {
     /// Absolute path in the game install.
@@ -77,6 +85,19 @@ pub struct PlacedFile {
     pub sha256: String,
     /// Which Shipment placed it.
     pub shipment: String,
+    /// The language's display name, set exactly for a `data_wad` placement.
+    pub display: Option<String>,
+    /// The foreign file this placement displaced, moved back when the placement is removed.
+    pub displaced: Option<DisplacedFile>,
+}
+
+/// A pre-existing file a placement displaced to make room.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplacedFile {
+    /// Absolute path the file had, in its on-disk case.
+    pub original: String,
+    /// Absolute path of the `<name>.bak` it was moved to.
+    pub backup: String,
 }
 
 /// What the file half of a deploy (or an uninstall) did.
@@ -93,6 +114,8 @@ pub struct PlacementOutcome {
     pub backed_up: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guard_warnings: Vec<super::signature_guard::GuardWarning>,
+    /// Displaced files moved back from `<name>.bak` once modkit's file came out.
+    pub restored: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,29 +289,125 @@ impl PlacementStore {
         crate::commands::managed::trash::discard(src, Some(&self.trash)).map(|_| ())
     }
 
-    /// Take previously-placed files back out of the game folder.
+    /// Take the recorded files back out of the game folder, moving back every file a placement
+    /// displaced.
     ///
     /// A recorded file whose bytes no longer match what modkit wrote is **left alone** and reported
     /// as skipped. Somebody replaced it by hand — updating a plugin in place is a perfectly ordinary
-    /// thing to do — and deleting it would destroy work modkit did not do.
-    fn remove_placed(&self, files: &[PlacedFile], outcome: &mut PlacementOutcome) {
-        for file in files {
-            let path = Path::new(&file.abs_path);
-            if !path.is_file() {
-                continue;
-            }
-            match sha256_of(path) {
-                Ok(hash) if hash == file.sha256 => {
-                    if self.trash(path).is_ok() {
-                        outcome.removed.push(file.relative.clone());
-                    } else {
-                        outcome.skipped.push(file.relative.clone());
-                    }
-                }
-                _ => outcome.skipped.push(file.relative.clone()),
+    /// thing to do — and deleting it would destroy work modkit did not do. Its displaced file stays
+    /// at `<name>.bak`, since the path it would go back to is occupied.
+    ///
+    /// A displaced file that cannot be moved back is an error. The ledger is then rewritten to the
+    /// entries not yet handled, the failing one first, so a retry resumes where this stopped.
+    fn remove_placed(
+        &self,
+        files: &[PlacedFile],
+        outcome: &mut PlacementOutcome,
+    ) -> Result<(), String> {
+        for (i, file) in files.iter().enumerate() {
+            if let Err(e) = self.remove_one(file, outcome) {
+                self.write(&files[i..])?;
+                return Err(e);
             }
         }
+        Ok(())
     }
+
+    fn remove_one(&self, file: &PlacedFile, outcome: &mut PlacementOutcome) -> Result<(), String> {
+        let path = Path::new(&file.abs_path);
+        if path.is_file() {
+            match sha256_of(path) {
+                Ok(hash) if hash == file.sha256 => {
+                    if self.trash(path).is_err() {
+                        outcome.skipped.push(file.relative.clone());
+                        return Ok(());
+                    }
+                    outcome.removed.push(file.relative.clone());
+                }
+                _ => {
+                    outcome.skipped.push(file.relative.clone());
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(displaced) = &file.displaced {
+            restore_displaced(displaced, &file.relative)?;
+            outcome.restored.push(file.relative.clone());
+        }
+        Ok(())
+    }
+}
+
+/// The file at `dest`'s name in `dest`'s directory, matched case-insensitively, in its on-disk case.
+fn existing_at(dest: &Path) -> Result<Option<PathBuf>, String> {
+    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
+        return Ok(None);
+    };
+    let name = name.to_string_lossy();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        if entry.file_name().to_string_lossy().eq_ignore_ascii_case(&name) {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
+/// Move a pre-existing file to `<name>.bak` beside it. An existing `.bak` is somebody's backup, so
+/// finding one is an error and it is left as it is.
+fn displace(existing: &Path) -> Result<DisplacedFile, String> {
+    let name = existing
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", existing.display()))?
+        .to_string_lossy()
+        .to_string();
+    let backup = existing.with_file_name(format!("{name}.bak"));
+    if existing_at(&backup)?.is_some() {
+        return Err(format!(
+            "{} is in the way and {} already exists, so it cannot be backed up. Move one of them \
+             out of the game folder and deploy again.",
+            existing.display(),
+            backup.display()
+        ));
+    }
+    std::fs::rename(existing, &backup)
+        .map_err(|e| format!("backing up {}: {e}", existing.display()))?;
+    Ok(DisplacedFile {
+        original: existing.to_string_lossy().to_string(),
+        backup: backup.to_string_lossy().to_string(),
+    })
+}
+
+/// Move a displaced file back from its `.bak`.
+fn restore_displaced(displaced: &DisplacedFile, relative: &str) -> Result<(), String> {
+    let (original, backup) = (Path::new(&displaced.original), Path::new(&displaced.backup));
+    if !backup.is_file() {
+        return Err(format!(
+            "{relative}: the file modkit displaced was backed up to {}, which is gone, so it \
+             cannot be put back.",
+            backup.display()
+        ));
+    }
+    if let Some(occupant) = existing_at(original)? {
+        return Err(format!(
+            "{relative}: {} cannot be moved back from {} because {} is in its place.",
+            original.display(),
+            backup.display(),
+            occupant.display()
+        ));
+    }
+    std::fs::rename(backup, original).map_err(|e| {
+        format!(
+            "{relative}: moving {} back to {}: {e}",
+            backup.display(),
+            original.display()
+        )
+    })
 }
 
 /// Where a staged file lands under `game_root`.
@@ -322,54 +441,120 @@ fn destination_for(game_root: &Path, file: &StagedFile, asi_target: &str) -> (Pa
     (dest, file.relative.clone())
 }
 
-/// Install the staged loose files into the game folder, replacing whatever modkit placed last time.
+/// `relative` under `game_root`, one path component per `/`-separated part.
+fn game_path(game_root: &Path, relative: &str) -> PathBuf {
+    let mut path = game_root.to_path_buf();
+    for part in relative.split('/') {
+        path.push(part);
+    }
+    path
+}
+
+/// Copy `source` to `dest`, displacing any file already there, and verify the bytes that landed.
+///
+/// `sha256` is what the bytes must hash to; empty means the staged record carried no digest, and
+/// the landed bytes are then recorded as they are.
+fn place(
+    source: &Path,
+    dest: &Path,
+    relative: &str,
+    sha256: &str,
+    outcome: &mut PlacementOutcome,
+) -> Result<(String, Option<DisplacedFile>), String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    // Anything still here after the ledger sweep is somebody else's file. Displace it to
+    // `<name>.bak`, the way `deploy_asi` treats a foreign plugin, so its bytes are kept.
+    let displaced = match existing_at(dest)? {
+        Some(existing) => {
+            let displaced = displace(&existing)?;
+            outcome.backed_up.push(relative.to_string());
+            Some(displaced)
+        }
+        None => None,
+    };
+    std::fs::copy(source, dest).map_err(|e| {
+        format!("installing {relative}: {e} — is the game still running? It holds its files open.")
+    })?;
+    // Verify by hash, exactly as the WAD half does: confirm the bytes that landed are the bytes
+    // that were built.
+    let got = sha256_of(dest)?;
+    if !sha256.is_empty() && got != sha256 {
+        return Err(format!(
+            "Installed {relative} does not match the built file (built {sha256}, on disk {got})"
+        ));
+    }
+    Ok((got, displaced))
+}
+
+/// Install the staged files and make the staged stream copies, replacing whatever modkit placed
+/// last time.
 ///
 /// Order matters: the previous deploy's files come out **first**, so a plugin dropped from the load
 /// order since the last build is genuinely gone rather than left behind loading into the game.
 fn install_placements(
     store: &PlacementStore,
     staged: &[StagedFile],
+    copies: &[StreamCopy],
     game_root: &Path,
     asi_target: &str,
 ) -> Result<PlacementOutcome, String> {
     let mut outcome = PlacementOutcome::default();
     let previous = store.read();
-    store.remove_placed(&previous, &mut outcome);
+    store.remove_placed(&previous, &mut outcome)?;
+    if !previous.is_empty() {
+        store.write(&[])?;
+    }
 
     for file in staged {
         let (dest, relative) = destination_for(game_root, file, asi_target);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
-        }
-        // Anything still here after the ledger sweep is somebody else's file. Displace it to
-        // `<name>.bak` rather than overwriting, matching how `deploy_asi` treats a foreign plugin.
-        if dest.exists() {
-            let backup = dest.with_file_name(format!("{}.bak", file.file_name()));
-            std::fs::rename(&dest, &backup)
-                .map_err(|e| format!("backing up {}: {e}", dest.display()))?;
-            outcome.backed_up.push(relative.clone());
-        }
-        std::fs::copy(&file.source, &dest).map_err(|e| {
-            format!(
-                "installing {relative}: {e} — is the game still running? It holds its plugins open."
-            )
-        })?;
-        // Verify by hash, exactly as the WAD half does: confirm the bytes that landed are the bytes
-        // that were built.
-        let got = sha256_of(&dest)?;
-        if !file.sha256.is_empty() && got != file.sha256 {
-            return Err(format!(
-                "Installed {relative} does not match the built file (built {}, on disk {got})",
-                file.sha256
-            ));
-        }
+        let (sha256, displaced) = place(
+            Path::new(&file.source),
+            &dest,
+            &relative,
+            &file.sha256,
+            &mut outcome,
+        )?;
         outcome.placed.push(PlacedFile {
             abs_path: dest.to_string_lossy().to_string(),
             relative,
-            sha256: got,
+            sha256,
             shipment: file.shipment.clone(),
+            display: file.display.clone(),
+            displaced,
         });
+        store.write(&outcome.placed)?;
+    }
+
+    for copy in copies {
+        let source = game_path(game_root, &copy.from);
+        if !source.is_file() {
+            return Err(format!(
+                "“{}” copies {} to {}, but {} is not in the game folder.",
+                copy.shipment, copy.from, copy.to, copy.from
+            ));
+        }
+        let found = sha256_of(&source)?;
+        if found != copy.sha256 {
+            return Err(format!(
+                "Refusing to copy {} to {} for “{}”: the game's {} has sha256 {found}, and the \
+                 build was made against {}. Rebuild against this game install.",
+                copy.from, copy.to, copy.shipment, copy.from, copy.sha256
+            ));
+        }
+        let dest = game_path(game_root, &copy.to);
+        let (sha256, displaced) = place(&source, &dest, &copy.to, &copy.sha256, &mut outcome)?;
+        outcome.placed.push(PlacedFile {
+            abs_path: dest.to_string_lossy().to_string(),
+            relative: copy.to.clone(),
+            sha256,
+            shipment: copy.shipment.clone(),
+            display: None,
+            displaced,
+        });
+        store.write(&outcome.placed)?;
     }
 
     store.write(&outcome.placed)?;
@@ -393,16 +578,21 @@ fn collect_guard_warnings(
     Ok(super::signature_guard::verify_plugin_guards(root, &plugins))
 }
 
-/// Remove every loose file the ledger records, and empty it.
+/// Remove every file the ledger records, move back what they displaced, and empty it.
 fn uninstall_placements(store: &PlacementStore) -> Result<PlacementOutcome, String> {
     let mut outcome = PlacementOutcome::default();
     let previous = store.read();
     if previous.is_empty() {
         return Ok(outcome);
     }
-    store.remove_placed(&previous, &mut outcome);
+    store.remove_placed(&previous, &mut outcome)?;
     store.write(&[])?;
     Ok(outcome)
+}
+
+/// Every file the deploy ledger records as placed in the game folder.
+pub fn placed_files() -> Result<Vec<PlacedFile>, String> {
+    Ok(PlacementStore::app()?.read())
 }
 
 /// The game's data dir holds `vz.wad`; the patch sits beside it.
@@ -440,7 +630,7 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
     // the WAD is swapped rather than leaving the two halves out of step.
     let staged = match args.staging_dir.as_deref().filter(|d| !d.is_empty()) {
         Some(dir) => placement::read_staged(Path::new(dir))?,
-        None => Vec::new(),
+        None => placement::StagedBuild::default(),
     };
     let asi_target = args.asi_target.as_deref().unwrap_or("scripts");
     if !VALID_ASI_TARGETS.contains(&asi_target) {
@@ -454,8 +644,10 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
         // Refusing beats installing the WAD and silently dropping the plugins.
         None => {
             return Err(format!(
-                "This build places {} file(s) into the game folder, but no game root was given.",
-                staged.len()
+                "This build places {} file(s) and makes {} copy(ies) in the game folder, but no \
+                 game root was given.",
+                staged.files.len(),
+                staged.stream_copies.len()
             ))
         }
     };
@@ -472,7 +664,13 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
     let src = PathBuf::from(&args.wad_path);
     if args.wad_path.trim().is_empty() {
         let mut files = match &game_root {
-            Some(root) => install_placements(&PlacementStore::app()?, &staged, root, asi_target)?,
+            Some(root) => install_placements(
+                &PlacementStore::app()?,
+                &staged.files,
+                &staged.stream_copies,
+                root,
+                asi_target,
+            )?,
             None => PlacementOutcome::default(),
         };
         files.guard_warnings = guard_warnings;
@@ -544,7 +742,13 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
     // convoy — refusing to report is the safe direction, where a record describing a half-done
     // deploy would be confidently wrong.
     let mut files = match &game_root {
-        Some(root) => install_placements(&PlacementStore::app()?, &staged, root, asi_target)?,
+        Some(root) => install_placements(
+                &PlacementStore::app()?,
+                &staged.files,
+                &staged.stream_copies,
+                root,
+                asi_target,
+            )?,
         None => PlacementOutcome::default(),
     };
     files.guard_warnings = guard_warnings;
@@ -755,6 +959,8 @@ mod tests {
             relative: relative.to_string(),
             sha256: loadprobe::sha256::sha256_hex(body.as_bytes()),
             shipment: shipment.to_string(),
+            display: None,
+            language: None,
         }
     }
 
@@ -768,7 +974,7 @@ mod tests {
         // qm always records an .asi under `scripts/` — that is its only choice.
         let staged = [stage(&build, "scripts/my-hook.asi", "MZ plugin", "Hooky")];
 
-        let out = install_placements(&store(tmp.path()), &staged, &game, "scripts").unwrap();
+        let out = install_placements(&store(tmp.path()), &staged, &[], &game, "scripts").unwrap();
         assert_eq!(out.placed.len(), 1);
         let landed = game.join("scripts/my-hook.asi");
         assert!(landed.is_file(), "the plugin is in the game folder");
@@ -787,7 +993,7 @@ mod tests {
             std::fs::create_dir_all(&game).unwrap();
             let staged = [stage(&build, "scripts/hook.asi", "MZ", "S")];
 
-            let out = install_placements(&store(tmp.path()), &staged, &game, target).unwrap();
+            let out = install_placements(&store(tmp.path()), &staged, &[], &game, target).unwrap();
             let expected = if *target == "." {
                 game.join("hook.asi")
             } else {
@@ -830,7 +1036,7 @@ mod tests {
             .collect();
 
         // Deliberately not "scripts": a companion must ignore the ASI target entirely.
-        let out = install_placements(&store(tmp.path()), &staged, &game, "plugins").unwrap();
+        let out = install_placements(&store(tmp.path()), &staged, &[], &game, "plugins").unwrap();
         assert_eq!(out.placed.len(), 7);
         for (dir, name) in destinations {
             let expected = if dir.is_empty() {
@@ -855,7 +1061,7 @@ mod tests {
             stage(&build, "scripts/hook.asi", "MZ", "S"),
             stage(&build, "scripts/OnBoot/init.lua", "-- lua", "S"),
         ];
-        install_placements(&s, &staged, &game, "scripts").unwrap();
+        install_placements(&s, &staged, &[], &game, "scripts").unwrap();
         assert!(game.join("scripts/hook.asi").is_file());
 
         let out = uninstall_placements(&s).unwrap();
@@ -880,10 +1086,10 @@ mod tests {
             stage(&build, "scripts/keep.asi", "keep", "A"),
             stage(&build, "scripts/drop.asi", "drop", "B"),
         ];
-        install_placements(&s, &first, &game, "scripts").unwrap();
+        install_placements(&s, &first, &[], &game, "scripts").unwrap();
 
         let second = [stage(&build, "scripts/keep.asi", "keep", "A")];
-        let out = install_placements(&s, &second, &game, "scripts").unwrap();
+        let out = install_placements(&s, &second, &[], &game, "scripts").unwrap();
 
         assert!(game.join("scripts/keep.asi").is_file(), "kept");
         assert!(!game.join("scripts/drop.asi").exists(), "dropped");
@@ -902,7 +1108,7 @@ mod tests {
         std::fs::create_dir_all(&game).unwrap();
         let s = store(tmp.path());
         let staged = [stage(&build, "scripts/hook.asi", "v1", "S")];
-        install_placements(&s, &staged, &game, "scripts").unwrap();
+        install_placements(&s, &staged, &[], &game, "scripts").unwrap();
 
         // The user drops a newer build of the plugin in themselves.
         std::fs::write(game.join("scripts/hook.asi"), "v2 by hand").unwrap();
@@ -925,7 +1131,7 @@ mod tests {
         std::fs::write(game.join("scripts/hook.asi"), "somebody else's").unwrap();
 
         let staged = [stage(&build, "scripts/hook.asi", "ours", "S")];
-        let out = install_placements(&store(tmp.path()), &staged, &game, "scripts").unwrap();
+        let out = install_placements(&store(tmp.path()), &staged, &[], &game, "scripts").unwrap();
 
         assert_eq!(out.backed_up, vec!["scripts/hook.asi".to_string()]);
         assert_eq!(
@@ -957,7 +1163,175 @@ mod tests {
         let mut staged = stage(&build, "scripts/hook.asi", "real bytes", "S");
         staged.sha256 = "0".repeat(64);
 
-        let err = install_placements(&store(tmp.path()), &[staged], &game, "scripts").unwrap_err();
+        let err = install_placements(&store(tmp.path()), &[staged], &[], &game, "scripts").unwrap_err();
         assert!(err.contains("does not match the built file"), "got: {err}");
+    }
+
+    /// The exact on-disk names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A merged `english-patch.wad` replaces the game's `English-patch.wad` (the same file on the
+    /// game's filesystem): the original is backed up, the ledger records both, and uninstall takes
+    /// modkit's out and puts the original back under its own name.
+    #[test]
+    fn a_language_patch_backs_up_the_existing_file_and_uninstall_restores_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("data")).unwrap();
+        std::fs::write(game.join("data/English-patch.wad"), "retail patch").unwrap();
+        let s = store(tmp.path());
+        let mut patch = stage(&build, "data/english-patch.wad", "merged patch", "A, B");
+        patch.language = Some("english".into());
+
+        let out = install_placements(&s, &[patch], &[], &game, "scripts").unwrap();
+        assert_eq!(out.backed_up, vec!["data/english-patch.wad".to_string()]);
+        assert_eq!(names_in(&game.join("data")), vec!["English-patch.wad.bak", "english-patch.wad"]);
+        assert_eq!(
+            std::fs::read_to_string(game.join("data/english-patch.wad")).unwrap(),
+            "merged patch"
+        );
+        let ledger = s.read();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].relative, "data/english-patch.wad");
+        assert_eq!(
+            ledger[0].displaced,
+            Some(DisplacedFile {
+                original: game.join("data").join("English-patch.wad").to_string_lossy().to_string(),
+                backup: game.join("data").join("English-patch.wad.bak").to_string_lossy().to_string(),
+            })
+        );
+
+        let out = uninstall_placements(&s).unwrap();
+        assert_eq!(out.removed, vec!["data/english-patch.wad".to_string()]);
+        assert_eq!(out.restored, vec!["data/english-patch.wad".to_string()]);
+        assert_eq!(names_in(&game.join("data")), vec!["English-patch.wad"]);
+        assert_eq!(
+            std::fs::read_to_string(game.join("data/English-patch.wad")).unwrap(),
+            "retail patch"
+        );
+        assert!(s.read().is_empty());
+    }
+
+    /// A `shell-patch.wad` with nothing in its way is installed, recorded, and removed on uninstall;
+    /// a redeploy takes the previous one out before putting the new one in, so no `.bak` of
+    /// modkit's own file is made.
+    #[test]
+    fn a_shell_patch_is_installed_recorded_and_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("data")).unwrap();
+        let s = store(tmp.path());
+
+        let first = stage(&build, "data/shell-patch.wad", "shell v1", "A");
+        install_placements(&s, &[first], &[], &game, "scripts").unwrap();
+        let second = stage(&build, "data/shell-patch.wad", "shell v2", "A, B");
+        let out = install_placements(&s, &[second], &[], &game, "scripts").unwrap();
+        assert!(out.backed_up.is_empty(), "{out:?}");
+        assert_eq!(out.removed, vec!["data/shell-patch.wad".to_string()]);
+        assert_eq!(names_in(&game.join("data")), vec!["shell-patch.wad"]);
+        assert_eq!(s.read()[0].shipment, "A, B");
+        assert_eq!(s.read()[0].displaced, None);
+
+        let out = uninstall_placements(&s).unwrap();
+        assert_eq!(out.removed, vec!["data/shell-patch.wad".to_string()]);
+        assert!(out.restored.is_empty());
+        assert!(names_in(&game.join("data")).is_empty());
+    }
+
+    /// A `data_wad` placement's display name reaches the ledger, which is where the language
+    /// screen reads it from.
+    #[test]
+    fn a_data_wad_display_name_is_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(&game).unwrap();
+        let s = store(tmp.path());
+        let mut wad = stage(&build, "data/polski.wad", "FFCS", "Lang");
+        wad.display = Some("Polski".into());
+
+        let out = install_placements(&s, &[wad], &[], &game, "scripts").unwrap();
+        assert_eq!(out.placed[0].display.as_deref(), Some("Polski"));
+        assert_eq!(s.read()[0].display.as_deref(), Some("Polski"));
+    }
+
+    fn vo_copy(sha256: String) -> StreamCopy {
+        StreamCopy {
+            from: "data/Audios/vo_stream.english.pws".into(),
+            to: "data/Audios/vo_stream.polski.pws".into(),
+            bytes: 8,
+            sha256,
+            shipment: "Lang".into(),
+        }
+    }
+
+    /// A stream copy whose source matches the digest qm recorded is made, recorded, and removed on
+    /// uninstall; the source is never touched.
+    #[test]
+    fn a_stream_copy_with_a_matching_source_is_made_and_undone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path().join("game");
+        let audios = game.join("data/Audios");
+        std::fs::create_dir_all(&audios).unwrap();
+        std::fs::write(audios.join("vo_stream.english.pws"), "VO bytes").unwrap();
+        let s = store(tmp.path());
+        let copy = vo_copy(loadprobe::sha256::sha256_hex(b"VO bytes"));
+
+        let out = install_placements(&s, &[], &[copy], &game, "scripts").unwrap();
+        assert_eq!(out.placed.len(), 1);
+        assert_eq!(out.placed[0].relative, "data/Audios/vo_stream.polski.pws");
+        assert_eq!(out.placed[0].shipment, "Lang");
+        assert_eq!(
+            std::fs::read_to_string(audios.join("vo_stream.polski.pws")).unwrap(),
+            "VO bytes"
+        );
+        assert_eq!(s.read().len(), 1);
+
+        let out = uninstall_placements(&s).unwrap();
+        assert_eq!(out.removed, vec!["data/Audios/vo_stream.polski.pws".to_string()]);
+        assert_eq!(names_in(&audios), vec!["vo_stream.english.pws"]);
+        assert_eq!(
+            std::fs::read_to_string(audios.join("vo_stream.english.pws")).unwrap(),
+            "VO bytes"
+        );
+    }
+
+    /// A stream copy whose source is not the file qm read is refused, and nothing is copied.
+    #[test]
+    fn a_stream_copy_with_a_different_source_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path().join("game");
+        let audios = game.join("data/Audios");
+        std::fs::create_dir_all(&audios).unwrap();
+        std::fs::write(audios.join("vo_stream.english.pws"), "other VO").unwrap();
+        let copy = vo_copy(loadprobe::sha256::sha256_hex(b"VO bytes"));
+
+        let err = install_placements(&store(tmp.path()), &[], &[copy], &game, "scripts").unwrap_err();
+        assert!(err.contains("Refusing to copy"), "got: {err}");
+        assert_eq!(names_in(&audios), vec!["vo_stream.english.pws"]);
+    }
+
+    /// A displaced file whose backup is gone cannot be put back: uninstall says so and keeps the
+    /// entry in the ledger for a retry.
+    #[test]
+    fn a_missing_backup_fails_uninstall_and_keeps_the_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("data")).unwrap();
+        std::fs::write(game.join("data/shell-patch.wad"), "theirs").unwrap();
+        let s = store(tmp.path());
+        let patch = stage(&build, "data/shell-patch.wad", "ours", "A");
+        install_placements(&s, &[patch], &[], &game, "scripts").unwrap();
+        std::fs::remove_file(game.join("data/shell-patch.wad.bak")).unwrap();
+
+        let err = uninstall_placements(&s).unwrap_err();
+        assert!(err.contains("which is gone"), "got: {err}");
+        assert_eq!(s.read().len(), 1, "the entry survives for a retry");
     }
 }
