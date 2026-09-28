@@ -836,6 +836,7 @@ mod tests {
             plugins: vec![],
             runtime_dlls: vec![],
             placed_files: vec![],
+            data_files: vec![],
         }
     }
 
@@ -854,7 +855,7 @@ mod tests {
 
     fn plan(rows: &[ShipmentRef], requirements: Vec<Requirement>) -> LoadPlan {
         LoadPlan {
-            format: 1,
+            format: 2,
             producer: Producer::Preflight,
             quartermaster: "3.0.0".into(),
             ok: true,
@@ -866,6 +867,7 @@ mod tests {
             conflicts: vec![],
             supersedes: vec![],
             link_block_paths: vec![],
+            link_file_paths: vec![],
             findings: vec![],
         }
     }
