@@ -26,7 +26,7 @@ use tauri::Window;
 
 use crate::commands::incompatibility::IncompatibilityCheck;
 use crate::commands::mercsink;
-use crate::commands::placement::{self, StagedBuild, StagedFile, StreamCopy};
+use crate::commands::placement::{self, StagedBuild, StagedDataFile, StagedFile, StreamCopy};
 use crate::commands::prebuilt::{self, PrebuiltWad};
 use crate::commands::shipment::{self, ShipmentRef};
 use crate::commands::texture_swap::{self, TextureSwap};
@@ -101,6 +101,9 @@ pub struct BuildResult {
     /// Copies of game data the deploy step makes inside the game folder (`stream_copy`
     /// placements), each verified against the digest qm recorded before it is made.
     pub stream_copies: Vec<StreamCopy>,
+    /// Game data files (`data/shader3.bin`, `data/shader3Low.bin`) the deploy step replaces with
+    /// link's store, over the banked original.
+    pub data_files: Vec<StagedDataFile>,
     /// What mercs.ink's community incompatibility list said about the Shipments: which list was
     /// used (current, a cached copy and its age, or none ever downloaded) and the unconfirmed
     /// reports that apply. A confirmed report refuses the build, so it never appears here.
@@ -252,6 +255,7 @@ pub async fn assemble_patch_wad(
     let mut placed_files: Vec<StagedFile> = Vec::new();
     let mut merged: Vec<MergedWad> = Vec::new();
     let mut stream_copies: Vec<StreamCopy> = Vec::new();
+    let mut data_files: Vec<StagedDataFile> = Vec::new();
     let mut incompatibilities: Option<IncompatibilityCheck> = None;
 
     if !options.shipments.is_empty() {
@@ -273,6 +277,7 @@ pub async fn assemble_patch_wad(
         placed_files = built.files;
         merged = merge_patches(&built.language_patches, &built.shell_patch)?;
         stream_copies = built.stream_copies;
+        data_files = built.data_files;
         incompatibilities = Some(IncompatibilityCheck { list: list.state, notices: built.notices });
     }
 
@@ -293,6 +298,7 @@ pub async fn assemble_patch_wad(
         && placed_files.is_empty()
         && merged.is_empty()
         && stream_copies.is_empty()
+        && data_files.is_empty()
     {
         return Err("No assets to build (no mods loaded).".to_string());
     }
@@ -307,7 +313,7 @@ pub async fn assemble_patch_wad(
     // The loose files, copied out of qm's scratch dirs into the build output so the build is a
     // self-contained artifact: `work_dir` wipes qm's output on the NEXT assemble, and deploy happens
     // whenever the user clicks. Staging here also means one record describes the whole build.
-    let staged = stage_placements(&out_dir, placed_files, merged, stream_copies)?;
+    let staged = stage_placements(&out_dir, placed_files, merged, stream_copies, data_files)?;
 
     // A native-code-only Shipment resolves to no blocks at all, and `build_patch_wad_multi` would
     // have nothing to serialize. That is a real build with something to install, so it emits no
@@ -340,6 +346,7 @@ pub async fn assemble_patch_wad(
         warnings,
         placed_files: staged.files,
         stream_copies: staged.stream_copies,
+        data_files: staged.data_files,
         incompatibilities,
     })
 }
@@ -425,13 +432,16 @@ fn merge_patches(
 /// The record is what `deploy_patch_wad` reads — build and deploy are separate steps by design, and
 /// a file with no record is a file nothing can install or take back out.
 ///
-/// Every destination is claimed once: a merged WAD or a stream copy landing on a path something
+/// Data files are copied to `<out_dir>/files/<relative>` the same way.
+///
+/// Every destination is claimed once: a merged WAD, a stream copy or a data file landing on a path something
 /// else is staged at is refused, compared case-insensitively because the game's filesystem is.
 fn stage_placements(
     out_dir: &Path,
     files: Vec<StagedFile>,
     merged: Vec<MergedWad>,
     stream_copies: Vec<StreamCopy>,
+    data_files: Vec<StagedDataFile>,
 ) -> Result<StagedBuild, String> {
     let stage_root = out_dir.join("files");
     // Clear first, so a file dropped from the load order since the last build cannot linger and get
@@ -439,7 +449,7 @@ fn stage_placements(
     let _ = std::fs::remove_dir_all(&stage_root);
     let record_path = out_dir.join(placement::PLACEMENT_FILE);
     let _ = std::fs::remove_file(&record_path);
-    if files.is_empty() && merged.is_empty() && stream_copies.is_empty() {
+    if files.is_empty() && merged.is_empty() && stream_copies.is_empty() && data_files.is_empty() {
         return Ok(StagedBuild::default());
     }
 
@@ -461,6 +471,9 @@ fn stage_placements(
     }
     for copy in &stream_copies {
         claim(&copy.to, format!("“{}”'s copy of {}", copy.shipment, copy.from))?;
+    }
+    for file in &data_files {
+        claim(file.relative.relative(), format!("“{}”'s {}", file.shipment, file.relative))?;
     }
 
     std::fs::create_dir_all(&stage_root)
@@ -499,9 +512,31 @@ fn stage_placements(
         });
     }
 
+    let mut staged_data_files = Vec::with_capacity(data_files.len());
+    for file in data_files {
+        let dest = stage_root.join(file.relative.relative());
+        make_parent(&dest)?;
+        std::fs::copy(&file.source, &dest)
+            .map_err(|e| format!("Failed to stage {}: {e}", file.relative))?;
+        let got = loadprobe::sha256::sha256_hex(
+            &std::fs::read(&dest).map_err(|e| format!("reading {}: {e}", dest.display()))?,
+        );
+        if got != file.sha256 {
+            return Err(format!(
+                "The staged {} has sha256 {got}; qm recorded {}.",
+                file.relative, file.sha256
+            ));
+        }
+        staged_data_files.push(StagedDataFile {
+            source: dest.to_string_lossy().to_string(),
+            ..file
+        });
+    }
+
     let build = StagedBuild {
         files: staged,
         stream_copies,
+        data_files: staged_data_files,
     };
     std::fs::write(&record_path, placement::staged_record_json(&build)?)
         .map_err(|e| format!("Failed to write {}: {e}", record_path.display()))?;
@@ -552,6 +587,7 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
         // Same: the placements come out of a qm build, which preview deliberately does not run.
         placed_files: Vec::new(),
         stream_copies: Vec::new(),
+        data_files: Vec::new(),
         // The list is consulted only by a build with Shipments, and preview builds none.
         incompatibilities: None,
     })
@@ -615,7 +651,7 @@ mod tests {
         assert_eq!(output.overlay.unwrap().file_name().unwrap(), "my-shipment.wad");
         assert_eq!(output.files.len(), 2);
 
-        let staged = stage_placements(&build, output.files, Vec::new(), Vec::new()).unwrap();
+        let staged = stage_placements(&build, output.files, Vec::new(), Vec::new(), Vec::new()).unwrap();
         // The staged tree mirrors the game folder, so the destination is legible from the path.
         assert!(build.join("files/scripts/hook.asi").is_file());
         assert!(build.join("files/scripts/OnBoot/init.lua").is_file());
@@ -719,7 +755,7 @@ mod tests {
         );
 
         let english_sha = loadprobe::sha256::sha256_hex(&merged[0].bytes);
-        let staged = stage_placements(&build, Vec::new(), merged, Vec::new()).unwrap();
+        let staged = stage_placements(&build, Vec::new(), merged, Vec::new(), Vec::new()).unwrap();
         assert!(build.join("files/data/english-patch.wad").is_file());
         assert!(build.join("files/data/shell-patch.wad").is_file());
         let back = placement::read_staged(&build).unwrap();
@@ -772,7 +808,7 @@ mod tests {
             shipments: "A".into(),
             bytes: b"wad".to_vec(),
         };
-        let err = stage_placements(&build, vec![file("data/English-patch.wad", None)], vec![wad], Vec::new())
+        let err = stage_placements(&build, vec![file("data/English-patch.wad", None)], vec![wad], Vec::new(), Vec::new())
             .unwrap_err();
         assert!(err.contains("placed twice"), "got: {err}");
 
@@ -788,6 +824,7 @@ mod tests {
             vec![file("data/polski.wad", Some("Polski"))],
             Vec::new(),
             vec![copy],
+            Vec::new(),
         )
         .unwrap_err();
         assert!(err.contains("placed twice"), "got: {err}");
@@ -806,10 +843,53 @@ mod tests {
             sha256: "ab".repeat(32),
             shipment: "Lang".into(),
         };
-        stage_placements(&build, Vec::new(), Vec::new(), vec![copy.clone()]).unwrap();
+        stage_placements(&build, Vec::new(), Vec::new(), vec![copy.clone()], Vec::new()).unwrap();
         let back = placement::read_staged(&build).unwrap();
         assert!(back.files.is_empty());
         assert_eq!(back.stream_copies, vec![copy]);
+    }
+
+    /// Link's data file is staged under the game-folder path, recorded with its original's
+    /// digest, and claims its destination.
+    #[test]
+    fn a_data_file_is_staged_and_recorded() {
+        use crate::commands::data_files::DataFileRel;
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let src = tmp.path().join("shader3.bin");
+        std::fs::write(&src, b"linked store").unwrap();
+        let file = StagedDataFile {
+            source: src.to_string_lossy().to_string(),
+            relative: DataFileRel::Shader3,
+            bytes: 12,
+            sha256: loadprobe::sha256::sha256_hex(b"linked store"),
+            base_sha256: "b".repeat(64),
+            shipment: "Quartermaster link".into(),
+        };
+        let staged = stage_placements(&build, Vec::new(), Vec::new(), Vec::new(), vec![file.clone()]).unwrap();
+        let dest = build.join("files/data/shader3.bin");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"linked store");
+        assert_eq!(staged.data_files[0].source, dest.to_string_lossy());
+        let back = placement::read_staged(&build).unwrap();
+        assert_eq!(back.data_files, staged.data_files);
+        assert_eq!(back.data_files[0].base_sha256, file.base_sha256);
+
+        let other = StagedFile {
+            source: src.to_string_lossy().to_string(),
+            relative: "data/Shader3.bin".into(),
+            sha256: String::new(),
+            shipment: "Sneaky".into(),
+            display: None,
+            language: None,
+        };
+        let err = stage_placements(&build, vec![other], Vec::new(), Vec::new(), vec![file.clone()]).unwrap_err();
+        assert!(err.contains("placed twice"), "got: {err}");
+
+        let mut wrong = file;
+        wrong.sha256 = "0".repeat(64);
+        let err = stage_placements(&build, Vec::new(), Vec::new(), Vec::new(), vec![wrong]).unwrap_err();
+        assert!(err.contains("qm recorded"), "got: {err}");
     }
 
     /// A rebuild that no longer places a file must not leave it staged: deploy reads the record,
@@ -822,10 +902,10 @@ mod tests {
 
         qm_output(&qm_out, None, &[("scripts/gone.asi", "old")]);
         let output = placement::read_output(&qm_out, "S").unwrap();
-        stage_placements(&build, output.files, Vec::new(), Vec::new()).unwrap();
+        stage_placements(&build, output.files, Vec::new(), Vec::new(), Vec::new()).unwrap();
         assert!(build.join("files/scripts/gone.asi").is_file());
 
-        stage_placements(&build, Vec::new(), Vec::new(), Vec::new()).unwrap();
+        stage_placements(&build, Vec::new(), Vec::new(), Vec::new(), Vec::new()).unwrap();
         assert!(!build.join("files/scripts/gone.asi").exists());
         assert!(placement::read_staged(&build).unwrap().is_empty());
     }
