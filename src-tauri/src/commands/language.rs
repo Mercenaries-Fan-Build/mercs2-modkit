@@ -655,8 +655,8 @@ mod tests {
 
     /// An added language modkit installed takes its display name from the deploy ledger, matched
     /// to the file case-insensitively; one the ledger does not record shows its raw token and is
-    /// flagged as not installed by modkit. The shipped languages and the patch WADs are never
-    /// added languages.
+    /// flagged as not installed by modkit. The shipped languages and the patch WADs are
+    /// excluded from the added languages.
     #[test]
     fn added_languages_take_their_display_from_the_ledger() {
         let dir = tempfile::tempdir().unwrap();
@@ -680,7 +680,7 @@ mod tests {
         );
     }
 
-    /// A ledger entry for an added language's WAD with no display name is an error, never a guess.
+    /// A ledger entry for an added language's WAD with no display name is an error.
     #[test]
     fn a_ledger_entry_without_a_display_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
