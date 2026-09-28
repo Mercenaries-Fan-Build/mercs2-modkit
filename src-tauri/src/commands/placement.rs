@@ -29,10 +29,13 @@
 //! | `language_patch` | `<relative>`, a patch WAD | merged per `language` into `data/<language>-patch.wad` |
 //! | `shell_patch` | `<name>`, a patch WAD | merged into `data/shell-patch.wad` |
 //! | `stream_copy` | none | `<game>/<from>` copied to `<game>/<to>` once its digest matches `sha256` |
+//! | `data_file` | `<relative>` (`data/shader3.bin` or `data/shader3Low.bin`) | link's copy replaces `<game>/<relative>`; see [`super::data_files`] |
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use super::data_files::{check_sha256, DataFileRel};
 
 /// The record `qm build` and `qm link` write into their output directory, and the staged-build
 /// record modkit writes beside `vz-patch.wad`.
@@ -64,6 +67,11 @@ pub enum Destination {
     /// A copy of game data inside the install: `<game>/<from>` to `<game>/<to>`. The entry's `bytes`
     /// and `sha256` describe `<game>/<from>` as qm read it at build time.
     StreamCopy { from: String, to: String },
+    /// A whole replacement for the game data file `relative`, a closed set (see
+    /// [`DataFileRel`]). The file is at `<relative>` in the output dir; the entry's `bytes` and
+    /// `sha256` describe it, and `base_sha256` is the original store qm read from
+    /// `--original-data`.
+    DataFile { relative: DataFileRel, base_sha256: String },
 }
 
 /// One artifact in the record.
@@ -142,6 +150,22 @@ pub struct StreamCopy {
     pub shipment: String,
 }
 
+/// A `data_file` placement: a replacement store for `<game>/<relative>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedDataFile {
+    /// Absolute path to the store in the qm output (or modkit's build staging) directory.
+    pub source: String,
+    pub relative: DataFileRel,
+    /// Size of the store.
+    pub bytes: u64,
+    /// sha256 of the store.
+    pub sha256: String,
+    /// sha256 of the original store qm built it from.
+    pub base_sha256: String,
+    /// Which Shipment (or the link step) produced it.
+    pub shipment: String,
+}
+
 /// A patch WAD in a qm output that is merged per language into `data/<language>-patch.wad`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguagePatch {
@@ -164,6 +188,8 @@ pub struct QmOutput {
     pub shell_patch: Option<PathBuf>,
     /// `stream_copy` placements.
     pub stream_copies: Vec<StreamCopy>,
+    /// `data_file` placements, at most one per `relative`.
+    pub data_files: Vec<StagedDataFile>,
 }
 
 impl QmOutput {
@@ -174,6 +200,7 @@ impl QmOutput {
             && self.language_patches.is_empty()
             && self.shell_patch.is_none()
             && self.stream_copies.is_empty()
+            && self.data_files.is_empty()
     }
 }
 
@@ -356,6 +383,24 @@ pub fn read_output(dir: &Path, shipment: &str) -> Result<QmOutput, String> {
                     shipment: shipment.to_string(),
                 });
             }
+            Destination::DataFile { relative, base_sha256 } => {
+                if out.data_files.iter().any(|f| f.relative == *relative) {
+                    return Err(format!(
+                        "{shipment} records more than one data file for {relative}; modkit deploys \
+                         one per qm output and cannot tell which to read"
+                    ));
+                }
+                check_sha256(base_sha256, &format!("{shipment}'s base_sha256 for {relative}"))?;
+                check_sha256(&entry.sha256, &format!("{shipment}'s sha256 for {relative}"))?;
+                out.data_files.push(StagedDataFile {
+                    source: artifact(dir, relative.relative(), shipment)?.to_string_lossy().to_string(),
+                    relative: *relative,
+                    bytes: entry.bytes,
+                    sha256: entry.sha256.clone(),
+                    base_sha256: base_sha256.clone(),
+                    shipment: shipment.to_string(),
+                });
+            }
         }
     }
     Ok(out)
@@ -373,11 +418,13 @@ pub struct StagedBuild {
     pub files: Vec<StagedFile>,
     /// Copies to make inside the game folder.
     pub stream_copies: Vec<StreamCopy>,
+    /// Replacement data files, link's, one per `relative`.
+    pub data_files: Vec<StagedDataFile>,
 }
 
 impl StagedBuild {
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.stream_copies.is_empty()
+        self.files.is_empty() && self.stream_copies.is_empty() && self.data_files.is_empty()
     }
 }
 
@@ -441,6 +488,10 @@ pub fn read_staged(build_dir: &Path) -> Result<StagedBuild, String> {
         if let Some(why) = refuse_unsafe_relative(&copy.to) {
             return Err(refuse("stream-copy destination", &copy.to, why));
         }
+    }
+    for file in &record.build.data_files {
+        check_sha256(&file.sha256, &format!("{}'s sha256 for {}", path.display(), file.relative))?;
+        check_sha256(&file.base_sha256, &format!("{}'s base_sha256 for {}", path.display(), file.relative))?;
     }
     Ok(record.build)
 }
@@ -685,10 +736,98 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_record(
             dir.path(),
-            r#"{"name":"x","bytes":1,"sha256":"a","destination":{"kind":"data_file","relative":"x"}}"#,
+            r#"{"name":"x","bytes":1,"sha256":"a","destination":{"kind":"base_wad","relative":"x"}}"#,
         );
         let err = read_output(dir.path(), "s").unwrap_err();
-        assert!(err.contains("not a placement record") && err.contains("data_file"), "got: {err}");
+        assert!(err.contains("not a placement record") && err.contains("base_wad"), "got: {err}");
+    }
+
+    fn data_file_entry(relative: &str, sha256: &str, base: &str) -> String {
+        format!(
+            r#"{{"name":"shader3.bin","bytes":4,"sha256":"{sha256}","destination":{{"kind":"data_file","relative":{},"base_sha256":"{base}"}}}}"#,
+            serde_json::to_string(relative).unwrap()
+        )
+    }
+
+    /// A `data_file` placement is read with its store, its digest and the original it was built
+    /// from.
+    #[test]
+    fn a_data_file_is_read_with_its_base() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "data/shader3.bin", "SHDR");
+        write(dir.path(), "data/shader3Low.bin", "SHDL");
+        write_record(
+            dir.path(),
+            &[
+                data_file_entry("data/shader3.bin", &"a".repeat(64), &"b".repeat(64)),
+                data_file_entry("data/shader3Low.bin", &"c".repeat(64), &"d".repeat(64)),
+            ]
+            .join(","),
+        );
+        let out = read_output(dir.path(), "Shiny").unwrap();
+        assert!(!out.is_empty());
+        assert!(out.overlay.is_none() && out.files.is_empty());
+        assert_eq!(
+            out.data_files,
+            vec![
+                StagedDataFile {
+                    source: dir.path().join("data").join("shader3.bin").to_string_lossy().to_string(),
+                    relative: DataFileRel::Shader3,
+                    bytes: 4,
+                    sha256: "a".repeat(64),
+                    base_sha256: "b".repeat(64),
+                    shipment: "Shiny".into(),
+                },
+                StagedDataFile {
+                    source: dir.path().join("data").join("shader3Low.bin").to_string_lossy().to_string(),
+                    relative: DataFileRel::Shader3Low,
+                    bytes: 4,
+                    sha256: "c".repeat(64),
+                    base_sha256: "d".repeat(64),
+                    shipment: "Shiny".into(),
+                },
+            ]
+        );
+    }
+
+    /// `relative` is a closed set: any other path is a parse error.
+    #[test]
+    fn a_data_file_outside_the_closed_set_is_refused() {
+        for bad in ["data/shader3low.bin", "data/vz.wad", "shader3.bin", "../data/shader3.bin"] {
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), "data/shader3.bin", "SHDR");
+            write_record(dir.path(), &data_file_entry(bad, &"a".repeat(64), &"b".repeat(64)));
+            let err = read_output(dir.path(), "s").unwrap_err();
+            assert!(
+                err.contains("not a placement record") && err.contains("is not a data file Modkit deploys"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    /// A missing or malformed `base_sha256`, a second store for one path, or a missing file is
+    /// refused.
+    #[test]
+    fn a_malformed_data_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "data/shader3.bin", "SHDR");
+        write_record(
+            dir.path(),
+            r#"{"name":"shader3.bin","bytes":4,"sha256":"aa","destination":{"kind":"data_file","relative":"data/shader3.bin"}}"#,
+        );
+        let err = read_output(dir.path(), "s").unwrap_err();
+        assert!(err.contains("base_sha256"), "got: {err}");
+
+        write_record(dir.path(), &data_file_entry("data/shader3.bin", &"a".repeat(64), "B0"));
+        assert!(read_output(dir.path(), "s").unwrap_err().contains("not a lowercase hex sha256"));
+
+        let entry = data_file_entry("data/shader3.bin", &"a".repeat(64), &"b".repeat(64));
+        write_record(dir.path(), &format!("{entry},{entry}"));
+        assert!(read_output(dir.path(), "s").unwrap_err().contains("more than one data file"));
+
+        let dir = tempfile::tempdir().unwrap();
+        write_record(dir.path(), &data_file_entry("data/shader3Low.bin", &"a".repeat(64), &"b".repeat(64)));
+        assert!(read_output(dir.path(), "s").unwrap_err().contains("it is not in"));
     }
 
     /// A record that cannot be parsed, or of any format but 2, is a refusal.
@@ -750,11 +889,25 @@ mod tests {
                 sha256: "cd".into(),
                 shipment: "Lang".into(),
             }],
+            data_files: vec![StagedDataFile {
+                source: "/b/files/data/shader3.bin".into(),
+                relative: DataFileRel::Shader3,
+                bytes: 5,
+                sha256: "e".repeat(64),
+                base_sha256: "f".repeat(64),
+                shipment: "Quartermaster link".into(),
+            }],
         };
         write(dir.path(), PLACEMENT_FILE, &staged_record_json(&build).unwrap());
         let back = read_staged(dir.path()).unwrap();
         assert_eq!(back.files[0].language.as_deref(), Some("english"));
         assert_eq!(back.stream_copies, build.stream_copies);
+        assert_eq!(back.data_files, build.data_files);
+
+        let mut bad = build.clone();
+        bad.data_files[0].base_sha256 = "F".repeat(64);
+        write(dir.path(), PLACEMENT_FILE, &staged_record_json(&bad).unwrap());
+        assert!(read_staged(dir.path()).unwrap_err().contains("base_sha256"));
 
         let mut bad = build.clone();
         bad.stream_copies[0].to = "../escape.pws".into();
@@ -766,7 +919,7 @@ mod tests {
         write(dir.path(), PLACEMENT_FILE, &staged_record_json(&bad).unwrap());
         assert!(read_staged(dir.path()).unwrap_err().contains("language"));
 
-        write(dir.path(), PLACEMENT_FILE, r#"{"format":1,"files":[],"stream_copies":[]}"#);
+        write(dir.path(), PLACEMENT_FILE, r#"{"format":1,"files":[],"stream_copies":[],"data_files":[]}"#);
         assert!(read_staged(dir.path()).unwrap_err().contains("format 1"));
     }
 
