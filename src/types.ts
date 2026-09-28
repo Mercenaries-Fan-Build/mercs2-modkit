@@ -152,7 +152,21 @@ export interface StagedFile {
   /** Destination under the game folder, forward-slashed. */
   relative: string;
   sha256: string;
-  /** Which Shipment placed it. */
+  /** Which Shipment placed it; for a merged patch WAD, every contributing Shipment in load order. */
+  shipment: string;
+  /** The language's display name, set exactly for a `data_wad` (added-language) WAD. */
+  display: string | null;
+  /** The language token, set exactly for a merged `data/<language>-patch.wad`. */
+  language: string | null;
+}
+
+/** A copy of game data the deploy step makes inside the game folder, once the source's sha256
+ *  matches the one qm recorded at build time. */
+export interface StreamCopy {
+  from: string;
+  to: string;
+  bytes: number;
+  sha256: string;
   shipment: string;
 }
 
@@ -171,6 +185,8 @@ export interface BuildResult {
   warnings?: string[];
   /** Files that will be dropped into the game folder on install. An `.asi` is native code. */
   placed_files?: StagedFile[];
+  /** Copies of game data made inside the game folder on install. */
+  stream_copies: StreamCopy[];
   /** What mercs.ink's community incompatibility list said about the Shipments. `null` when the
    *  build had no Shipments (and always from the preview), since the list is not consulted. */
   incompatibilities: IncompatibilityCheck | null;
@@ -540,12 +556,22 @@ export interface WadBackup {
   sha256: string;
 }
 
-/** One loose file a deploy put into the game folder. */
+/** One file a deploy put into the game folder. */
 export interface PlacedFile {
   abs_path: string;
   relative: string;
   sha256: string;
   shipment: string;
+  /** The language's display name, set exactly for a `data_wad` placement. */
+  display: string | null;
+  /** The file this placement displaced to `<name>.bak`, moved back when it is removed. */
+  displaced: DisplacedFile | null;
+}
+
+/** A pre-existing file a placement displaced to make room. */
+export interface DisplacedFile {
+  original: string;
+  backup: string;
 }
 
 /** What the loose-file half of a deploy (or an uninstall) did. */
@@ -557,6 +583,8 @@ export interface PlacementOutcome {
   skipped: string[];
   /** Pre-existing unmanaged files displaced to `<name>.bak`. */
   backed_up: string[];
+  /** Displaced files moved back from `<name>.bak` once modkit's file came out. */
+  restored: string[];
 }
 
 export interface DeployWadResult {
@@ -1177,10 +1205,11 @@ export interface LanguagePresence {
 /** A NOVEL language installed as `data/<name>.wad` — one the base game never shipped. */
 export interface AddedLanguage {
   name: string; // the WAD basename / language token (e.g. "polski")
-  display: string; // friendlier label (title-cased)
+  display: string; // the declared display name from the deploy ledger; the raw token when modkit did not install it
   wadName: string;
   wadSize: number;
   active: boolean; // the selector is enabled AND names this language
+  installedByModkit: boolean; // the deploy ledger records this WAD as placed by modkit
 }
 
 /** State of the `mercs2_language` selector plugin that switches into an added language. */
