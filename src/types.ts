@@ -170,6 +170,21 @@ export interface StreamCopy {
   shipment: string;
 }
 
+/** A game data file Modkit deploys: a closed set, the shader stores. */
+export type DataFileRel = "data/shader3.bin" | "data/shader3Low.bin";
+
+/** A replacement store for a game data file: link's, staged for the deploy step, which places it
+ *  over the banked original and records it in `deployed/data-files.json`. */
+export interface StagedDataFile {
+  source: string;
+  relative: DataFileRel;
+  bytes: number;
+  sha256: string;
+  /** sha256 of the original store qm built it from. Deploy requires it to be the banked original. */
+  base_sha256: string;
+  shipment: string;
+}
+
 export interface BuildResult {
   /** The built WAD, or `""` when the load order produced no blocks at all (a Shipment carrying
    *  only `native_hook` / `place_file` contributions is a real build with no WAD in it). */
@@ -187,6 +202,8 @@ export interface BuildResult {
   placed_files?: StagedFile[];
   /** Copies of game data made inside the game folder on install. */
   stream_copies: StreamCopy[];
+  /** Game data files the deploy step replaces with link's store. */
+  data_files: StagedDataFile[];
   /** What mercs.ink's community incompatibility list said about the Shipments. `null` when the
    *  build had no Shipments (and always from the preview), since the list is not consulted. */
   incompatibilities: IncompatibilityCheck | null;
@@ -594,6 +611,15 @@ export interface DeployWadResult {
   byte_size: number;
   backed_up: WadBackup | null;
   files: PlacementOutcome;
+  data_files: DataFileOutcome;
+}
+
+/** What a deploy or an uninstall did to the game data files. */
+export interface DataFileOutcome {
+  /** Stores placed into the game folder. */
+  deployed: DataFileRel[];
+  /** Stores put back from the bank. */
+  restored: DataFileRel[];
 }
 
 /**
@@ -1292,7 +1318,17 @@ export interface VerifyReport {
   ignored: number; // excluded files skipped (exe, caches, config, mods)
   exes: ExeReport[]; // identification of the main + cracked executables
   wadDetails: WadDiff[]; // per-WAD block breakdown for mismatched WADs
+  modkitDeployed: ModkitDeployedFile[]; // data files Modkit deployed over a banked original
   manifestSource: string;
+}
+
+/** A game data file whose bytes are the store Modkit deployed, left out of the manifest pass. */
+export interface ModkitDeployedFile {
+  path: string;
+  originalSha256: string;
+  deployedSha256: string;
+  /** "deployed by Modkit; original banked, sha …" */
+  message: string;
 }
 
 export interface GenerateManifestResult {
