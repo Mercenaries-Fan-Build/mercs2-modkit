@@ -36,9 +36,19 @@
 //!
 //! So [`shipment_groups`] returns a [`ShipmentBuild`]: the claim groups **and** the staged files,
 //! which [`super::wad_builder`] copies into the build output and [`super::deploy_wad`] installs and
-//! records for undo. See [`super::placement`] for the record's two shapes.
+//! records for undo. See [`super::placement`] for the record.
+//!
+//! # Language and shell patch WADs
+//!
+//! The engine mounts two more patch WADs by name: `data/<language>-patch.wad` above the current
+//! language's WAD, and `data/shell-patch.wad` above `shell.wad`. A Shipment's `language_patch` and
+//! `shell_patch` outputs are collapsed exactly like its overlay: [`collapse`] per target, in the
+//! plan's order, the link output's WAD for that target appended last so it wins, and the blocks the
+//! plan lists as linker-owned dropped from the per-Shipment copies. [`ShipmentBuild`] carries one
+//! set of claim groups per language and one for the shell; [`super::wad_builder`] resolves each into
+//! its WAD.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -49,7 +59,7 @@ use tauri::Window;
 
 use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
 use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, REQUEST_FILE};
-use super::placement::{self, StagedFile};
+use super::placement::{self, StagedFile, StreamCopy};
 use super::proc::NoWindow;
 use super::toolchain::{ensure_tool, installed_tool_path};
 use crate::models::claim::ClaimGroup;
@@ -511,7 +521,14 @@ pub struct ShipmentBuild {
     /// Loose files to install into the game folder, **in load order** — a later Shipment's file at
     /// the same destination wins, matching how the blocks resolve.
     pub files: Vec<StagedFile>,
-    /// Non-fatal advisories: currently, one per destination two Shipments both claimed.
+    /// Claim groups per language token, for `data/<language>-patch.wad`, in load order with the
+    /// link output's group last.
+    pub language_patches: BTreeMap<String, Vec<ClaimGroup>>,
+    /// Claim groups for `data/shell-patch.wad`, in load order with the link output's group last.
+    pub shell_patch: Vec<ClaimGroup>,
+    /// Copies to make inside the game folder, in load order, one per destination.
+    pub stream_copies: Vec<StreamCopy>,
+    /// Non-fatal advisories: one per destination two Shipments both claimed.
     pub warnings: Vec<String>,
     /// Unconfirmed reports from mercs.ink's incompatibility list that apply to the set. A
     /// confirmed one refuses the build instead.
@@ -526,19 +543,35 @@ pub struct ShipmentBuild {
 /// of failure as not copying at all, just later in the pipeline. Resolution matches the blocks
 /// (last in the load order wins) so a user's mental model holds across both halves of a Shipment.
 fn resolve_file_collisions(files: Vec<StagedFile>) -> (Vec<StagedFile>, Vec<String>) {
+    resolve_collisions(files, |f| (f.relative.clone(), f.shipment.clone()))
+}
+
+/// [`resolve_file_collisions`] for stream copies, keyed on the destination `to`.
+fn resolve_stream_copy_collisions(copies: Vec<StreamCopy>) -> (Vec<StreamCopy>, Vec<String>) {
+    resolve_collisions(copies, |c| (c.to.clone(), c.shipment.clone()))
+}
+
+/// Keep the last item per destination, warning about each displaced one. `key` gives an item's
+/// destination and the Shipment that placed it.
+fn resolve_collisions<T>(
+    items: Vec<T>,
+    key: impl Fn(&T) -> (String, String),
+) -> (Vec<T>, Vec<String>) {
     let mut winner: HashMap<String, usize> = HashMap::new();
     let mut warnings = Vec::new();
-    let mut kept: Vec<Option<StagedFile>> = Vec::with_capacity(files.len());
+    let mut kept: Vec<Option<T>> = Vec::with_capacity(items.len());
 
-    for file in files {
-        if let Some(prev) = winner.insert(file.relative.clone(), kept.len()) {
+    for item in items {
+        let (destination, shipment) = key(&item);
+        if let Some(prev) = winner.insert(destination.clone(), kept.len()) {
             let displaced = kept[prev].take().expect("a destination wins at most once");
+            let (_, displaced_shipment) = key(&displaced);
             warnings.push(format!(
-                "“{}” and “{}” both place {} — the later one ({}) wins, as it does for assets.",
-                displaced.shipment, file.shipment, file.relative, file.shipment
+                "“{displaced_shipment}” and “{shipment}” both place {destination} — the later one \
+                 ({shipment}) wins, as it does for assets."
             ));
         }
-        kept.push(Some(file));
+        kept.push(Some(item));
     }
     (kept.into_iter().flatten().collect(), warnings)
 }
@@ -668,11 +701,14 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
-    // 1) Build each Shipment's overlay, in the plan's order, and keep all of its
-    //    blocks (the collapse drops the linker-owned ones), plus every loose file its placement
-    //    record names.
-    let mut overlays: Vec<(String, String, Vec<mercs2_formats::patch_wad::PatchBlock>)> = Vec::new();
+    // 1) Build each Shipment, in the plan's order, and keep all of its overlay, language-patch and
+    //    shell-patch blocks (the collapse drops the linker-owned ones), plus every loose file and
+    //    stream copy its placement record names.
+    let mut overlays: Vec<Overlay> = Vec::new();
+    let mut language_overlays: BTreeMap<String, Vec<Overlay>> = BTreeMap::new();
+    let mut shell_overlays: Vec<Overlay> = Vec::new();
     let mut files: Vec<StagedFile> = Vec::new();
+    let mut stream_copies: Vec<StreamCopy> = Vec::new();
     for (i, ship) in ordered.iter().enumerate() {
         let out = work_dir(&format!("build-{i}"))?;
         let mut args: Vec<std::ffi::OsString> = vec![
@@ -687,25 +723,31 @@ pub async fn shipment_groups(
         let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
         run_qm(&qm, &arg_refs, &format!("qm build for \"{}\"", ship.name))?;
 
-        let (wad, placed) = placement::read_output(&out, &ship.name)?;
-        let placed_here = placed.len();
-        files.extend(placed);
-
-        // No WAD is now a legitimate outcome, not an error: a Shipment whose only contributions are
-        // `native_hook` / `place_file` emits loose files and no overlay at all. Refusing it here
-        // would be the "narrow the feature to dodge the gap" answer to the same defect.
-        if let Some(wad) = wad {
-            let bytes =
-                std::fs::read(&wad).map_err(|e| format!("reading {}'s overlay: {e}", ship.name))?;
-            let contents = read_patch_wad(&bytes)
-                .map_err(|e| format!("{}'s overlay is not a patch WAD: {e}", ship.name))?;
-            overlays.push((ship.id.clone(), ship.name.clone(), contents.blocks));
-        } else if placed_here == 0 {
+        let output = placement::read_output(&out, &ship.name)?;
+        // A Shipment whose only contributions are `native_hook` / `place_file` emits loose files
+        // and no overlay at all, which is a real build. One that emits nothing is not.
+        if output.is_empty() {
             return Err(format!(
-                "qm build for \"{}\" produced neither a WAD nor any placed files",
+                "qm build for \"{}\" produced nothing to merge, copy or place",
                 ship.name
             ));
         }
+        let owner = (ship.id.as_str(), ship.name.as_str());
+        if let Some(wad) = &output.overlay {
+            overlays.push(read_overlay(wad, owner, "overlay")?);
+        }
+        for patch in &output.language_patches {
+            let what = format!("{} patch", patch.language);
+            language_overlays
+                .entry(patch.language.clone())
+                .or_default()
+                .push(read_overlay(&patch.path, owner, &what)?);
+        }
+        if let Some(wad) = &output.shell_patch {
+            shell_overlays.push(read_overlay(wad, owner, "shell patch")?);
+        }
+        files.extend(output.files);
+        stream_copies.extend(output.stream_copies);
     }
 
     // 2) Link the whole set's Lua, with the SAME request preflight was given.
@@ -729,30 +771,126 @@ pub async fn shipment_groups(
     let link_plan = read_link_plan(&link_out, &request)?;
     assert_same_plan(&plan, &link_plan)?;
 
-    // `read_output` reads link's `placement.json`: with a record the WAD is named, and any
-    // `game_folder` entry it records flows through the same path as a build's.
-    let (link_wad, link_files) = placement::read_output(&link_out, "Quartermaster link")?;
-    files.extend(link_files);
-
-    let link_blocks = match link_wad {
-        Some(wad) => {
-            let bytes = std::fs::read(&wad).map_err(|e| format!("reading the link WAD: {e}"))?;
-            read_patch_wad(&bytes)
-                .map_err(|e| format!("the link WAD is not a patch WAD: {e}"))?
-                .blocks
-        }
+    // Link's `placement.json` flows through the same reader as a build's: its overlay, its
+    // language and shell patches (the link-owned merged banks) and any file or copy it records.
+    const LINK: &str = "Quartermaster link";
+    let link = placement::read_output(&link_out, LINK)?;
+    let link_owner = ("qm-link", LINK);
+    let link_blocks = match &link.overlay {
+        Some(wad) => read_overlay(wad, link_owner, "overlay")?.2,
         None => Vec::new(),
     };
+    let mut link_language: BTreeMap<String, Vec<mercs2_formats::patch_wad::PatchBlock>> =
+        BTreeMap::new();
+    for patch in &link.language_patches {
+        let what = format!("{} patch", patch.language);
+        link_language.insert(
+            patch.language.clone(),
+            read_overlay(&patch.path, link_owner, &what)?.2,
+        );
+    }
+    let link_shell = match &link.shell_patch {
+        Some(wad) => read_overlay(wad, link_owner, "shell patch")?.2,
+        None => Vec::new(),
+    };
+    files.extend(link.files);
+    stream_copies.extend(link.stream_copies);
 
-    // 3) Loose-file collisions resolve in the plan's order: `files` was
-    //    collected in that order, with link's last.
-    let (files, warnings) = resolve_file_collisions(files);
+    // 3) Every target collapses the same way, link's group last.
+    let paths = &plan.link_block_paths;
+    let (language_patches, shell_patch) = collapse_patches(
+        language_overlays,
+        link_language,
+        shell_overlays,
+        link_shell,
+        paths,
+        shipments.len(),
+    );
+
+    // Loose-file and stream-copy collisions resolve in the plan's order: both were collected in
+    // that order, with link's last.
+    let (files, mut warnings) = resolve_file_collisions(files);
+    let (stream_copies, copy_warnings) = resolve_stream_copy_collisions(stream_copies);
+    warnings.extend(copy_warnings);
     Ok(ShipmentBuild {
-        groups: collapse(overlays, link_blocks, &plan.link_block_paths, shipments.len()),
+        groups: collapse(overlays, link_blocks, paths, LinkGroup::scripts(shipments.len())),
+        language_patches,
+        shell_patch,
+        stream_copies,
         files,
         warnings,
         notices,
     })
+}
+
+/// One Shipment's patch WAD for one target: `(mod id, name, blocks)`.
+type Overlay = (String, String, Vec<mercs2_formats::patch_wad::PatchBlock>);
+
+/// Read the patch WAD at `path` into an [`Overlay`] owned by `(id, name)`.
+fn read_overlay(path: &Path, (id, name): (&str, &str), what: &str) -> Result<Overlay, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {name}'s {what}: {e}"))?;
+    let contents =
+        read_patch_wad(&bytes).map_err(|e| format!("{name}'s {what} is not a patch WAD: {e}"))?;
+    Ok((id.to_string(), name.to_string(), contents.blocks))
+}
+
+/// [`collapse`] every language's patch WADs and the shell patch WADs, each target on its own, the
+/// link output's WAD for a target appended last. A language only the link output patches still
+/// gets its target.
+fn collapse_patches(
+    mut language_overlays: BTreeMap<String, Vec<Overlay>>,
+    mut link_language: BTreeMap<String, Vec<mercs2_formats::patch_wad::PatchBlock>>,
+    shell_overlays: Vec<Overlay>,
+    link_shell: Vec<mercs2_formats::patch_wad::PatchBlock>,
+    link_block_paths: &[String],
+    shipment_count: usize,
+) -> (BTreeMap<String, Vec<ClaimGroup>>, Vec<ClaimGroup>) {
+    let languages: BTreeSet<String> = language_overlays
+        .keys()
+        .chain(link_language.keys())
+        .cloned()
+        .collect();
+    let mut language_patches = BTreeMap::new();
+    for language in languages {
+        let groups = collapse(
+            language_overlays.remove(&language).unwrap_or_default(),
+            link_language.remove(&language).unwrap_or_default(),
+            link_block_paths,
+            LinkGroup::patch(&format!("{language}-patch.wad"), shipment_count),
+        );
+        language_patches.insert(language, groups);
+    }
+    let shell = collapse(
+        shell_overlays,
+        link_shell,
+        link_block_paths,
+        LinkGroup::patch("shell-patch.wad", shipment_count),
+    );
+    (language_patches, shell)
+}
+
+/// The claim group the link output's blocks for one target form.
+struct LinkGroup {
+    mod_id: String,
+    label: String,
+}
+
+impl LinkGroup {
+    /// The link group of `vz-patch.wad`: the reconciled scripts and string tables.
+    fn scripts(shipment_count: usize) -> Self {
+        Self {
+            mod_id: "qm-link:scripts".into(),
+            label: format!("Linked scripts and string tables ({shipment_count} Shipment(s))"),
+        }
+    }
+
+    /// The link group of the patch WAD `target` (`english-patch.wad`, `shell-patch.wad`).
+    fn patch(target: &str, shipment_count: usize) -> Self {
+        Self {
+            mod_id: format!("qm-link:{target}"),
+            label: format!("Linked {target} ({shipment_count} Shipment(s))"),
+        }
+    }
 }
 
 /// Is this block one qm's linker owns? The plan lists them by path (`link_block_paths`):
@@ -765,7 +903,7 @@ fn is_link_owned(path_string: &str, link_block_paths: &[String]) -> bool {
     link_block_paths.iter().any(|s| norm(s) == p)
 }
 
-/// Fold per-Shipment overlays + the link WAD into final claim groups.
+/// Fold per-Shipment patch WADs + the link output's WAD for the same target into final claim groups.
 ///
 /// Each Shipment contributes its blocks minus the linker-owned ones, which the plan lists (a pure
 /// Lua Shipment therefore contributes no group). The link WAD's blocks are **all** kept, as one
@@ -776,10 +914,10 @@ fn is_link_owned(path_string: &str, link_block_paths: &[String]) -> bool {
 ///
 /// Pure and side-effect-free so the residency invariant is unit-testable without `qm` or a game.
 fn collapse(
-    overlays: Vec<(String, String, Vec<mercs2_formats::patch_wad::PatchBlock>)>,
+    overlays: Vec<Overlay>,
     link_blocks: Vec<mercs2_formats::patch_wad::PatchBlock>,
     link_block_paths: &[String],
-    shipment_count: usize,
+    link: LinkGroup,
 ) -> Vec<ClaimGroup> {
     let mut groups: Vec<ClaimGroup> = Vec::new();
     for (id, name, blocks) in overlays {
@@ -800,9 +938,9 @@ fn collapse(
     }
     if !link_blocks.is_empty() {
         groups.push(ClaimGroup {
-            mod_id: "qm-link:scripts".into(),
+            mod_id: link.mod_id,
             mod_name: "Quartermaster link".into(),
-            label: format!("Linked scripts and string tables ({shipment_count} Shipment(s))"),
+            label: link.label,
             atomic: true,
             blocks: link_blocks,
         });
@@ -1096,7 +1234,7 @@ mod tests {
         ];
         let link_blocks = vec![block(scripts, scripts_hash)];
 
-        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), LinkGroup::scripts(2));
         assert_eq!(
             link_owned_in(&groups),
             vec![("qm-link:scripts".to_string(), scripts.to_string())],
@@ -1135,7 +1273,7 @@ mod tests {
         // qm link re-emits the reconciled resident block once — collapse must take THIS one.
         let link_blocks = vec![block(resident, resident_hash)];
 
-        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), LinkGroup::scripts(2));
         assert_eq!(
             link_owned_in(&groups),
             vec![("qm-link:scripts".to_string(), resident.to_string())]
@@ -1165,7 +1303,7 @@ mod tests {
         ];
         let link_blocks = vec![block(STRING_TABLE, table_hash)];
 
-        let groups = collapse(overlays, link_blocks, &link_block_paths(), 2);
+        let groups = collapse(overlays, link_blocks, &link_block_paths(), LinkGroup::scripts(2));
         assert_eq!(
             link_owned_in(&groups),
             vec![("qm-link:scripts".to_string(), STRING_TABLE.to_string())],
@@ -1184,7 +1322,7 @@ mod tests {
             block(r"blocks\VZ\scripts_vz_P000_Q3.block", 0x10),
             block(r"blocks\qm\modloader.block", 0x20),
         ];
-        let groups = collapse(Vec::new(), link_blocks, &link_block_paths(), 1);
+        let groups = collapse(Vec::new(), link_blocks, &link_block_paths(), LinkGroup::scripts(1));
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].blocks.len(), 2);
     }
@@ -1196,9 +1334,153 @@ mod tests {
             ("shipment:b".into(), "B".into(), vec![block(r"blocks\b\x.block", 0x2)]),
             ("shipment:a".into(), "A".into(), vec![block(r"blocks\a\x.block", 0x1)]),
         ];
-        let groups = collapse(overlays, Vec::new(), &link_block_paths(), 2);
+        let groups = collapse(overlays, Vec::new(), &link_block_paths(), LinkGroup::scripts(2));
         let ids: Vec<&str> = groups.iter().map(|g| g.mod_id.as_str()).collect();
         assert_eq!(ids, vec!["shipment:b", "shipment:a"]);
+    }
+
+    fn overlay(id: &str, blocks: Vec<PatchBlock>) -> Overlay {
+        (format!("shipment:{id}"), id.to_string(), blocks)
+    }
+
+    fn paths_of(groups: &[ClaimGroup]) -> Vec<String> {
+        let resolved = crate::models::claim::resolve(groups);
+        assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
+        resolved.blocks.iter().map(|b| b.path_string.clone()).collect()
+    }
+
+    fn groups_holding(groups: &[ClaimGroup], path: &str) -> Vec<String> {
+        groups
+            .iter()
+            .filter(|g| g.blocks.iter().any(|b| b.path_string == path))
+            .map(|g| g.mod_id.clone())
+            .collect()
+    }
+
+    /// Two Shipments patching one language's sound bank, and link's merged copy of that bank: each
+    /// Shipment's copy is dropped as linker-owned, link's group comes last, and link's bank is the
+    /// one in `english-patch.wad`. A language only link patches still gets its target.
+    #[test]
+    fn language_patches_merge_per_language_with_link_last() {
+        let bank = r"blocks\VZ\sound_english_bank.block";
+        let mut language = BTreeMap::new();
+        language.insert(
+            "english".to_string(),
+            vec![
+                overlay("a", vec![block(bank, 0xB0), block(r"blocks\a\vo.block", 0xA1)]),
+                overlay("b", vec![block(bank, 0xB0), block(r"blocks\b\vo.block", 0xB1)]),
+            ],
+        );
+        let mut link_language = BTreeMap::new();
+        link_language.insert("english".to_string(), vec![block(bank, 0xB0)]);
+        link_language.insert("french".to_string(), vec![block(r"blocks\VZ\fr.block", 0xF0)]);
+        let mut paths = link_block_paths();
+        paths.push(bank.to_string());
+
+        let (languages, shell) =
+            collapse_patches(language, link_language, Vec::new(), Vec::new(), &paths, 2);
+        assert!(shell.is_empty());
+        assert_eq!(languages.keys().collect::<Vec<_>>(), vec!["english", "french"]);
+
+        let english = &languages["english"];
+        assert_eq!(
+            english.iter().map(|g| g.mod_id.as_str()).collect::<Vec<_>>(),
+            vec!["shipment:a", "shipment:b", "qm-link:english-patch.wad"],
+            "load order, link last"
+        );
+        assert_eq!(groups_holding(english, bank), vec!["qm-link:english-patch.wad".to_string()]);
+        let mut got = paths_of(english);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                r"blocks\VZ\sound_english_bank.block",
+                r"blocks\a\vo.block",
+                r"blocks\b\vo.block"
+            ]
+        );
+        assert_eq!(languages["french"].len(), 1);
+    }
+
+    /// The same asset patched by two Shipments and by link resolves last-wins: link's copy is the
+    /// one that survives, because link's group is last.
+    #[test]
+    fn link_wins_a_language_patch_asset_by_load_order() {
+        let mut language = BTreeMap::new();
+        language.insert(
+            "english".to_string(),
+            vec![
+                overlay("a", vec![block(r"blocks\a\bank.block", 0xB0)]),
+                overlay("b", vec![block(r"blocks\b\bank.block", 0xB0)]),
+            ],
+        );
+        let mut link_language = BTreeMap::new();
+        link_language.insert("english".to_string(), vec![block(r"blocks\qm\bank.block", 0xB0)]);
+
+        let (languages, _) = collapse_patches(
+            language,
+            link_language,
+            Vec::new(),
+            Vec::new(),
+            &link_block_paths(),
+            2,
+        );
+        assert_eq!(paths_of(&languages["english"]), vec![r"blocks\qm\bank.block"]);
+    }
+
+    /// Shell patches merge the same way into one target: every Shipment's blocks in load order,
+    /// link's last.
+    #[test]
+    fn shell_patches_merge_into_one_target() {
+        let shell = vec![
+            overlay(
+                "a",
+                vec![block(r"blocks\a\menu.block", 0x51), block(r"blocks\a\font.block", 0x52)],
+            ),
+            overlay("b", vec![block(r"blocks\b\hud.block", 0x53)]),
+        ];
+        let link_shell = vec![block(r"blocks\qm\shell_bank.block", 0x54)];
+        let (languages, groups) = collapse_patches(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            shell,
+            link_shell,
+            &link_block_paths(),
+            2,
+        );
+        assert!(languages.is_empty());
+        assert_eq!(
+            groups.iter().map(|g| g.mod_id.as_str()).collect::<Vec<_>>(),
+            vec!["shipment:a", "shipment:b", "qm-link:shell-patch.wad"]
+        );
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(resolved.conflicts.is_empty());
+        assert_eq!(resolved.blocks.len(), 4);
+        validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
+    }
+
+    /// Two Shipments copying game data to one destination resolve like files: the later one wins,
+    /// and the user is told.
+    #[test]
+    fn two_stream_copies_to_one_destination_resolve_last_wins() {
+        let copy = |shipment: &str, from: &str| StreamCopy {
+            from: from.into(),
+            to: "data/Audios/vo_stream.polski.pws".into(),
+            bytes: 1,
+            sha256: "a".into(),
+            shipment: shipment.into(),
+        };
+        let (copies, warnings) = resolve_stream_copy_collisions(vec![
+            copy("A", "data/Audios/vo_stream.english.pws"),
+            copy("B", "data/Audios/vo_stream.french.pws"),
+        ]);
+        assert_eq!(copies, vec![copy("B", "data/Audios/vo_stream.french.pws")]);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("vo_stream.polski.pws") && warnings[0].contains("(B) wins"),
+            "{}",
+            warnings[0]
+        );
     }
 
     fn staged(shipment: &str, relative: &str) -> StagedFile {
@@ -1207,6 +1489,8 @@ mod tests {
             relative: relative.into(),
             sha256: String::new(),
             shipment: shipment.into(),
+            display: None,
+            language: None,
         }
     }
 
@@ -1257,7 +1541,7 @@ mod tests {
             "A".into(),
             vec![block("blocks\\a\\model.block", 0x1111)],
         )];
-        let groups = collapse(overlays, Vec::new(), &link_block_paths(), 1);
+        let groups = collapse(overlays, Vec::new(), &link_block_paths(), LinkGroup::scripts(1));
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].blocks.len(), 1);
     }
