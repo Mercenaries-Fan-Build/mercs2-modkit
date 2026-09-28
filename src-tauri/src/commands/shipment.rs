@@ -1460,7 +1460,7 @@ mod tests {
     }
 
     /// Two Shipments copying game data to one destination resolve like files: the later one wins,
-    /// and the user is told.
+    /// with a warning naming both.
     #[test]
     fn two_stream_copies_to_one_destination_resolve_last_wins() {
         let copy = |shipment: &str, from: &str| StreamCopy {
