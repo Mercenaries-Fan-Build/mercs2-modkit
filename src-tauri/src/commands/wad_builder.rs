@@ -447,8 +447,8 @@ fn stage_placements(
     let mut claim = |relative: &str, by: String| -> Result<(), String> {
         match claimed.insert(relative.to_ascii_lowercase(), by.clone()) {
             Some(other) => Err(format!(
-                "{relative} is placed twice in one build, by {other} and by {by}; one of them \
-                 would silently replace the other."
+                "{relative} is placed twice in one build, by {other} and by {by}. One path holds \
+                 one file: take one of them out of the load order."
             )),
             None => Ok(()),
         }
@@ -750,7 +750,7 @@ mod tests {
     }
 
     /// One destination claimed twice in a build — a Shipment's file and a merged patch, or a file
-    /// and a stream copy — is refused: one would silently replace the other.
+    /// and a stream copy — is refused.
     #[test]
     fn a_destination_claimed_twice_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
