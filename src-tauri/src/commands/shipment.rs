@@ -1320,6 +1320,45 @@ mod tests {
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
     }
 
+    /// A bank the engine loads ships its soundbank, sounddb and wavebank rows (ASET types 21, 13, 6)
+    /// under one hash in one `blocks\VZ\mod_<hash>.block`. Two Shipments overriding cues of it
+    /// each ship their copy; link's copy carries both Shipments' waves. Both per-Shipment copies
+    /// are dropped whole and link's three-row block is kept, once, last — no conflict.
+    #[test]
+    fn collapse_takes_an_engine_loaded_bank_from_link() {
+        let bank_hash = 0x3621_DFE1;
+        let path = r"blocks\VZ\mod_3621dfe1.block";
+        let bank = |payload: &str| {
+            PatchBlock::from_decompressed(
+                payload.as_bytes(),
+                path.to_string(),
+                [21, 13, 6]
+                    .into_iter()
+                    .map(|type_id| AsetEntry::new(bank_hash, 0xFFFF_FFFF, 0x0000_FFFF, type_id))
+                    .collect(),
+                None,
+            )
+            .unwrap()
+        };
+        let overlays = vec![
+            ("shipment:a".into(), "A".into(), vec![block(r"blocks\a\model.block", 0x1111), bank("a")]),
+            ("shipment:b".into(), "B".into(), vec![bank("b")]),
+        ];
+        let mut paths = link_block_paths();
+        paths.push(path.to_string());
+        let groups = collapse(overlays, vec![bank("link")], &paths, LinkGroup::scripts(2));
+        let holding: Vec<(String, usize)> = groups
+            .iter()
+            .flat_map(|g| g.blocks.iter().filter(|b| b.path_string == path).map(|b| (g.mod_id.clone(), b.aset_entries.len())))
+            .collect();
+        assert_eq!(holding, vec![("qm-link:scripts".to_string(), 3)], "only link's three-row block survives");
+        assert_eq!(groups.len(), 2, "B carried only the bank, so it contributes no group");
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
+        validate_blocks(&resolved.blocks).expect("one primary ASET row per hash and type");
+        build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
+    }
+
     /// **All** of the link WAD's blocks are kept, not only the listed ones.
     #[test]
     fn collapse_keeps_every_link_block() {
