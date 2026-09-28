@@ -658,8 +658,8 @@ mod tests {
 
     /// Two Shipments' `english` language patches and link's, merged into one
     /// `data/english-patch.wad`: the assets link patches are link's (last wins), the other
-    /// Shipment's asset survives, and the shell groups become `data/shell-patch.wad`. Both are real
-    /// patch WADs, staged with a digest of their bytes and recorded for deploy.
+    /// Shipment's asset survives, and the shell groups become `data/shell-patch.wad`. Both read back
+    /// as patch WADs, staged with a digest of their bytes and recorded for deploy.
     #[test]
     fn language_and_shell_patches_merge_into_their_wads() {
         let tmp = tempfile::tempdir().unwrap();
