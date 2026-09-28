@@ -4,20 +4,20 @@
 //!
 //! `qm build` and `qm link` emit more than an overlay WAD into their `--out` directory: loose files
 //! for the game folder, new base WADs for `data/`, per-language and front-end patch WADs, and copies
-//! of game data the deploy step makes inside the install. `placement.json` describes all of it. A
-//! Shipment whose output is only partly read builds clean, reports success, and deploys a fraction
-//! of itself, which is indistinguishable from success until the game runs.
+//! of game data the deploy step makes inside the install. `placement.json` describes all of it.
 //!
-//! So the record is read whole, every artifact it names is carried through to deploy, and
-//! everything placed is written down so uninstall can take it back out again.
+//! The record is read whole. Every entry is validated: its `kind` and fields parse, every path is a
+//! safe forward-slashed relative path, every language token is `[a-z0-9_]+`, every artifact it names
+//! is on disk, and each output names at most one overlay, one shell patch and one patch per
+//! language. Every artifact is carried through to deploy, and everything placed is written down so
+//! uninstall can take it back out again.
 //!
 //! # One output shape
 //!
 //! qm writes `placement.json` into every output directory, `qm build` and `qm link` alike, including
 //! an empty `placements` list when a step produced nothing. The record is required: a directory
 //! without one, a record whose `format` is not 2, an unknown destination `kind`, or a missing field
-//! is a hard error. "Could not understand what qm said it produced" never degrades into "produced
-//! nothing".
+//! is a hard error.
 //!
 //! The destinations (`destination.kind`):
 //!
@@ -257,8 +257,7 @@ fn checked_relative<'a>(relative: &'a str, what: &str, shipment: &str) -> Result
 /// The on-disk artifact at `relative` under `dir`, which qm must have written.
 ///
 /// qm writes the file and the record together, so a record naming a file that is not there means
-/// the output directory was tampered with or a write failed, and installing the rest as if it were
-/// complete is the silent partial success this module exists to remove.
+/// the output directory was tampered with or a write failed, and the output is refused.
 fn artifact(dir: &Path, relative: &str, shipment: &str) -> Result<PathBuf, String> {
     let mut path = dir.to_path_buf();
     for part in relative.split('/') {
@@ -464,8 +463,8 @@ mod tests {
         );
     }
 
-    /// qm writes a record into every output directory, so a directory without one is a qm run that
-    /// did not complete, never "nothing produced".
+    /// qm writes a record into every output directory, so a directory without one is refused as an
+    /// incomplete qm run.
     #[test]
     fn a_missing_placement_json_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -482,7 +481,7 @@ mod tests {
         assert!(read_output(dir.path(), "link").unwrap().is_empty());
     }
 
-    /// WAD selection is the record's, never the directory's.
+    /// The overlay is the WAD the record names.
     #[test]
     fn the_record_names_the_overlay() {
         let dir = tempfile::tempdir().unwrap();
@@ -496,7 +495,8 @@ mod tests {
         assert_eq!(out.overlay.unwrap().file_name().unwrap(), "my-shipment.wad");
     }
 
-    /// A files-only Shipment has no overlay, and a stale WAD in the directory is not one.
+    /// A files-only Shipment has no overlay: the overlay is the WAD the record names, and this record
+    /// names none.
     #[test]
     fn a_record_with_no_overlay_yields_no_wad() {
         let dir = tempfile::tempdir().unwrap();
@@ -679,7 +679,7 @@ mod tests {
         }
     }
 
-    /// An unknown destination kind is a parse error, never a skipped entry.
+    /// An unknown destination kind is a parse error.
     #[test]
     fn an_unknown_kind_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -710,8 +710,7 @@ mod tests {
         }
     }
 
-    /// A record naming a file qm did not write is a refusal — installing the rest would be a
-    /// partial success reported as a whole one.
+    /// A record naming a file qm did not write is refused.
     #[test]
     fn a_record_naming_a_missing_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
