@@ -619,6 +619,7 @@ mod tests {
                 added: vec!["c".into()],
                 affected_assets: 5,
             }],
+            modkit_deployed: vec![],
             manifest_source: "bundled".into(),
         }
     }
@@ -632,6 +633,7 @@ mod tests {
             ignored: 10,
             exes: vec![],
             wad_details: vec![],
+            modkit_deployed: vec![],
             manifest_source: "bundled".into(),
         }
     }
