@@ -32,6 +32,7 @@
 
 pub mod asset_catalog;
 pub mod conflict_resolver;
+pub mod data_files;
 pub mod debug_bundle;
 pub mod dependencies;
 pub mod deploy;
