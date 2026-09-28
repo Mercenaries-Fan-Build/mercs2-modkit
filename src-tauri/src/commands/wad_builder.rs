@@ -26,7 +26,7 @@ use tauri::Window;
 
 use crate::commands::incompatibility::IncompatibilityCheck;
 use crate::commands::mercsink;
-use crate::commands::placement::StagedFile;
+use crate::commands::placement::{self, StagedBuild, StagedFile, StreamCopy};
 use crate::commands::prebuilt::{self, PrebuiltWad};
 use crate::commands::shipment::{self, ShipmentRef};
 use crate::commands::texture_swap::{self, TextureSwap};
@@ -94,8 +94,13 @@ pub struct BuildResult {
     ///
     /// Surfaced in the result so the user can see what a Shipment will drop into their game
     /// install before they install it. An `.asi` is unrestricted native code in the game process.
+    ///
+    /// The merged `data/<language>-patch.wad` and `data/shell-patch.wad` are among them.
     #[serde(default)]
     pub placed_files: Vec<StagedFile>,
+    /// Copies of game data the deploy step makes inside the game folder (`stream_copy`
+    /// placements), each verified against the digest qm recorded before it is made.
+    pub stream_copies: Vec<StreamCopy>,
     /// What mercs.ink's community incompatibility list said about the Shipments: which list was
     /// used (current, a cached copy and its age, or none ever downloaded) and the unconfirmed
     /// reports that apply. A confirmed report refuses the build, so it never appears here.
@@ -245,6 +250,8 @@ pub async fn assemble_patch_wad(
 
     let mut groups = all_groups(&options, !route_wardrobe_through_qm)?;
     let mut placed_files: Vec<StagedFile> = Vec::new();
+    let mut merged: Vec<MergedWad> = Vec::new();
+    let mut stream_copies: Vec<StreamCopy> = Vec::new();
     let mut incompatibilities: Option<IncompatibilityCheck> = None;
 
     if !options.shipments.is_empty() {
@@ -264,6 +271,8 @@ pub async fn assemble_patch_wad(
         groups.extend(built.groups);
         warnings.extend(built.warnings);
         placed_files = built.files;
+        merged = merge_patches(&built.language_patches, &built.shell_patch)?;
+        stream_copies = built.stream_copies;
         incompatibilities = Some(IncompatibilityCheck { list: list.state, notices: built.notices });
     }
 
@@ -280,7 +289,11 @@ pub async fn assemble_patch_wad(
     // A Shipment whose only contributions are `native_hook` / `place_file` produces no WAD content
     // at all, and it is still a build with something to install — so "nothing to build" is about the
     // union of both outputs, not the blocks alone.
-    if resolved.blocks.is_empty() && placed_files.is_empty() {
+    if resolved.blocks.is_empty()
+        && placed_files.is_empty()
+        && merged.is_empty()
+        && stream_copies.is_empty()
+    {
         return Err("No assets to build (no mods loaded).".to_string());
     }
 
@@ -294,7 +307,7 @@ pub async fn assemble_patch_wad(
     // The loose files, copied out of qm's scratch dirs into the build output so the build is a
     // self-contained artifact: `work_dir` wipes qm's output on the NEXT assemble, and deploy happens
     // whenever the user clicks. Staging here also means one record describes the whole build.
-    let placed_files = stage_placements(&out_dir, placed_files)?;
+    let staged = stage_placements(&out_dir, placed_files, merged, stream_copies)?;
 
     // A native-code-only Shipment resolves to no blocks at all, and `build_patch_wad_multi` would
     // have nothing to serialize. That is a real build with something to install, so it emits no
@@ -325,38 +338,145 @@ pub async fn assemble_patch_wad(
         },
         outcomes: resolved.outcomes,
         warnings,
-        placed_files,
+        placed_files: staged.files,
+        stream_copies: staged.stream_copies,
         incompatibilities,
     })
 }
 
-/// Copy the Shipments' loose files into `<out_dir>/files/<relative>` and write modkit's own
-/// `placement.json` beside them, returning the staged files re-pointed at their new sources.
+/// A patch WAD merged from every Shipment's patch for one engine-mounted target.
+#[derive(Debug)]
+struct MergedWad {
+    /// Destination under the game folder: `data/<language>-patch.wad` or `data/shell-patch.wad`.
+    relative: String,
+    /// The language token, for a language patch.
+    language: Option<String>,
+    /// The Shipments whose groups the WAD carries blocks from, in load order.
+    shipments: String,
+    bytes: Vec<u8>,
+}
+
+/// Resolve and serialize one target's claim groups, exactly as `vz-patch.wad` is: `claim::resolve`
+/// (last in load order wins, an atomic partial overlap refuses the build) and
+/// `build_patch_wad_multi`. `None` when the target has no groups.
+fn merge_target(groups: &[ClaimGroup], target: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let resolved = claim::resolve(groups);
+    if !resolved.conflicts.is_empty() {
+        return Err(format!(
+            "{target} cannot be merged:\n\n{}",
+            resolved
+                .conflicts
+                .iter()
+                .map(|c| c.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ));
+    }
+    let bytes = build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)
+        .map_err(|e| format!("building {target}: {e}"))?;
+    let mut shipments: Vec<&str> = Vec::new();
+    for group in groups {
+        if !shipments.contains(&group.mod_name.as_str()) {
+            shipments.push(&group.mod_name);
+        }
+    }
+    Ok(Some((bytes, shipments.join(", "))))
+}
+
+/// Merge every language's patch groups into `data/<language>-patch.wad` and the shell patch groups
+/// into `data/shell-patch.wad`.
+fn merge_patches(
+    language_patches: &std::collections::BTreeMap<String, Vec<ClaimGroup>>,
+    shell_patch: &[ClaimGroup],
+) -> Result<Vec<MergedWad>, String> {
+    let mut merged = Vec::new();
+    for (language, groups) in language_patches {
+        let relative = format!("data/{language}-patch.wad");
+        if let Some((bytes, shipments)) = merge_target(groups, &relative)? {
+            merged.push(MergedWad {
+                relative,
+                language: Some(language.clone()),
+                shipments,
+                bytes,
+            });
+        }
+    }
+    let relative = "data/shell-patch.wad".to_string();
+    if let Some((bytes, shipments)) = merge_target(shell_patch, &relative)? {
+        merged.push(MergedWad {
+            relative,
+            language: None,
+            shipments,
+            bytes,
+        });
+    }
+    Ok(merged)
+}
+
+/// Copy the Shipments' loose files into `<out_dir>/files/<relative>`, write the merged language and
+/// shell patch WADs into the same tree, and write modkit's own `placement.json` beside them —
+/// returning the staged build with every source re-pointed into the build directory.
 ///
 /// The tree mirrors the game folder, exactly as qm's own output does, so the destination is legible
 /// from the staged path and a human can look at the build directory and see what will land where.
 /// The record is what `deploy_patch_wad` reads — build and deploy are separate steps by design, and
 /// a file with no record is a file nothing can install or take back out.
-fn stage_placements(out_dir: &Path, files: Vec<StagedFile>) -> Result<Vec<StagedFile>, String> {
+///
+/// Every destination is claimed once: a merged WAD or a stream copy landing on a path something
+/// else is staged at is refused, compared case-insensitively because the game's filesystem is.
+fn stage_placements(
+    out_dir: &Path,
+    files: Vec<StagedFile>,
+    merged: Vec<MergedWad>,
+    stream_copies: Vec<StreamCopy>,
+) -> Result<StagedBuild, String> {
     let stage_root = out_dir.join("files");
     // Clear first, so a file dropped from the load order since the last build cannot linger and get
     // re-installed as though it were still staged.
     let _ = std::fs::remove_dir_all(&stage_root);
-    let record_path = out_dir.join(crate::commands::placement::PLACEMENT_FILE);
+    let record_path = out_dir.join(placement::PLACEMENT_FILE);
     let _ = std::fs::remove_file(&record_path);
-    if files.is_empty() {
-        return Ok(Vec::new());
+    if files.is_empty() && merged.is_empty() && stream_copies.is_empty() {
+        return Ok(StagedBuild::default());
     }
+
+    let mut claimed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut claim = |relative: &str, by: String| -> Result<(), String> {
+        match claimed.insert(relative.to_ascii_lowercase(), by.clone()) {
+            Some(other) => Err(format!(
+                "{relative} is placed twice in one build, by {other} and by {by}; one of them \
+                 would silently replace the other."
+            )),
+            None => Ok(()),
+        }
+    };
+    for file in &files {
+        claim(&file.relative, format!("“{}”", file.shipment))?;
+    }
+    for wad in &merged {
+        claim(&wad.relative, format!("the merged patch of “{}”", wad.shipments))?;
+    }
+    for copy in &stream_copies {
+        claim(&copy.to, format!("“{}”'s copy of {}", copy.shipment, copy.from))?;
+    }
+
     std::fs::create_dir_all(&stage_root)
         .map_err(|e| format!("Failed to create {}: {e}", stage_root.display()))?;
+    let make_parent = |dest: &Path| -> Result<(), String> {
+        match dest.parent() {
+            Some(parent) => std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {e}", parent.display())),
+            None => Ok(()),
+        }
+    };
 
-    let mut staged = Vec::with_capacity(files.len());
+    let mut staged = Vec::with_capacity(files.len() + merged.len());
     for file in files {
         let dest = stage_root.join(&file.relative);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-        }
+        make_parent(&dest)?;
         std::fs::copy(&file.source, &dest)
             .map_err(|e| format!("Failed to stage {}: {e}", file.relative))?;
         staged.push(StagedFile {
@@ -364,15 +484,28 @@ fn stage_placements(out_dir: &Path, files: Vec<StagedFile>) -> Result<Vec<Staged
             ..file
         });
     }
+    for wad in merged {
+        let dest = stage_root.join(&wad.relative);
+        make_parent(&dest)?;
+        std::fs::write(&dest, &wad.bytes)
+            .map_err(|e| format!("Failed to write {}: {e}", dest.display()))?;
+        staged.push(StagedFile {
+            source: dest.to_string_lossy().to_string(),
+            sha256: loadprobe::sha256::sha256_hex(&wad.bytes),
+            relative: wad.relative,
+            shipment: wad.shipments,
+            display: None,
+            language: wad.language,
+        });
+    }
 
-    let record = serde_json::to_string_pretty(&serde_json::json!({
-        "format": 1,
-        "files": &staged,
-    }))
-    .map_err(|e| format!("Failed to describe the staged files: {e}"))?;
-    std::fs::write(&record_path, record)
+    let build = StagedBuild {
+        files: staged,
+        stream_copies,
+    };
+    std::fs::write(&record_path, placement::staged_record_json(&build)?)
         .map_err(|e| format!("Failed to write {}: {e}", record_path.display()))?;
-    Ok(staged)
+    Ok(build)
 }
 
 /// Dry-run the load order: report what would apply, what would be overridden, and any
@@ -418,6 +551,7 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
         warnings: Vec::new(),
         // Same: the placements come out of a qm build, which preview deliberately does not run.
         placed_files: Vec::new(),
+        stream_copies: Vec::new(),
         // The list is consulted only by a build with Shipments, and preview builds none.
         incompatibilities: None,
     })
@@ -426,7 +560,6 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::placement;
 
     /// Write the output directory a `qm build` of a `native_hook` Shipment leaves behind: the
     /// plugin under the tree it will be copied into, and the record describing it.
@@ -453,7 +586,7 @@ mod tests {
                 "destination": { "kind": "game_folder", "relative": relative },
             }));
         }
-        let record = serde_json::json!({ "format": 1, "placements": entries });
+        let record = serde_json::json!({ "format": 2, "placements": entries });
         std::fs::write(
             dir.join(placement::PLACEMENT_FILE),
             serde_json::to_string_pretty(&record).unwrap(),
@@ -478,27 +611,205 @@ mod tests {
         );
         std::fs::create_dir_all(&build).unwrap();
 
-        let (wad, files) = placement::read_output(&qm_out, "Hooky").unwrap();
-        assert_eq!(wad.unwrap().file_name().unwrap(), "my-shipment.wad");
-        assert_eq!(files.len(), 2);
+        let output = placement::read_output(&qm_out, "Hooky").unwrap();
+        assert_eq!(output.overlay.unwrap().file_name().unwrap(), "my-shipment.wad");
+        assert_eq!(output.files.len(), 2);
 
-        let staged = stage_placements(&build, files).unwrap();
+        let staged = stage_placements(&build, output.files, Vec::new(), Vec::new()).unwrap();
         // The staged tree mirrors the game folder, so the destination is legible from the path.
         assert!(build.join("files/scripts/hook.asi").is_file());
         assert!(build.join("files/scripts/OnBoot/init.lua").is_file());
-        for f in &staged {
+        for f in &staged.files {
             assert!(Path::new(&f.source).starts_with(&build));
             assert_eq!(f.shipment, "Hooky");
         }
 
         // And the record deploy reads describes exactly what was staged.
         let read_back = placement::read_staged(&build).unwrap();
-        assert_eq!(read_back.len(), 2);
+        assert_eq!(read_back.files.len(), 2);
         assert_eq!(
-            read_back.iter().map(|f| f.relative.clone()).collect::<Vec<_>>(),
+            read_back.files.iter().map(|f| f.relative.clone()).collect::<Vec<_>>(),
             vec!["scripts/hook.asi", "scripts/OnBoot/init.lua"]
         );
-        assert_eq!(read_back[0].sha256, loadprobe::sha256::sha256_hex(b"MZ plugin"));
+        assert_eq!(read_back.files[0].sha256, loadprobe::sha256::sha256_hex(b"MZ plugin"));
+    }
+
+    use mercs2_formats::patch_wad::{read_patch_wad, PatchBlock};
+
+    fn block(path: &str, hash: u32, payload: &str) -> PatchBlock {
+        PatchBlock::from_decompressed(
+            payload.as_bytes(),
+            path.to_string(),
+            vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, 19)],
+            None,
+        )
+        .unwrap()
+    }
+
+    fn group(mod_id: &str, name: &str, blocks: Vec<PatchBlock>) -> ClaimGroup {
+        ClaimGroup {
+            mod_id: mod_id.into(),
+            mod_name: name.into(),
+            label: name.into(),
+            atomic: true,
+            blocks,
+        }
+    }
+
+    /// Two Shipments' `english` language patches and link's, merged into one
+    /// `data/english-patch.wad`: the assets link patches are link's (last wins), the other
+    /// Shipment's asset survives, and the shell groups become `data/shell-patch.wad`. Both are real
+    /// patch WADs, staged with a digest of their bytes and recorded for deploy.
+    #[test]
+    fn language_and_shell_patches_merge_into_their_wads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+
+        let mut languages = std::collections::BTreeMap::new();
+        languages.insert(
+            "english".to_string(),
+            vec![
+                group(
+                    "shipment:a",
+                    "A",
+                    vec![
+                        block(r"blocks\a\bank.block", 0xB0, "a bank"),
+                        block(r"blocks\a\vo.block", 0xA1, "a vo"),
+                    ],
+                ),
+                group("shipment:b", "B", vec![block(r"blocks\b\vo.block", 0xB1, "b vo")]),
+                group(
+                    "qm-link:english-patch.wad",
+                    "Quartermaster link",
+                    vec![
+                        block(r"blocks\qm\bank.block", 0xB0, "merged bank"),
+                        block(r"blocks\qm\vo.block", 0xA1, "merged vo"),
+                    ],
+                ),
+            ],
+        );
+        let shell = vec![
+            group("shipment:a", "A", vec![block(r"blocks\a\menu.block", 0x51, "a menu")]),
+            group("shipment:b", "B", vec![block(r"blocks\b\menu.block", 0x51, "b menu")]),
+        ];
+
+        // A's group is fully overridden by link's (both of its assets), so it resolves cleanly.
+        let merged = merge_patches(&languages, &shell).unwrap();
+        assert_eq!(
+            merged.iter().map(|m| m.relative.as_str()).collect::<Vec<_>>(),
+            vec!["data/english-patch.wad", "data/shell-patch.wad"]
+        );
+        assert_eq!(merged[0].language.as_deref(), Some("english"));
+        assert_eq!(merged[0].shipments, "A, B, Quartermaster link");
+        assert_eq!(merged[1].language, None);
+
+        let english = read_patch_wad(&merged[0].bytes).unwrap();
+        let mut paths: Vec<String> = english.blocks.iter().map(|b| b.path_string.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![r"blocks\b\vo.block", r"blocks\qm\bank.block", r"blocks\qm\vo.block"]
+        );
+        let shell_wad = read_patch_wad(&merged[1].bytes).unwrap();
+        assert_eq!(
+            shell_wad.blocks.iter().map(|b| b.path_string.as_str()).collect::<Vec<_>>(),
+            vec![r"blocks\b\menu.block"],
+            "the later Shipment wins the shared shell asset"
+        );
+
+        let english_sha = loadprobe::sha256::sha256_hex(&merged[0].bytes);
+        let staged = stage_placements(&build, Vec::new(), merged, Vec::new()).unwrap();
+        assert!(build.join("files/data/english-patch.wad").is_file());
+        assert!(build.join("files/data/shell-patch.wad").is_file());
+        let back = placement::read_staged(&build).unwrap();
+        assert_eq!(back.files.len(), 2);
+        assert_eq!(back.files[0].relative, "data/english-patch.wad");
+        assert_eq!(back.files[0].language.as_deref(), Some("english"));
+        assert_eq!(back.files[0].sha256, english_sha);
+        assert_eq!(staged.files[0].sha256, english_sha);
+    }
+
+    /// A merged patch that cannot be resolved refuses the build, naming the target.
+    #[test]
+    fn a_language_patch_partial_overlap_refuses_the_build() {
+        let mut languages = std::collections::BTreeMap::new();
+        languages.insert(
+            "french".to_string(),
+            vec![
+                group(
+                    "shipment:a",
+                    "A",
+                    vec![block(r"blocks\a\x.block", 0x1, "x"), block(r"blocks\a\y.block", 0x2, "y")],
+                ),
+                group("shipment:b", "B", vec![block(r"blocks\b\x.block", 0x1, "x2")]),
+            ],
+        );
+        let err = merge_patches(&languages, &[]).unwrap_err();
+        assert!(err.contains("data/french-patch.wad cannot be merged"), "got: {err}");
+    }
+
+    /// One destination claimed twice in a build — a Shipment's file and a merged patch, or a file
+    /// and a stream copy — is refused: one would silently replace the other.
+    #[test]
+    fn a_destination_claimed_twice_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let src = tmp.path().join("x.wad");
+        std::fs::write(&src, "x").unwrap();
+        let file = |relative: &str, display: Option<&str>| StagedFile {
+            source: src.to_string_lossy().to_string(),
+            relative: relative.into(),
+            sha256: String::new(),
+            shipment: "Sneaky".into(),
+            display: display.map(str::to_string),
+            language: None,
+        };
+        let wad = MergedWad {
+            relative: "data/english-patch.wad".into(),
+            language: Some("english".into()),
+            shipments: "A".into(),
+            bytes: b"wad".to_vec(),
+        };
+        let err = stage_placements(&build, vec![file("data/English-patch.wad", None)], vec![wad], Vec::new())
+            .unwrap_err();
+        assert!(err.contains("placed twice"), "got: {err}");
+
+        let copy = StreamCopy {
+            from: "data/Audios/vo_stream.english.pws".into(),
+            to: "data/polski.wad".into(),
+            bytes: 1,
+            sha256: "a".into(),
+            shipment: "Lang".into(),
+        };
+        let err = stage_placements(
+            &build,
+            vec![file("data/polski.wad", Some("Polski"))],
+            Vec::new(),
+            vec![copy],
+        )
+        .unwrap_err();
+        assert!(err.contains("placed twice"), "got: {err}");
+    }
+
+    /// Stream copies travel through the staged record untouched: no bytes are staged for them.
+    #[test]
+    fn stream_copies_are_recorded_for_deploy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let copy = StreamCopy {
+            from: "data/Audios/vo_stream.english.pws".into(),
+            to: "data/Audios/vo_stream.polski.pws".into(),
+            bytes: 4,
+            sha256: "ab".repeat(32),
+            shipment: "Lang".into(),
+        };
+        stage_placements(&build, Vec::new(), Vec::new(), vec![copy.clone()]).unwrap();
+        let back = placement::read_staged(&build).unwrap();
+        assert!(back.files.is_empty());
+        assert_eq!(back.stream_copies, vec![copy]);
     }
 
     /// A rebuild that no longer places a file must not leave it staged: deploy reads the record,
@@ -510,11 +821,11 @@ mod tests {
         std::fs::create_dir_all(&build).unwrap();
 
         qm_output(&qm_out, None, &[("scripts/gone.asi", "old")]);
-        let (_, files) = placement::read_output(&qm_out, "S").unwrap();
-        stage_placements(&build, files).unwrap();
+        let output = placement::read_output(&qm_out, "S").unwrap();
+        stage_placements(&build, output.files, Vec::new(), Vec::new()).unwrap();
         assert!(build.join("files/scripts/gone.asi").is_file());
 
-        stage_placements(&build, Vec::new()).unwrap();
+        stage_placements(&build, Vec::new(), Vec::new(), Vec::new()).unwrap();
         assert!(!build.join("files/scripts/gone.asi").exists());
         assert!(placement::read_staged(&build).unwrap().is_empty());
     }
