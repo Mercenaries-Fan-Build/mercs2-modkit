@@ -168,6 +168,10 @@ pub struct RuntimeDllEntry {
     pub source: String,
     pub relative: String,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touches: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub signature_guard: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
