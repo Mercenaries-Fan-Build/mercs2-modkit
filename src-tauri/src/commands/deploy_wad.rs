@@ -91,6 +91,11 @@ pub struct PlacementOutcome {
     pub skipped: Vec<String>,
     /// Pre-existing, unmanaged files displaced to `<name>.bak` to make room.
     pub backed_up: Vec<String>,
+    /// One entry per plugin `signature_guard` byte that did not match the on-disk exe at install
+    /// time. A warning, not a refusal — the install still proceeds — but surfaced so the user
+    /// knows before launch that a plugin was built against a different exe than the one on disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guard_warnings: Vec<super::signature_guard::GuardWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -374,6 +379,27 @@ fn install_placements(
     Ok(outcome)
 }
 
+/// Read the build's `load-plan.json` if present and verify every plugin's `signature_guard`
+/// against the exe(s) sitting in the game folder. Returns an empty vec when there is nothing to
+/// check (no staging_dir, no game_root, no load-plan, no guarded plugins) — this is a warning
+/// channel, not a gate, so absence of guards is silent.
+fn collect_guard_warnings(
+    staging_dir: Option<&str>,
+    game_root: Option<&Path>,
+) -> Result<Vec<super::signature_guard::GuardWarning>, String> {
+    let Some(dir) = staging_dir.filter(|d| !d.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let Some(root) = game_root else {
+        return Ok(Vec::new());
+    };
+    let plugins = match super::signature_guard::read_plugins_from_staging(Path::new(dir))? {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    Ok(super::signature_guard::verify_plugin_guards(root, &plugins))
+}
+
 /// Remove every loose file the ledger records, and empty it.
 fn uninstall_placements(store: &PlacementStore) -> Result<PlacementOutcome, String> {
     let mut outcome = PlacementOutcome::default();
@@ -446,14 +472,20 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
         }
     }
 
+    // Verify plugin signature_guards against the exe(s) on disk before touching the game folder.
+    // A mismatch is a warning attached to the install result, not a refusal — see the module doc
+    // on why. Empty when nothing to check or the load-plan carries no guarded plugins.
+    let guard_warnings = collect_guard_warnings(args.staging_dir.as_deref(), game_root.as_deref())?;
+
     // No WAD is a legitimate build outcome now, so an empty path installs the files and leaves the
     // installed patch WAD alone rather than erroring.
     let src = PathBuf::from(&args.wad_path);
     if args.wad_path.trim().is_empty() {
-        let files = match &game_root {
+        let mut files = match &game_root {
             Some(root) => install_placements(&PlacementStore::app()?, &staged, root, asi_target)?,
             None => PlacementOutcome::default(),
         };
+        files.guard_warnings = guard_warnings;
         return Ok(DeployWadResult {
             installed_at: String::new(),
             sha256: String::new(),
@@ -521,10 +553,11 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
     // record at all, and the freshness check reads that as "no deploy" and declines to attach a
     // convoy — refusing to report is the safe direction, where a record describing a half-done
     // deploy would be confidently wrong.
-    let files = match &game_root {
+    let mut files = match &game_root {
         Some(root) => install_placements(&PlacementStore::app()?, &staged, root, asi_target)?,
         None => PlacementOutcome::default(),
     };
+    files.guard_warnings = guard_warnings;
     write_ledger(&DeployedWadRecord {
         installed_at: installed_at.clone(),
         sha256: got.clone(),
