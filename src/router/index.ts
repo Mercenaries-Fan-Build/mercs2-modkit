@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from "vue-router";
 import ProjectView from "../views/ProjectView.vue";
+import { useProjectStore } from "../stores/project";
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -75,4 +76,9 @@ export const router = createRouter({
       component: () => import("../views/ToolsView.vue"),
     },
   ],
+});
+
+// An error banner reflects the last action; a navigation is the user moving on.
+router.afterEach(() => {
+  useProjectStore().error = null;
 });

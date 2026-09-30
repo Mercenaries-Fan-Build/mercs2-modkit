@@ -3,10 +3,11 @@ import { ref, computed, watch, onMounted } from "vue";
 import { storeToRefs } from "pinia";
 import { useProjectStore } from "../stores/project";
 import Spinner from "../components/Spinner.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 import type { TextureEntry, TexturePreview } from "../types";
 
 const store = useProjectStore();
-const { gameInfo, textures, textureCatalog, error } = storeToRefs(store);
+const { gameInfo, textures, textureCatalog } = storeToRefs(store);
 
 const search = ref("");
 const kind = ref<"all" | "diffuse" | "normal" | "specular">("all");
@@ -302,12 +303,7 @@ function fileName(p: string): string {
         </button>
       </section>
 
-      <div
-        v-if="error"
-        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-      >
-        {{ error }}
-      </div>
+      <ErrorBanner />
     </template>
   </div>
 </template>

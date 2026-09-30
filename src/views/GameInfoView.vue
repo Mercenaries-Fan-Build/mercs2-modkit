@@ -7,12 +7,12 @@ import { useProjectStore } from "../stores/project";
 import type { PmcBbChoice, PmcBbVariant } from "../types";
 import CrackPanel from "../components/CrackPanel.vue";
 import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
 const {
   gameInfo,
   busy,
-  error,
   pmcBbVersion,
   pmcBbAsset,
   pmcBbModified,
@@ -212,12 +212,7 @@ async function normalizeRegion() {
     </div>
 
     <template v-else>
-      <div
-        v-if="error"
-        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-      >
-        {{ error }}
-      </div>
+      <ErrorBanner />
 
       <!-- Readiness banner -->
       <div

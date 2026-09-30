@@ -127,26 +127,37 @@ pub struct PlanItem {
     #[serde(deserialize_with = "nullable")]
     pub quartermaster_range: Option<String>,
     pub provides: Vec<String>,
-    pub plugins: Vec<FileEntry>,
-    pub runtime_dlls: Vec<FileEntry>,
+    pub plugins: Vec<PluginEntry>,
+    pub runtime_dlls: Vec<RuntimeDllEntry>,
     pub placed_files: Vec<PlacedFileEntry>,
 }
 
-/// A `plugins[]` or `runtime_dlls[]` entry. The two share their keys.
-///
-/// `touches` and `signature_guard` follow qm's own `skip_serializing_if`: absent when empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileEntry {
+pub struct PluginEntry {
     pub contribution: usize,
     pub file_name: String,
     pub source: String,
     pub relative: String,
     pub sha256: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub touches: Vec<String>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub signature_guard: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub signature_guard: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDllEntry {
+    pub contribution: usize,
+    pub file_name: String,
+    pub source: String,
+    pub relative: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub touches: Vec<String>,
+    #[serde(default)]
+    pub signature_guard: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,6 +720,42 @@ pub(crate) mod tests {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["requirements"][0]["status"] = serde_json::json!("probably_fine");
         assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+    }
+
+    #[test]
+    fn a_plugin_entry_with_touches_and_signature_guard_parses() {
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["items"][1]["plugins"][0]["touches"] = serde_json::json!(["0x004B1180", "0x0063DA1F"]);
+        v["items"][1]["plugins"][0]["signature_guard"] = serde_json::json!({
+            "0x004B1180": "8B 44 24 04 85 C0",
+        });
+        let plan =
+            LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
+        let plugin = &plan.items[1].plugins[0];
+        assert_eq!(plugin.touches, vec!["0x004B1180", "0x0063DA1F"]);
+        assert_eq!(plugin.signature_guard.get("0x004B1180").map(String::as_str),
+                   Some("8B 44 24 04 85 C0"));
+
+        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        assert!(plan.items[1].plugins[0].touches.is_empty());
+        assert!(plan.items[1].plugins[0].signature_guard.is_empty());
+    }
+
+    #[test]
+    fn a_runtime_dll_entry_with_touches_and_signature_guard_parses() {
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["items"][1]["runtime_dlls"] = serde_json::json!([{
+            "contribution": 2, "file_name": "x.dll", "source": "x.dll",
+            "relative": "x.dll", "sha256": "00",
+            "touches": ["0x004B1180"],
+            "signature_guard": { "0x004B1180": "8B 44 24 04" },
+        }]);
+        let plan =
+            LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
+        let dll = &plan.items[1].runtime_dlls[0];
+        assert_eq!(dll.touches, vec!["0x004B1180"]);
+        assert_eq!(dll.signature_guard.get("0x004B1180").map(String::as_str),
+                   Some("8B 44 24 04"));
     }
 
     /// The field was renamed; a plan still carrying the old name is refused, not read.
