@@ -133,6 +133,8 @@ pub struct PlanItem {
 }
 
 /// A `plugins[]` or `runtime_dlls[]` entry. The two share their keys.
+///
+/// `touches` and `signature_guard` follow qm's own `skip_serializing_if`: absent when empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileEntry {
@@ -141,6 +143,10 @@ pub struct FileEntry {
     pub source: String,
     pub relative: String,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touches: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub signature_guard: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
