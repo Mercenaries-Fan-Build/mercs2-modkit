@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::load_plan::FileEntry;
+use super::load_plan::PluginEntry;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GuardWarning {
@@ -40,8 +40,8 @@ fn discover_exes(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-pub fn verify_plugin_guards(game_root: &Path, plugins: &[FileEntry]) -> Vec<GuardWarning> {
-    let guarded: Vec<&FileEntry> = plugins.iter().filter(|p| !p.signature_guard.is_empty()).collect();
+pub fn verify_plugin_guards(game_root: &Path, plugins: &[PluginEntry]) -> Vec<GuardWarning> {
+    let guarded: Vec<&PluginEntry> = plugins.iter().filter(|p| !p.signature_guard.is_empty()).collect();
     if guarded.is_empty() {
         return Vec::new();
     }
@@ -217,7 +217,7 @@ fn format_hex_bytes(b: &[u8]) -> String {
         .join(" ")
 }
 
-pub fn read_plugins_from_staging(dir: &Path) -> Result<Option<Vec<FileEntry>>, String> {
+pub fn read_plugins_from_staging(dir: &Path) -> Result<Option<Vec<PluginEntry>>, String> {
     let path = dir.join(super::load_plan::PLAN_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -227,7 +227,7 @@ pub fn read_plugins_from_staging(dir: &Path) -> Result<Option<Vec<FileEntry>>, S
     #[derive(serde::Deserialize)]
     struct JustPlugins {
         #[serde(default)]
-        plugins: Vec<FileEntry>,
+        plugins: Vec<PluginEntry>,
     }
     let parsed: JustPlugins = serde_json::from_str(&text)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn verify_plugin_guards_returns_empty_when_nothing_guarded() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = vec![FileEntry {
+        let plugins = vec![PluginEntry {
             contribution: 0,
             file_name: "p.asi".into(),
             source: "p.asi".into(),
@@ -354,7 +354,7 @@ mod tests {
         let mut guards = BTreeMap::new();
         guards.insert("0x00401000".into(), "EB FE".into());
         guards.insert("0x00401001".into(), "AA BB".into());
-        let plugins = vec![FileEntry {
+        let plugins = vec![PluginEntry {
             contribution: 0,
             file_name: "p.asi".into(),
             source: "p.asi".into(),
