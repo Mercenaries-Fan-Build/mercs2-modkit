@@ -134,11 +134,7 @@ pub struct PlanItem {
 
 /// A `plugins[]` or `runtime_dlls[]` entry. The two share their keys.
 ///
-/// `touches` and `signature_guard` are the two exceptions to this module's "no serde defaults"
-/// invariant: qm emits them with `skip_serializing_if` when they are empty, so a plan whose
-/// plugins declare no exe hooks omits them entirely rather than writing `[]` / `{}`. Reading
-/// them with a default keeps modkit compatible with older qm builds and with plans whose
-/// plugins never touch the exe (a `native_hook` that only exposes new script bindings).
+/// `touches` and `signature_guard` follow qm's own `skip_serializing_if`: absent when empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileEntry {
