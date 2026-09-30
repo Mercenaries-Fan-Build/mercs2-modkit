@@ -14,9 +14,10 @@ import type {
 } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
 import Spinner from "../components/Spinner.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
-const { busy, error, gameInfo } = storeToRefs(store);
+const { busy, gameInfo } = storeToRefs(store);
 
 const logPath = ref<string | null>(null);
 const report = ref<LogReport | null>(null);
@@ -571,12 +572,7 @@ function verdictTone(kind: string): string {
     </div>
 
     <ProgressBar v-if="busy" indeterminate label="Analyzing…" class="mt-4" />
-    <div
-      v-if="error"
-      class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-    >
-      {{ error }}
-    </div>
+    <ErrorBanner />
 
     <template v-if="report">
       <!-- Verdict + progress -->

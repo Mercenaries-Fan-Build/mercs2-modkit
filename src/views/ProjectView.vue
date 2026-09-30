@@ -16,6 +16,7 @@ import type {
 import ConflictBadge from "../components/ConflictBadge.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import ProgressBar from "../components/ProgressBar.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
 const {
@@ -26,7 +27,6 @@ const {
   wardrobe,
   textures,
   busy,
-  error,
   conflictCount,
   gameInfo,
 } = storeToRefs(store);
@@ -203,12 +203,7 @@ const nothingHere = computed(
 
     <ProgressBar v-if="busy" indeterminate class="mt-4" />
 
-    <div
-      v-if="error"
-      class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-    >
-      {{ error }}
-    </div>
+    <ErrorBanner />
 
     <!-- ═══════════════ LANE 1 — into the patch WAD (the load order) ═══════════════ -->
     <section v-if="wadLaneCount || wardrobe.length || textures.length" class="mt-7">

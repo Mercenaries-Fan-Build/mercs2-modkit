@@ -6,9 +6,10 @@ import type { DxwrapperResult } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
 import CrackPanel from "../components/CrackPanel.vue";
 import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
-const { gameInfo, busy, error, componentUpdates, pmcBbVersion, license } = storeToRefs(store);
+const { gameInfo, busy, componentUpdates, pmcBbVersion, license } = storeToRefs(store);
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
 
@@ -119,12 +120,7 @@ async function runDxwrapper() {
       </div>
 
       <ProgressBar v-if="busy" indeterminate :label="stage" class="mt-4" />
-      <div
-        v-if="error"
-        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-      >
-        {{ error }}
-      </div>
+      <ErrorBanner />
 
       <!-- ============================ READY PANEL ============================ -->
       <div

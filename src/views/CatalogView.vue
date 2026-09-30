@@ -5,13 +5,13 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
 import type { CatalogMod, RegistryMod } from "../types";
 import ProgressBar from "../components/ProgressBar.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
 const {
   catalog,
   catalogSource,
   busy,
-  error,
   gameInfo,
   customSources,
   registryMods,
@@ -190,12 +190,7 @@ async function update(item: CatalogMod) {
     >
       {{ lastAction }}
     </div>
-    <div
-      v-if="error"
-      class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-    >
-      {{ error }}
-    </div>
+    <ErrorBanner />
 
     <!-- Custom sources: the repository catalogue's own list; mercs.ink is one registry. -->
     <div

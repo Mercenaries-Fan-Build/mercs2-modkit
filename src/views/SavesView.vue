@@ -7,10 +7,10 @@ import { useProjectStore } from "../stores/project";
 import type { SaveBackupInfo } from "../types";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import Spinner from "../components/Spinner.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
-const { savesInfo, saveBackups, savesBusy, error, gameRunning } =
-  storeToRefs(store);
+const { savesInfo, saveBackups, savesBusy, gameRunning } = storeToRefs(store);
 
 // One-line outcome of the last manual backup ("Backed up 3 saves", "Skipped —
 // identical to the latest backup"). Cleared on the next action.
@@ -119,12 +119,7 @@ function reasonLabel(reason: string): string {
       </p>
     </header>
 
-    <p
-      v-if="error"
-      class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-    >
-      {{ error }}
-    </p>
+    <ErrorBanner />
 
     <!-- Current saves -->
     <section class="guilloche mt-5 rounded-xl border border-zinc-800 p-5">

@@ -3,10 +3,11 @@ import { ref, computed, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useProjectStore } from "../stores/project";
 import CartouchePortrait from "../components/CartouchePortrait.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 import type { WardrobeModel } from "../types";
 
 const store = useProjectStore();
-const { gameInfo, wardrobeModels, wardrobe, busy, error } = storeToRefs(store);
+const { gameInfo, wardrobeModels, wardrobe, busy } = storeToRefs(store);
 
 // `model` is the base tier each hero's portrait is rendered from. Note the
 // mismatch the backend also calls out: the hero key is `jennifer`, but the
@@ -225,12 +226,7 @@ function add(m: WardrobeModel) {
         </p>
       </section>
 
-      <div
-        v-if="error"
-        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-      >
-        {{ error }}
-      </div>
+      <ErrorBanner />
 
       <p v-if="wardrobe.length" class="mt-6 text-sm text-zinc-400">
         {{ wardrobe.length }} outfit{{ wardrobe.length === 1 ? "" : "s" }} queued. Go to

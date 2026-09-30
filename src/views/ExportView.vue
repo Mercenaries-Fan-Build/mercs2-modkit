@@ -5,6 +5,7 @@ import { useRoute } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import ProgressBar from "../components/ProgressBar.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 import type { ClaimConflict, GroupOutcome, PlacementOutcome } from "../types";
 
 const route = useRoute();
@@ -24,7 +25,6 @@ async function focusValidation() {
 const store = useProjectStore();
 const {
   busy,
-  error,
   buildResult,
   validation,
   gameInfo,
@@ -353,12 +353,7 @@ function outcomeText(o: GroupOutcome): string {
         </div>
       </section>
 
-      <div
-        v-if="error"
-        class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-      >
-        {{ error }}
-      </div>
+      <ErrorBanner />
 
       <!-- What the load order actually did. -->
       <section v-if="buildResult" class="mt-6">

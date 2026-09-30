@@ -16,13 +16,13 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
 import type { ToolsetProgress } from "../types";
 import Spinner from "../components/Spinner.vue";
+import ErrorBanner from "../components/ErrorBanner.vue";
 
 const TOOLSET_REPO =
   "https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator";
 
 const store = useProjectStore();
-const { toolset, toolsetProgress, runningTools, gamePath, error } =
-  storeToRefs(store);
+const { toolset, toolsetProgress, runningTools, gamePath } = storeToRefs(store);
 
 const isRunning = (name: string) => runningTools.value.includes(name);
 
@@ -167,12 +167,7 @@ function unavailableReason(name: string): string {
       </p>
     </header>
 
-    <p
-      v-if="error"
-      class="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-    >
-      {{ error }}
-    </p>
+    <ErrorBanner />
 
     <!-- Toolset version. One release publishes all of these, so there is one
          version for the set rather than one per tool. -->
