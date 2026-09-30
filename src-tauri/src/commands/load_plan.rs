@@ -12,11 +12,6 @@
 //! * Every closed set is an enum, so an unknown value fails to parse.
 //! * `format` is this file's own version (`1`). The manifest format is a different number.
 //!
-//! The one documented exception to "no serde default": [`PluginEntry`]'s `touches` and
-//! `signature_guard`, added in qm 0.3.0 with `skip_serializing_if` on the emit side. Neither
-//! carries the `null` treatment the rest of the schema uses, so both are `#[serde(default)]`
-//! here — the only fields in this file that are.
-//!
 //! # What Modkit does with it
 //!
 //! Modkit runs `qm preflight` before every Shipment build and refuses to build when `ok` is
@@ -137,11 +132,6 @@ pub struct PlanItem {
     pub placed_files: Vec<PlacedFileEntry>,
 }
 
-/// A `plugins[]` entry: one `native_hook` plugin. Mirrors qm's `PluginEntry` (qm 0.3.0+).
-///
-/// `touches` and `signature_guard` are the two documented exceptions to the "no serde default"
-/// rule in this file's header: qm emits them with `skip_serializing_if`, so a plugin with
-/// neither declared arrives with the keys missing rather than as `[]` / `{}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginEntry {
@@ -150,16 +140,12 @@ pub struct PluginEntry {
     pub source: String,
     pub relative: String,
     pub sha256: String,
-    /// Exe addresses this plugin patches (`0xHHHHHHHH`), from the manifest's `touches`.
     #[serde(default)]
     pub touches: Vec<String>,
-    /// Expected prologue bytes per hooked address (address → space-separated hex).
     #[serde(default)]
     pub signature_guard: BTreeMap<String, String>,
 }
 
-/// A `runtime_dlls[]` entry: one DLL placed in the game root. qm's `RuntimeDllEntry` has never
-/// carried `touches` — that field is plugin-only — so this stays strict on unknown keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeDllEntry {
@@ -168,10 +154,10 @@ pub struct RuntimeDllEntry {
     pub source: String,
     pub relative: String,
     pub sha256: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub touches: Vec<String>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub signature_guard: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub signature_guard: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -736,10 +722,6 @@ pub(crate) mod tests {
         assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
     }
 
-    /// qm 0.3.0 added `touches` and `signature_guard` to `PluginEntry` and emits them with
-    /// `skip_serializing_if`. Both the "field present" and "field missing when empty" cases
-    /// have to parse — before this fix, a plan whose plugin carried a non-empty `touches`
-    /// was refused with `unknown field 'touches'`.
     #[test]
     fn a_plugin_entry_with_touches_and_signature_guard_parses() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
@@ -754,25 +736,26 @@ pub(crate) mod tests {
         assert_eq!(plugin.signature_guard.get("0x004B1180").map(String::as_str),
                    Some("8B 44 24 04 85 C0"));
 
-        // The empty-and-omitted case (what CHAIN_PLAN itself does) still parses to defaults.
         let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
         assert!(plan.items[1].plugins[0].touches.is_empty());
         assert!(plan.items[1].plugins[0].signature_guard.is_empty());
     }
 
-    /// `touches` is plugin-only in qm. A `runtime_dlls[]` entry carrying it is a malformed
-    /// plan Modkit refuses rather than silently reads.
     #[test]
-    fn touches_on_a_runtime_dll_entry_is_refused() {
+    fn a_runtime_dll_entry_with_touches_and_signature_guard_parses() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["items"][1]["runtime_dlls"] = serde_json::json!([{
             "contribution": 2, "file_name": "x.dll", "source": "x.dll",
             "relative": "x.dll", "sha256": "00",
             "touches": ["0x004B1180"],
+            "signature_guard": { "0x004B1180": "8B 44 24 04" },
         }]);
-        let err =
-            LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
-        assert!(err.contains("touches"), "{err}");
+        let plan =
+            LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
+        let dll = &plan.items[1].runtime_dlls[0];
+        assert_eq!(dll.touches, vec!["0x004B1180"]);
+        assert_eq!(dll.signature_guard.get("0x004B1180").map(String::as_str),
+                   Some("8B 44 24 04"));
     }
 
     /// The field was renamed; a plan still carrying the old name is refused, not read.
