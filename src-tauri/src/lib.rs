@@ -19,10 +19,13 @@ use commands::human_skins::human_skins;
 use commands::installer::{import_local_asi, install_catalog_mod};
 use commands::dependencies::{plan_shipment_removal, remove_shipments};
 use commands::language::{clear_added_language, scan_languages, set_added_language, set_language};
-use commands::launch::{discover_runtime, is_game_running, launch_game, stop_game, GameProcess};
+use commands::launch::{
+    discover_runtime, is_game_running, launch_game, select_proton, stop_game, GameProcess,
+};
 use commands::license::detect_license;
 use commands::logprobe::{analyze_log, locate_log};
 use commands::managed::managed_status;
+use commands::managed::wine::{install_wine, remove_wine, select_wine, wine_status};
 use commands::mercsink::{
     fetch_mercsink_mod, fetch_mercsink_registry, fetch_mercsink_release, fetch_mercsink_releases,
     install_mercsink_shipment,
@@ -31,6 +34,7 @@ use commands::mod_loader::{load_mod, validate_manifest};
 use commands::model_view::{model_geometry, model_variants, texture_parts};
 use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
+use commands::runtime_settings::{get_runtime_settings, set_runtime_env};
 use commands::save_backup::{
     backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
     set_saves_dir,
@@ -170,6 +174,13 @@ pub fn run() {
             install_dxwrapper,
             launch_game,
             discover_runtime,
+            select_proton,
+            get_runtime_settings,
+            set_runtime_env,
+            wine_status,
+            install_wine,
+            select_wine,
+            remove_wine,
             is_game_running,
             stop_game,
             analyze_log,

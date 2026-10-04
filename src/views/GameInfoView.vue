@@ -7,6 +7,7 @@ import { useProjectStore } from "../stores/project";
 import type { PmcBbChoice, PmcBbVariant } from "../types";
 import CrackPanel from "../components/CrackPanel.vue";
 import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
+import RuntimePanel from "../components/RuntimePanel.vue";
 import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
@@ -202,9 +203,7 @@ async function normalizeRegion() {
       >
         {{ checking ? "Checking…" : "Refresh & check updates" }}
       </button>
-    </header>
-
-    <div
+    </header>    <div
       v-if="!gameInfo"
       class="empty-plate mt-10"
     >
@@ -289,6 +288,10 @@ async function normalizeRegion() {
           other players in multiplayer until you apply it below.
         </p>
       </div>
+
+      <!-- Wine (macOS) / Proton (Linux), hidden on Windows. Outside the game-folder
+          gate: the runtime is set up before the game can run, not after. -->
+      <RuntimePanel class="mt-4" />
 
       <!-- Game details -->
       <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">

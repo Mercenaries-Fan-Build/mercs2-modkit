@@ -1392,29 +1392,104 @@ export interface BuildOptions {
 }
 
 /**
- * User-supplied overrides for Proton/runtime discovery (any field may be
- * omitted or null). Mirrors the Rust `LaunchOverrides` struct, which is
- * `#[serde(rename_all = "camelCase")]`, so keys are camelCase.
- */
-export interface RuntimeOverrides {
-  steamRoot?: string | null;
-  proton?: string | null;
-  sniper?: string | null;
-  prefix?: string | null;
-  useContainer?: boolean | null;
-}
-
-/**
- * What runtime discovery resolved to, surfaced to the UI so the user can
- * confirm or override before launching. Mirrors the Rust `RuntimeInfo` struct
- * (`#[serde(rename_all = "camelCase")]`).
+ * What the runtime resolves to on this host, from the saved settings. Mirrors
+ * the Rust `RuntimeInfo` struct (`#[serde(rename_all = "camelCase")]`).
  */
 export interface RuntimeInfo {
+  host: "windows" | "macos" | "linux";
+  /** The Wine/Proton prefix a launch would use (non-Windows hosts). */
+  prefix: string | null;
+  /** macOS: the selected Wine build's wine64. */
+  wine: string | null;
   steamRoot: string | null;
+  /** Linux: the Proton a launch would use. */
   proton: string | null;
+  /** Linux: every Proton discovery found, in preference order. */
+  protons: string[];
   sniper: string | null;
   /** Whether a launch would run inside the sniper container. */
   container: boolean;
-  /** Non-fatal notes (e.g. "no sniper runtime found — will run bare Proton"). */
+  /** Why something could not be resolved, or what a launch would do differently. */
   notes: string[];
+}
+
+/** One environment variable for Wine/Proton. Mirrors Rust `EnvVar`. */
+export interface EnvVar {
+  key: string;
+  value: string;
+}
+
+/** Mirrors Rust `RegData` (`#[serde(tag = "type", content = "data")]`). */
+export type RegData =
+  | { type: "string"; data: string }
+  | { type: "dword"; data: number }
+  | { type: "delete" };
+
+/** Mirrors Rust `RegistryValue`. */
+export interface RegistryValue {
+  key: string;
+  name: string;
+  value: RegData;
+}
+
+/**
+ * `<app-data>/runtime.json`. Mirrors Rust `RuntimeSettings`. The UI edits only the
+ * runner selection and `env`; the rest is set by hand in the file.
+ */
+export interface RuntimeSettings {
+  format: number;
+  wineTag: string | null;
+  proton: string | null;
+  steamRoot: string | null;
+  sniper: string | null;
+  useContainer: boolean | null;
+  prefix: string | null;
+  env: EnvVar[];
+  dllOverrides: Record<string, string>;
+  registry: RegistryValue[];
+  winedebug: string | null;
+  exeArgs: string[];
+}
+
+/** Mirrors Rust `RuntimeSettingsView`. */
+export interface RuntimeSettingsView {
+  path: string;
+  settings: RuntimeSettings;
+}
+
+/** One installed macOS Wine build. Mirrors Rust `InstalledWine`. */
+export interface InstalledWine {
+  tag: string;
+  asset: string;
+  wine64: string | null;
+  installedAt: number;
+  present: boolean;
+  modified: boolean;
+  selected: boolean;
+}
+
+/** One published Wine build. Mirrors Rust `WineRelease`. */
+export interface WineRelease {
+  tag: string;
+  asset: string;
+  size: number | null;
+  ready: boolean;
+  url: string;
+}
+
+/** Mirrors Rust `WineStatus`. */
+export interface WineStatus {
+  applicable: boolean;
+  repo: string;
+  selected: string | null;
+  installed: InstalledWine[];
+  releases: WineRelease[];
+  remoteError: string | null;
+}
+
+/** Mirrors Rust `WineInstall`. */
+export interface WineInstall {
+  tag: string;
+  wine64: string;
+  selected: boolean;
 }

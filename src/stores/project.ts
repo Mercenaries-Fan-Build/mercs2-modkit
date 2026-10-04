@@ -42,7 +42,11 @@ import type {
   Resolution,
   ShipmentRef,
   RuntimeInfo,
-  RuntimeOverrides,
+  RuntimeSettings,
+  RuntimeSettingsView,
+  EnvVar,
+  WineStatus,
+  WineInstall,
   SaveBackupInfo,
   SavesInfo,
   TextureDetails,
@@ -223,6 +227,14 @@ interface ProjectState {
   gameInfo: GameInfo | null;
   /** Whether the game instance modkit launched is currently running. */
   gameRunning: boolean;
+  /** What a launch would use on this host (Wine/Proton, prefix), from runtime.json. */
+  runtimeInfo: RuntimeInfo | null;
+  /** The backend's runtime.json and its path. */
+  runtimeSettings: RuntimeSettingsView | null;
+  /** macOS: installed and published Wine builds. */
+  wineStatus: WineStatus | null;
+  /** Why part of the Runtime panel could not load; shown in the panel. */
+  runtimeErrors: string[];
   // WAD-asset mods — array order is the load order (top wins conflicts).
   mods: LoadedMod[];
   // ASI-plugin mods (deployed into the game's ASI loader folder).
@@ -348,6 +360,10 @@ export const useProjectStore = defineStore("project", {
     gamePath: null,
     gameInfo: null,
     gameRunning: false,
+    runtimeInfo: null,
+    runtimeSettings: null,
+    wineStatus: null,
+    runtimeErrors: [],
     mods: [],
     asiMods: [],
     enabled: {},
@@ -2446,22 +2462,103 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /** Resolve Proton/runtime paths (autodiscovery + overrides) for display. */
-    async discoverRuntime(overrides: RuntimeOverrides | null = null) {
-      return await invoke<RuntimeInfo>("discover_runtime", { overrides });
+    /**
+     * Refresh everything the Runtime panel shows: what a launch would use, the
+     * saved runtime.json, and (macOS) the Wine builds. `checkRemote` also lists
+     * the published Wine builds.
+     */
+    async loadRuntime(checkRemote = false) {
+      // Each part loads independently, and a failure is kept for the Runtime
+      // panel to show inline. One failed call must not blank the whole panel.
+      const [info, settings, wine] = await Promise.allSettled([
+        invoke<RuntimeInfo>("discover_runtime"),
+        invoke<RuntimeSettingsView>("get_runtime_settings"),
+        invoke<WineStatus>("wine_status", { checkRemote }),
+      ]);
+      const errors: string[] = [];
+      if (info.status === "fulfilled") this.runtimeInfo = info.value;
+      else errors.push(`Runtime discovery failed: ${info.reason}`);
+      if (settings.status === "fulfilled") this.runtimeSettings = settings.value;
+      else errors.push(`Reading runtime.json failed: ${settings.reason}`);
+      if (wine.status === "fulfilled") this.wineStatus = wine.value;
+      else errors.push(`Wine status failed: ${wine.reason}`);
+      this.runtimeErrors = errors;
     },
 
-    async launchGame(
-      overrides: RuntimeOverrides | null = null,
-      verboseLog = false,
-    ) {
+    /** Replace the Wine/Proton environment list in runtime.json. */
+    async setRuntimeEnv(env: EnvVar[]) {
+      this.error = null;
+      try {
+        await invoke<RuntimeSettings>("set_runtime_env", { env });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        await this.loadRuntime().catch(() => {});
+      }
+    },
+
+    /** macOS: download and install a Wine build (`null` = the latest release). */
+    async installWine(tag: string | null) {
+      this.error = null;
+      this.busy = true;
+      try {
+        return await invoke<WineInstall>("install_wine", { tag });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        this.busy = false;
+        await this.loadRuntime(true).catch(() => {});
+      }
+    },
+
+    /** macOS: make an installed Wine build the one launches use. */
+    async selectWine(tag: string) {
+      this.error = null;
+      try {
+        await invoke("select_wine", { tag });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        await this.loadRuntime().catch(() => {});
+      }
+    },
+
+    /** macOS: move an installed Wine build to the trash. */
+    async removeWine(tag: string) {
+      this.error = null;
+      try {
+        await invoke("remove_wine", { tag });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        await this.loadRuntime().catch(() => {});
+      }
+    },
+
+    /** Linux: pick the Proton launches use (`null` = MERCS2_PROTON / autodiscovery). */
+    async selectProton(proton: string | null) {
+      this.error = null;
+      try {
+        await invoke("select_proton", { proton });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        await this.loadRuntime().catch(() => {});
+      }
+    },
+
+    async launchGame(verboseLog = false) {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.error = null;
       try {
         await invoke("launch_game", {
           exePath: this.gameInfo.exe_path,
           gameRoot: this.gameInfo.root,
-          overrides,
           verboseLog,
         });
         this.gameRunning = true;

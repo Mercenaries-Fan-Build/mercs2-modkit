@@ -66,7 +66,7 @@ async function play() {
   if (transitioning.value || gameRunning.value) return;
   transitioning.value = true;
   try {
-    await store.launchGame(null, verboseLog.value);
+    await store.launchGame(verboseLog.value);
   } catch {
     /* surfaced via store.error */
   } finally {

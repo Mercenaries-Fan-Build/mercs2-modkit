@@ -1,10 +1,18 @@
-//! Zip handling for downloaded artifacts, with the guards a downloaded zip needs.
+//! Zip and `.tar.xz` handling for downloaded artifacts, with the guards a
+//! downloaded archive needs.
 //!
 //! Four call sites unpacked untrusted archives straight through `ZipArchive::extract`
 //! — mod releases from any GitHub or GitLab project, mercs.ink releases, the
 //! Workshop data bundle, and the dxwrapper package. `extract` resolves entry names
 //! relative to the destination, so an entry called `../../autoexec` is written
 //! outside it. Nothing here trusts an archive to describe itself honestly.
+//!
+//! The tarball path exists for the macOS Wine build ([`super::super::managed::wine`]),
+//! which ships as `.tar.xz` and carries what no zip modkit handles does: symlinks
+//! (`libz.dylib -> libz.1.3.dylib`) and exec bits. A symlink is a second way out of
+//! the destination, so its *target* is checked as strictly as an entry name, and
+//! every entry kind other than file, directory and symlink is refused rather than
+//! skipped.
 
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -116,6 +124,151 @@ pub fn extract_bytes(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     extract_into(&mut z, dest)
 }
 
+/// Check that a symlink at archive path `entry` pointing at `target` stays inside
+/// the destination.
+///
+/// The target is resolved lexically from the link's own directory: an absolute
+/// target is refused outright, and a `..` that climbs above the destination root is
+/// refused. Lexical is enough because every link this admits points inside the
+/// tree, so no later entry can be written *through* a link to somewhere else.
+fn check_link_target(entry: &str, target: &Path) -> Result<(), String> {
+    let normalized = entry.replace('\\', "/");
+    // Depth of the directory holding the link, below the destination root.
+    let mut depth: i64 = Path::new(&normalized)
+        .parent()
+        .map(|p| {
+            p.components()
+                .filter(|c| matches!(c, Component::Normal(_)))
+                .count() as i64
+        })
+        .unwrap_or(0);
+    for component in target.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(format!(
+                        "Archive symlink '{entry}' -> '{}' points outside the destination — refusing to unpack it.",
+                        target.display()
+                    ));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "Archive symlink '{entry}' -> '{}' is an absolute link — refusing to unpack it.",
+                    target.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extract an in-memory `.tar.xz` into `dest`, keeping unix permissions and
+/// symlinks.
+///
+/// Every entry is either a file, a directory or a symlink whose target stays in
+/// `dest`; anything else (hard links, devices, FIFOs) fails the whole extraction,
+/// naming the entry, because a partial unpack reported as an install is exactly
+/// the silent failure this module exists to prevent.
+pub fn extract_tar_xz(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    let decoder = xz2::read::XzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("Bad tar.xz archive: {e}"))?;
+
+    let mut count: usize = 0;
+    let mut written: u64 = 0;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("Could not read a tar.xz entry: {e}"))?;
+        count += 1;
+        if count > MAX_ENTRIES {
+            return Err(format!("Archive has more than {MAX_ENTRIES} entries."));
+        }
+
+        let name = entry
+            .path()
+            .map_err(|e| format!("Archive entry {count} has an unreadable path: {e}"))?
+            .to_string_lossy()
+            .into_owned();
+        let out = safe_join(dest, &name)?;
+        let kind = entry.header().entry_type();
+
+        if kind.is_dir() {
+            std::fs::create_dir_all(&out)
+                .map_err(|e| format!("Could not create {}: {e}", out.display()))?;
+            continue;
+        }
+
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+        }
+
+        if kind.is_symlink() {
+            let target = entry
+                .link_name()
+                .map_err(|e| format!("Archive symlink '{name}' has an unreadable target: {e}"))?
+                .ok_or_else(|| format!("Archive symlink '{name}' has no target."))?
+                .into_owned();
+            check_link_target(&name, &target)?;
+            make_symlink(&target, &out)?;
+            continue;
+        }
+
+        if !kind.is_file() {
+            return Err(format!(
+                "Archive entry '{name}' is a {kind:?} entry, which modkit does not unpack — refusing the archive."
+            ));
+        }
+
+        written += entry.size();
+        if written > MAX_TOTAL_BYTES {
+            return Err(format!(
+                "Archive unpacks to more than {MAX_TOTAL_BYTES} bytes — refusing to continue."
+            ));
+        }
+        let mut f = std::fs::File::create(&out)
+            .map_err(|e| format!("Could not create {}: {e}", out.display()))?;
+        std::io::copy(&mut entry, &mut f)
+            .map_err(|e| format!("Could not write {}: {e}", out.display()))?;
+        set_mode(&out, entry.header().mode().ok())?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_symlink(target: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link)
+        .map_err(|e| format!("Could not create symlink {}: {e}", link.display()))
+}
+
+#[cfg(not(unix))]
+fn make_symlink(target: &Path, link: &Path) -> Result<(), String> {
+    Err(format!(
+        "Archive symlink {} -> {} cannot be unpacked on this OS.",
+        link.display(),
+        target.display()
+    ))
+}
+
+/// Apply the archive's permission bits, so `wine64` stays executable.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(mode) = mode else { return Ok(()) };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777))
+        .map_err(|e| format!("Could not set permissions on {}: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: Option<u32>) -> Result<(), String> {
+    Ok(())
+}
+
 /// Read one entry whose full archive path ends with `suffix`, case-insensitively.
 ///
 /// Matched on the whole path, not the file name, so a caller can target
@@ -200,6 +353,136 @@ mod tests {
         // Backslashes are separators in zips written on Windows, not name characters.
         assert_eq!(safe_join(dest, "a\\b").unwrap(), dest.join("a").join("b"));
         assert!(safe_join(dest, "a\\..\\..\\x").is_err());
+    }
+
+    /// One tar entry for [`tar_xz_with`]: a file with a mode, a directory, or a
+    /// symlink with a target.
+    enum TarEntry<'a> {
+        File(&'a str, &'a [u8], u32),
+        Dir(&'a str),
+        Link(&'a str, &'a str),
+        HardLink(&'a str, &'a str),
+    }
+
+    fn tar_xz_with(entries: &[TarEntry]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            for e in entries {
+                let mut h = tar::Header::new_gnu();
+                match e {
+                    TarEntry::File(name, body, mode) => {
+                        h.set_entry_type(tar::EntryType::Regular);
+                        h.set_size(body.len() as u64);
+                        h.set_mode(*mode);
+                        b.append_data(&mut h, name, *body).unwrap();
+                    }
+                    TarEntry::Dir(name) => {
+                        h.set_entry_type(tar::EntryType::Directory);
+                        h.set_size(0);
+                        h.set_mode(0o755);
+                        b.append_data(&mut h, name, std::io::empty()).unwrap();
+                    }
+                    TarEntry::Link(name, target) | TarEntry::HardLink(name, target) => {
+                        h.set_entry_type(if matches!(e, TarEntry::Link(..)) {
+                            tar::EntryType::Symlink
+                        } else {
+                            tar::EntryType::Link
+                        });
+                        h.set_size(0);
+                        h.set_mode(0o777);
+                        b.append_link(&mut h, name, target).unwrap();
+                    }
+                }
+            }
+            b.finish().unwrap();
+        }
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 1);
+        enc.write_all(&tar_bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// The shape of the real Wine build: nested dirs, an executable, and a
+    /// sibling dylib symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_tar_xz_unpacks_files_modes_and_sibling_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = tar_xz_with(&[
+            TarEntry::Dir("Wine/bin/"),
+            TarEntry::File("Wine/bin/wine64", b"#!exe", 0o755),
+            TarEntry::File("Wine/lib/libz.1.3.dylib", b"lib", 0o644),
+            TarEntry::Link("Wine/lib/libz.dylib", "libz.1.3.dylib"),
+        ]);
+        extract_tar_xz(&bytes, dir.path()).expect("unpacks");
+
+        let exe = dir.path().join("Wine/bin/wine64");
+        assert_eq!(std::fs::read(&exe).unwrap(), b"#!exe");
+        assert_eq!(
+            std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "wine64 must stay executable"
+        );
+        let link = dir.path().join("Wine/lib/libz.dylib");
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("libz.1.3.dylib"));
+        assert_eq!(std::fs::read(&link).unwrap(), b"lib");
+    }
+
+    #[test]
+    fn a_tar_traversal_entry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("stage");
+        // tar::Builder refuses to write `..` itself, so write the name raw.
+        let mut tar_bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            let mut h = tar::Header::new_old();
+            h.as_old_mut().name[..14].copy_from_slice(b"../escaped.txt");
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_size(5);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append(&h, &b"pwned"[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let mut enc = xz2::write::XzEncoder::new(Vec::new(), 1);
+        enc.write_all(&tar_bytes).unwrap();
+        let bytes = enc.finish().unwrap();
+
+        let err = extract_tar_xz(&bytes, &dest).unwrap_err();
+        assert!(err.contains("escaped.txt"), "{err}");
+        assert!(!dir.path().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn a_symlink_out_of_the_destination_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for target in ["../../../outside", "/etc/passwd"] {
+            let bytes = tar_xz_with(&[TarEntry::Link("Wine/lib/evil", target)]);
+            let err = extract_tar_xz(&bytes, dir.path()).unwrap_err();
+            assert!(err.contains("Wine/lib/evil"), "{target}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_symlink_that_climbs_but_stays_inside_is_allowed_by_the_check() {
+        assert!(check_link_target("Wine/lib/x", Path::new("../bin/wine64")).is_ok());
+        assert!(check_link_target("Wine/lib/x", Path::new("../../top")).is_ok());
+        assert!(check_link_target("Wine/lib/x", Path::new("../../../out")).is_err());
+        assert!(check_link_target("x", Path::new("../out")).is_err());
+    }
+
+    /// Anything but file / dir / symlink fails the archive, never silently skips.
+    #[test]
+    fn a_hard_link_entry_fails_the_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = tar_xz_with(&[
+            TarEntry::File("a", b"one", 0o644),
+            TarEntry::HardLink("b", "a"),
+        ]);
+        let err = extract_tar_xz(&bytes, dir.path()).unwrap_err();
+        assert!(err.contains("'b'"), "{err}");
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub mod prebuilt;
 pub mod proc;
 pub mod region;
 pub mod registry;
+pub mod runtime_settings;
 pub mod save_backup;
 pub mod setup;
 pub mod shipment;

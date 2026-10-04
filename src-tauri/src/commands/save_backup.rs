@@ -136,8 +136,8 @@ fn saves_dir(prefix: Option<&str>) -> Result<PathBuf, String> {
 
 /// The game's default SaveGames folder. The game hardcodes
 /// `\My Games\Mercenaries 2\SaveGames\` under the user's Documents folder; on
-/// Linux that lives inside the Proton prefix (same override → env → default
-/// layering as the launcher).
+/// Linux and macOS that lives inside the Proton/Wine prefix, resolved exactly as
+/// the launcher resolves it ([`runtime_settings::resolve_prefix`]).
 fn default_saves_dir(prefix: Option<&str>) -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
@@ -147,14 +147,18 @@ fn default_saves_dir(prefix: Option<&str>) -> Result<PathBuf, String> {
             .ok_or("USERPROFILE is not set")?;
         Ok(home.join("Documents/My Games/Mercenaries 2/SaveGames"))
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     {
-        let compat = prefix
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("MERCS2_PREFIX").map(PathBuf::from))
-            .map(Ok)
-            .unwrap_or_else(|| paths::app_data_dir().map(|d| d.join("proton-prefix")))?;
-        let user = compat.join("pfx/drive_c/users/steamuser");
+        let settings = crate::commands::runtime_settings::read()?;
+        let prefix = crate::commands::runtime_settings::resolve_prefix(&settings, prefix)?;
+        // Proton keeps the Wine prefix under `pfx/` and names the user
+        // `steamuser`; a plain Wine prefix names the user after the host account.
+        #[cfg(target_os = "linux")]
+        let user = prefix.join("pfx/drive_c/users/steamuser");
+        #[cfg(not(target_os = "linux"))]
+        let user = prefix.join("drive_c/users").join(
+            std::env::var_os("USER").ok_or("USER is not set, so the Wine user folder is unknown")?,
+        );
         // Proton uses `Documents`; older Wine prefixes use `My Documents`.
         let documents = ["Documents", "My Documents"]
             .iter()
@@ -162,14 +166,6 @@ fn default_saves_dir(prefix: Option<&str>) -> Result<PathBuf, String> {
             .find(|p| p.is_dir())
             .unwrap_or_else(|| user.join("Documents"));
         Ok(documents.join("My Games/Mercenaries 2/SaveGames"))
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = prefix;
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or("HOME is not set")?;
-        Ok(home.join("Documents/My Games/Mercenaries 2/SaveGames"))
     }
 }
 
