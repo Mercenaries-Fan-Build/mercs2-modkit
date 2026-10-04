@@ -639,7 +639,7 @@ pub(crate) async fn preflight_rows(
 /// install, and after preflight at the versions qm read. Any confirmed report refuses the build,
 /// in one refusal that also carries preflight's findings when preflight refused.
 pub async fn shipment_groups(
-    window: Window,
+    qm: &Path,
     shipments: &[ShipmentRef],
     game_path: &str,
     corpus_hint: Option<&Path>,
@@ -653,8 +653,7 @@ pub async fn shipment_groups(
     }
 
     let game_arg = game_arg_for(game_path)?;
-    let qm = qm_tool(window).await?;
-    let corpus = resolve_corpus_bundle(&qm, corpus_hint);
+    let corpus = resolve_corpus_bundle(qm, corpus_hint);
 
     // 0) Preflight the whole set before building anything, and refuse when qm says it is not ok.
     //    The request lists the rows in the order given, which is
@@ -674,7 +673,7 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
-    let plan = super::load_plan::run_preflight(&qm, shipments, &game_arg, &preflight_dir)?;
+    let plan = super::load_plan::run_preflight(qm, shipments, &game_arg, &preflight_dir)?;
     if let Err(refused) = plan.refuse_unless_ok(shipments) {
         return Err(match incompatibilities {
             Some(index) => incompatibility::with_preflight_refusal(refused, index, shipments, &before),
@@ -747,7 +746,7 @@ pub async fn shipment_groups(
         ];
         args.extend(corpus_args.iter().cloned());
         let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
-        run_qm(&qm, &arg_refs, &format!("qm build for \"{}\"", ship.name))?;
+        run_qm(qm, &arg_refs, &format!("qm build for \"{}\"", ship.name))?;
 
         let output = placement::read_output(&out, &ship.name)?;
         // A Shipment whose only contributions are `native_hook` / `place_file` emits loose files
@@ -792,7 +791,7 @@ pub async fn shipment_groups(
     ];
     link_args.extend(corpus_args.iter().cloned());
     let link_refs: Vec<&std::ffi::OsStr> = link_args.iter().map(|a| a.as_os_str()).collect();
-    run_qm(&qm, &link_refs, "qm link")?;
+    run_qm(qm, &link_refs, "qm link")?;
 
     // Link writes its own plan beside `placement.json`. It must agree with preflight's.
     let link_plan = read_link_plan(&link_out, &request)?;
