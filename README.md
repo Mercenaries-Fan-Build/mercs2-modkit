@@ -47,6 +47,49 @@ against it.
     semver), or a cache file that can't be read. A list Modkit can't use never
     replaces the cached copy.
 
+## Running the game on macOS and Linux
+
+Mercenaries 2 is a 32-bit Windows game, so on macOS and Linux Modkit launches it
+through Wine or Proton. **Game Info → Runtime** shows what a launch uses.
+
+- **macOS:** Modkit downloads and manages its own Wine build from
+  [Heroic-Games-Launcher/wine-crossover](https://github.com/Heroic-Games-Launcher/wine-crossover).
+  Install one or more builds, then pick the one to use. The game folder can be
+  anywhere, for example `~/Downloads`; it doesn't need to be inside the prefix.
+  On Apple Silicon the Wine build needs Rosetta 2
+  (`softwareupdate --install-rosetta --agree-to-license`).
+- **Linux:** the game runs through Steam's Proton. Modkit lists every Proton
+  that Steam and `compatibilitytools.d` have installed, and you pick one.
+
+Both share one modkit-managed prefix in the app data folder (`wine-prefix` on
+macOS, `proton-prefix` on Linux). Your saves are inside it.
+
+### `runtime.json`
+
+The runtime settings live in `runtime.json` in the app data folder. The UI edits
+the Wine/Proton selection and the environment variables. Everything else is set
+by editing the file by hand:
+
+| Field | Meaning |
+| --- | --- |
+| `wineTag` | macOS: the installed Wine build to run. |
+| `proton` | Linux: the Proton to run (its folder or `proton` script). |
+| `steamRoot`, `sniper`, `useContainer` | Linux: Steam root, Steam Linux Runtime entry point, and whether to use its container. |
+| `prefix` | Use this prefix instead of the managed one. |
+| `env` | `[{ "key": "…", "value": "…" }]` passed to Wine/Proton. |
+| `dllOverrides` | `{ "dll": "n" \| "b" \| "n,b" \| "b,n" \| "d" \| "" }`, sent as `WINEDLLOVERRIDES`. |
+| `registry` | Values imported into the prefix before every launch (macOS only). Each one is `{ "key": "HKEY_CURRENT_USER\\…", "name": "…", "value": { "type": "string", "data": "…" } }`; `type` can also be `dword` (a number) or `delete` (no `data`). |
+| `winedebug` | `WINEDEBUG` channels, e.g. `+seh,+loaddll`. |
+| `exeArgs` | Extra arguments passed after the game exe. |
+
+The file is read strictly. An unknown field, an invalid value, or the same
+setting given twice (such as `WINEDLLOVERRIDES` in both `env` and
+`dllOverrides`) stops the launch with an error that names the file. You can't
+set `WINEPREFIX` or `PMC_VERBOSE_LOG` in `env`, because Modkit sets them itself;
+on Linux the same applies to Proton's `STEAM_COMPAT_*` variables. Deleting a
+`registry` entry from the file doesn't remove the value from the prefix; use
+`"type": "delete"` for that.
+
 ## Mod manifest
 
 ```json
