@@ -18,8 +18,9 @@
 //!
 //! * `--scratch-home H`: `HOME` is set to `H` before anything resolves Modkit's app-data folder
 //!   (ledgers, WAD backups, build output, qm work dirs, trash), and the run refuses unless that
-//!   folder and the canonical `--game-root` both lie inside `H`. Modkit's writes stay inside `H`;
-//!   outside it this tool writes only the `--out` file it is given.
+//!   folder, the canonical `--game-root`, and every absolute path the ledgers in `H` record all lie
+//!   inside `H`. Modkit's writes stay inside `H`; outside it this tool writes only the `--out` file
+//!   it is given.
 //! * `--real`: the app-data folder of the caller's own `HOME` and the given game root. The run
 //!   prints what it will touch, then refuses while the game, a Wine process of Modkit's prefix, or
 //!   the `mercs2-modkit` app runs: the game reads the files and the app writes the same ledgers.
@@ -429,7 +430,37 @@ fn enter_scratch_home(home: &str) -> Result<PathBuf, String> {
         ));
     }
     println!("scratch HOME: {}", home.display());
+    refuse_ledger_paths_outside(&home)?;
     Ok(home)
+}
+
+/// The ledgers record absolute paths, and an uninstall acts on them: a ledger copied from another
+/// HOME still names that HOME's game folder. Refuse unless every recorded path lies inside `home`.
+fn refuse_ledger_paths_outside(home: &Path) -> Result<(), String> {
+    let mut outside = Vec::new();
+    for f in placed_files()? {
+        let mut paths = vec![f.abs_path.clone()];
+        if let Some(d) = &f.displaced {
+            paths.push(d.original.clone());
+            paths.push(d.backup.clone());
+        }
+        outside.extend(paths.into_iter().filter(|p| !Path::new(p).starts_with(home)));
+    }
+    if let Some(rec) = deployed_wad_record()? {
+        if !Path::new(&rec.installed_at).starts_with(home) {
+            outside.push(rec.installed_at);
+        }
+    }
+    if outside.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the scratch HOME's ledgers record path(s) outside {}; rewrite them to the scratch game \
+             root first:\n  {}",
+            home.display(),
+            outside.join("\n  ")
+        ))
+    }
 }
 
 /// The canonical game root. It must hold `data/vz.wad`, and in scratch mode it must lie inside the
