@@ -1430,6 +1430,105 @@ mod tests {
         build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
     }
 
+    /// The nine asset hashes the retail effects block's models (ASET type 19) share with textures
+    /// (type 27) in the resident block.
+    const SHARED_MODEL_TEXTURE: [u32; 9] = [
+        0x196896DC, 0xB1EC0672, 0x663C3B0C, 0xF84AEB3C, 0x5B9DE759, 0xD8382CD5, 0x40FF196A, 0x3630720A,
+        0x2EB74539,
+    ];
+    const EFFECTS: &str = r"blocks\VZ\effects_P000_Q3.block";
+    const RESIDENT: &str = r"blocks\VZ\resident_P000_Q3.block";
+
+    /// A block at `path` with one primary row per `(hash, type id)`.
+    fn rows_block(path: &str, payload: &str, rows: &[(u32, u32)]) -> PatchBlock {
+        PatchBlock::from_decompressed(
+            payload.as_bytes(),
+            path.to_string(),
+            rows.iter().map(|&(h, t)| AsetEntry::new(h, 0xFFFF_FFFF, 0x0000_FFFF, t)).collect(),
+            None,
+        )
+        .unwrap()
+    }
+
+    /// The resident block: the worldentity (type 17), a script (type 25 here) and the nine shared
+    /// textures.
+    fn resident(payload: &str) -> PatchBlock {
+        let mut rows = vec![(0x5007_5B3B, 17), (0x4242_4242, 25)];
+        rows.extend(SHARED_MODEL_TEXTURE.iter().map(|&h| (h, 27)));
+        rows_block(RESIDENT, payload, &rows)
+    }
+
+    /// The effects block: the nine shared models, the C4 effect (type 29) and `added` effects.
+    fn effects(payload: &str, added: &[u32]) -> PatchBlock {
+        let mut rows: Vec<(u32, u32)> = SHARED_MODEL_TEXTURE.iter().map(|&h| (h, 19)).collect();
+        rows.push((0x41B4_326E, 29));
+        rows.extend(added.iter().map(|&h| (h, 29)));
+        rows_block(EFFECTS, payload, &rows)
+    }
+
+    /// Two fx Shipments each build the effects block and the resident block (with their own
+    /// templates); link builds both with every Shipment's effects and templates. Every per-Shipment
+    /// copy is dropped, link's two blocks form one group, and the nine hashes the two blocks share
+    /// (a model in one, a texture in the other) are no conflict.
+    #[test]
+    fn collapse_takes_the_effects_block_and_templates_from_link() {
+        let mut paths = link_block_paths();
+        paths.push(EFFECTS.into());
+        let overlays = vec![
+            ("shipment:qm-fx-a".into(), "qm-fx-a".into(), vec![effects("a", &[0xAAAA_0001]), resident("a")]),
+            (
+                "shipment:qm-fx-b".into(),
+                "qm-fx-b".into(),
+                vec![effects("b", &[0xBBBB_0001]), resident("b"), block(r"blocks\b\model.block", 0x2222)],
+            ),
+        ];
+        let link_blocks = vec![resident("link"), effects("link", &[0xAAAA_0001, 0xBBBB_0001])];
+        let groups = collapse(overlays, link_blocks, &paths, LinkGroup::scripts(2));
+        let owned: Vec<(String, String)> = groups
+            .iter()
+            .flat_map(|g| {
+                g.blocks
+                    .iter()
+                    .filter(|b| is_link_owned(&b.path_string, &paths))
+                    .map(|b| (g.mod_id.clone(), b.path_string.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            owned,
+            vec![("qm-link:scripts".to_string(), RESIDENT.to_string()), ("qm-link:scripts".to_string(), EFFECTS.to_string())],
+            "only link's resident and effects blocks survive"
+        );
+        assert_eq!(groups.len(), 2, "qm-fx-a carried only link-owned blocks, so it contributes no group");
+        let resolved = crate::models::claim::resolve(&groups);
+        assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
+        assert_eq!(resolved.blocks.len(), 3);
+        build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
+    }
+
+    /// The shape fx Shipments had as `raw`: the whole effects block in its own
+    /// `blocks\VZ\mod_<hash>.block`, which no plan lists. Beside link's resident block it shares the
+    /// nine model/texture hashes and holds others, so the claim groups overlap without either
+    /// containing the other: a conflict.
+    #[test]
+    fn a_raw_effects_block_beside_links_resident_block_is_a_claim_conflict() {
+        let raw = rows_block(
+            r"blocks\VZ\mod_41b4326e.block",
+            "raw",
+            &SHARED_MODEL_TEXTURE.iter().map(|&h| (h, 19)).chain([(0x41B4_326E, 29)]).collect::<Vec<_>>(),
+        );
+        let overlays = vec![("shipment:fx-a".into(), "fx_a".into(), vec![raw])];
+        let groups = collapse(overlays, vec![resident("link")], &link_block_paths(), LinkGroup::scripts(2));
+        let resolved = crate::models::claim::resolve(&groups);
+        assert_eq!(resolved.conflicts.len(), 1, "{:?}", resolved.conflicts);
+        let c = &resolved.conflicts[0];
+        let mut shared = c.shared.clone();
+        shared.sort_unstable();
+        let mut want = SHARED_MODEL_TEXTURE.to_vec();
+        want.sort_unstable();
+        assert_eq!((c.mod_id.as_str(), shared, c.only_mine.clone()), ("shipment:fx-a", want, vec![0x41B4_326E]));
+    }
+
     /// **All** of the link WAD's blocks are kept, not only the listed ones.
     #[test]
     fn collapse_keeps_every_link_block() {
