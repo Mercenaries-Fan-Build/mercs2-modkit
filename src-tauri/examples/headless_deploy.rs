@@ -387,18 +387,37 @@ fn diff(a: &Value, b: &Value) -> Vec<String> {
     out
 }
 
+/// Files at least this large report hashing progress on stderr.
+const PROGRESS_MIN_FILE: u64 = 64 << 20;
+/// Bytes hashed between two progress lines.
+const PROGRESS_STEP: u64 = 256 << 20;
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let total = f.metadata().map_err(|e| format!("reading {}: {e}", path.display()))?.len();
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
+    let mut done: u64 = 0;
+    let mut next_report: u64 = PROGRESS_STEP;
     loop {
         let n = f.read(&mut buf).map_err(|e| format!("reading {}: {e}", path.display()))?;
         if n == 0 {
             break;
         }
         h.update(&buf[..n]);
+        done += n as u64;
+        if total >= PROGRESS_MIN_FILE && done >= next_report {
+            eprintln!(
+                "hashing {}: {} / {} MiB ({}%)",
+                path.display(),
+                done >> 20,
+                total >> 20,
+                done * 100 / total
+            );
+            next_report += PROGRESS_STEP;
+        }
     }
     Ok(format!("{:x}", h.finalize()))
 }
