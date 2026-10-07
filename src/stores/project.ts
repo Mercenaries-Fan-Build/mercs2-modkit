@@ -2307,7 +2307,7 @@ export const useProjectStore = defineStore("project", {
       this.error = null;
       try {
         const res = await invoke<DeployWadResult>("restore_patch_wad", {
-          args: { file, data_dir: this.gameInfo.data_dir },
+          args: { file, data_dir: this.gameInfo.data_dir, game_root: this.gameInfo.root },
         });
         await this.refreshGame();
         await this.loadWadBackups();

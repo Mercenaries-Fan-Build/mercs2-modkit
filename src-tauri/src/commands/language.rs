@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::commands::deploy_wad::{self, PlacedFile};
 use crate::commands::paths::trash_dir;
 
 /// One supported language and the on-disk names of its content files.
@@ -95,12 +96,16 @@ pub struct AddedLanguage {
     /// The language token — the WAD basename (`polski`), which is also what the selector forces the
     /// game's language index to resolve to at boot.
     pub name: String,
-    /// A friendlier label for the UI (the token, title-cased).
+    /// The display name the language Shipment declared, as the deploy ledger recorded it when
+    /// modkit installed the WAD; the raw token when modkit did not install it.
     pub display: String,
     pub wad_name: String,
     pub wad_size: u64,
     /// True when the selector is enabled AND currently names this language.
     pub active: bool,
+    /// True when the deploy ledger records this WAD as placed by modkit. A `data/<name>.wad` that
+    /// is not in the ledger was put there by something else, and nothing declared its display name.
+    pub installed_by_modkit: bool,
 }
 
 /// The state of the `mercs2_language` selector plugin and its config, read from `scripts/`.
@@ -190,6 +195,11 @@ fn locate(dir: Option<&Path>, name: &str) -> (Option<PathBuf>, u64) {
 /// Scan the install and report which languages' content is present.
 #[tauri::command(async)]
 pub fn scan_languages(game_root: String) -> Result<LanguageStatus, String> {
+    scan_languages_with(game_root, &deploy_wad::placed_files()?)
+}
+
+/// [`scan_languages`] against the deploy ledger's `placed` entries.
+fn scan_languages_with(game_root: String, placed: &[PlacedFile]) -> Result<LanguageStatus, String> {
     let root = PathBuf::from(&game_root);
     if !root.is_dir() {
         return Err(format!("Game folder not found: {game_root}"));
@@ -225,7 +235,7 @@ pub fn scan_languages(game_root: String) -> Result<LanguageStatus, String> {
     } else {
         None
     };
-    let added = scan_added_languages(data_dir.as_deref(), effective_active.as_deref());
+    let added = scan_added_languages(data_dir.as_deref(), effective_active.as_deref(), placed)?;
 
     Ok(LanguageStatus {
         data_dir: data_dir.map(|d| d.to_string_lossy().to_string()),
@@ -326,15 +336,6 @@ fn is_reserved_wad_stem(stem_lower: &str) -> bool {
         || stem_lower.contains(" - copy")
 }
 
-/// Title-case a single language token for display (`polski` -> `Polski`).
-fn title_case(token: &str) -> String {
-    let mut chars = token.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
 /// `"1"/"true"/"on"/"yes"` -> true, anything else false.
 fn ini_bool(value: &str) -> bool {
     matches!(
@@ -348,14 +349,35 @@ fn find_scripts_dir(root: &Path) -> Option<PathBuf> {
     find_child(root, "scripts").filter(|p| p.is_dir())
 }
 
+/// Two paths name the same file on the game's case-insensitive filesystem.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let (mut a, mut b) = (a.components(), b.components());
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x.as_os_str().eq_ignore_ascii_case(y.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+}
+
 /// Scan `data/` for novel-language WADs — a `<name>.wad` the base game never shipped. `active`
 /// (already resolved to `enabled ? name : None` by the caller) marks the one the selector forces.
-fn scan_added_languages(data_dir: Option<&Path>, active: Option<&str>) -> Vec<AddedLanguage> {
+///
+/// The display name comes from the deploy ledger entry for the WAD. A WAD the ledger does not
+/// record shows its token and is flagged as not installed by modkit; a ledger entry for it that
+/// carries no display name is an error, since only a `data_wad` placement writes a
+/// `data/<name>.wad` and every one of those records its display name.
+fn scan_added_languages(
+    data_dir: Option<&Path>,
+    active: Option<&str>,
+    placed: &[PlacedFile],
+) -> Result<Vec<AddedLanguage>, String> {
     let Some(dir) = data_dir else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for e in entries.flatten() {
@@ -372,16 +394,32 @@ fn scan_added_languages(data_dir: Option<&Path>, active: Option<&str>) -> Vec<Ad
             continue;
         }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let recorded = placed
+            .iter()
+            .find(|p| same_file(Path::new(&p.abs_path), &path));
+        let (display, installed_by_modkit) = match recorded {
+            Some(entry) => {
+                let display = entry.display.clone().ok_or_else(|| {
+                    format!(
+                        "The deploy ledger records {} (placed by “{}”) with no display name.",
+                        entry.relative, entry.shipment
+                    )
+                })?;
+                (display, true)
+            }
+            None => (stem.to_string(), false),
+        };
         out.push(AddedLanguage {
-            display: title_case(stem),
+            display,
             active: active.is_some_and(|a| a.eq_ignore_ascii_case(stem)),
             wad_name: format!("{stem}.wad"),
             wad_size: size,
             name: stem.to_string(),
+            installed_by_modkit,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    Ok(out)
 }
 
 /// Read `scripts/mercs2_language.ini`, and whether the plugin itself is installed.
@@ -548,7 +586,7 @@ mod tests {
         std::fs::write(audio.join("vo_stream.english.pws"), b"envo").unwrap();
         std::fs::write(data.join("German.wad"), b"de").unwrap();
 
-        let status = scan_languages(root.to_string_lossy().to_string()).unwrap();
+        let status = scan_languages_with(root.to_string_lossy().to_string(), &[]).unwrap();
         assert_eq!(status.present_count, 2);
         let en = status.languages.iter().find(|l| l.language == "English").unwrap();
         assert!(en.wad_present && en.pws_present);
@@ -599,5 +637,59 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("French isn't installed"));
         assert!(data.join("German.wad").is_file());
+    }
+
+    fn ledger_entry(abs_path: &Path, display: Option<&str>) -> PlacedFile {
+        PlacedFile {
+            abs_path: abs_path.to_string_lossy().to_string(),
+            relative: format!(
+                "data/{}",
+                abs_path.file_name().unwrap().to_string_lossy()
+            ),
+            sha256: String::new(),
+            shipment: "mercs2-language".into(),
+            display: display.map(str::to_string),
+            displaced: None,
+        }
+    }
+
+    /// An added language modkit installed takes its display name from the deploy ledger, matched
+    /// to the file case-insensitively; one the ledger does not record shows its raw token and is
+    /// flagged as not installed by modkit. The shipped languages and the patch WADs are
+    /// excluded from the added languages.
+    #[test]
+    fn added_languages_take_their_display_from_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        for name in ["polski.wad", "klingon.wad", "English.wad", "english-patch.wad", "shell-patch.wad"] {
+            std::fs::write(data.join(name), b"FFCS").unwrap();
+        }
+        let placed = [ledger_entry(&root.join("DATA").join("Polski.wad"), Some("Polski (PL)"))];
+
+        let status = scan_languages_with(root.to_string_lossy().to_string(), &placed).unwrap();
+        let added: Vec<(&str, &str, bool)> = status
+            .added
+            .iter()
+            .map(|l| (l.name.as_str(), l.display.as_str(), l.installed_by_modkit))
+            .collect();
+        assert_eq!(
+            added,
+            vec![("klingon", "klingon", false), ("polski", "Polski (PL)", true)]
+        );
+    }
+
+    /// A ledger entry for an added language's WAD with no display name is an error.
+    #[test]
+    fn a_ledger_entry_without_a_display_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("polski.wad"), b"FFCS").unwrap();
+        let placed = [ledger_entry(&data.join("polski.wad"), None)];
+
+        let err = scan_added_languages(Some(&data), None, &placed).unwrap_err();
+        assert!(err.contains("no display name"), "got: {err}");
     }
 }

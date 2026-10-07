@@ -83,6 +83,8 @@ describe("Incompatibility check", () => {
       byte_size: 0,
       sha256: "",
       outcomes: [],
+      stream_copies: [],
+      data_files: [],
       incompatibilities,
     };
   }

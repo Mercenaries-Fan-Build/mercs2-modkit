@@ -10,7 +10,8 @@
 //!   every struct is `deny_unknown_fields` and no field has a serde default. `Option` fields go
 //!   through [`nullable`], because serde would otherwise read a *missing* `Option` as `None`.
 //! * Every closed set is an enum, so an unknown value fails to parse.
-//! * `format` is this file's own version (`1`). The manifest format is a different number.
+//! * `format` is each file's own version: `2` for `load-plan.json`, `1` for `load-request.json`.
+//!   The manifest format is a different number.
 //!
 //! # What Modkit does with it
 //!
@@ -26,12 +27,16 @@ use std::process::Command;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::data_files::DataFileRel;
 use super::proc::NoWindow;
 use super::shipment::ShipmentRef;
 
 /// The `format` of `load-request.json` and `load-plan.json`. It is not the
 /// manifest format.
-pub const PLAN_FORMAT: u32 = 1;
+pub const PLAN_FORMAT: u32 = 2;
+
+/// The `format` of `load-request.json`.
+pub const REQUEST_FORMAT: u32 = 1;
 
 /// The request file's name inside a work dir. `qm link --request` is given the same file
 /// preflight was given.
@@ -70,7 +75,7 @@ impl LoadRequest {
     /// One item per row, in the order given. That order is the Kahn tie-break.
     pub fn for_rows(rows: &[ShipmentRef]) -> Self {
         LoadRequest {
-            format: PLAN_FORMAT,
+            format: REQUEST_FORMAT,
             items: rows
                 .iter()
                 .map(|r| RequestItem { id: r.id.clone(), path: r.path.clone() })
@@ -109,6 +114,9 @@ pub struct LoadPlan {
     /// (renamed from `script_block_paths`, which no longer fit once string tables joined the
     /// list).
     pub link_block_paths: Vec<String>,
+    /// Every data file `qm link` emits for the set. A Shipment's own copy of one of these is
+    /// dropped for link's; a Shipment's data file outside this list is refused.
+    pub link_file_paths: Vec<DataFileRel>,
     pub findings: Vec<Finding>,
 }
 
@@ -130,6 +138,16 @@ pub struct PlanItem {
     pub plugins: Vec<PluginEntry>,
     pub runtime_dlls: Vec<RuntimeDllEntry>,
     pub placed_files: Vec<PlacedFileEntry>,
+    /// The game data files this Shipment's shader kinds edit. Read before the first build, so
+    /// the originals are banked before qm reads them.
+    pub data_files: Vec<DataFileRel>,
+}
+
+impl LoadPlan {
+    /// Every data file any item in the set edits.
+    pub fn data_files(&self) -> std::collections::BTreeSet<DataFileRel> {
+        self.items.iter().flat_map(|i| i.data_files.iter().copied()).collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,7 +632,7 @@ pub(crate) mod tests {
 
     pub(crate) fn request(ids: &[&str]) -> LoadRequest {
         LoadRequest {
-            format: PLAN_FORMAT,
+            format: REQUEST_FORMAT,
             items: ids
                 .iter()
                 .map(|id| RequestItem { id: (*id).into(), path: format!("/x/{id}") })
@@ -626,12 +644,12 @@ pub(crate) mod tests {
     /// row: Ess requires only lua-bridge, and Modkit does not add m2-sdk to a build. The player
     /// listed ess before lua-bridge, so ess is held back.
     pub(crate) const CHAIN_PLAN: &str = r#"{
-      "format": 1, "producer": "preflight", "quartermaster": "3.0.0", "ok": true,
+      "format": 2, "producer": "preflight", "quartermaster": "3.0.0", "ok": true,
       "order": ["shipment:lua-bridge", "shipment:ess", "shipment:my-mod"],
       "items": [
         { "id": "shipment:ess", "requested": 0, "resolved": 1, "held_back_by": 0,
           "name": "ess", "version": "0.7.0", "manifest_format": 2, "quartermaster_range": null,
-          "provides": [], "plugins": [], "runtime_dlls": [], "placed_files": [] },
+          "provides": [], "plugins": [], "runtime_dlls": [], "placed_files": [], "data_files": [] },
         { "id": "shipment:lua-bridge", "requested": 1, "resolved": 0, "held_back_by": null,
           "name": "lua-bridge", "version": "1.0.0", "manifest_format": 2, "quartermaster_range": null,
           "provides": [],
@@ -639,10 +657,10 @@ pub(crate) mod tests {
                          "relative": "scripts/lua_bridge_DEV.asi", "sha256": "00" } ],
           "runtime_dlls": [],
           "placed_files": [ { "contribution": 1, "file_name": "lua_bridge_DEV.ini", "source": "lua_bridge_DEV.ini",
-                              "destination": "game_folder", "dest": "scripts", "relative": "scripts/lua_bridge_DEV.ini" } ] },
+                              "destination": "game_folder", "dest": "scripts", "relative": "scripts/lua_bridge_DEV.ini" } ], "data_files": [] },
         { "id": "shipment:my-mod", "requested": 2, "resolved": 2, "held_back_by": null,
           "name": "my-mod", "version": "1.0.0", "manifest_format": 2, "quartermaster_range": null,
-          "provides": [], "plugins": [], "runtime_dlls": [], "placed_files": [] }
+          "provides": [], "plugins": [], "runtime_dlls": [], "placed_files": [], "data_files": ["data/shader3.bin"] }
       ],
       "edges": [
         { "first": "shipment:lua-bridge", "then": "shipment:ess",    "source": "requires", "requirement": 0 },
@@ -668,6 +686,7 @@ pub(crate) mod tests {
           "relative": "scripts/OnLoad/1_Ess.lua", "present": false }
       ],
       "link_block_paths": ["blocks\\VZ\\scripts_vz_P000_Q3.block", "blocks\\VZ\\resident_P000_Q3.block"],
+      "link_file_paths": ["data/shader3.bin"],
       "findings": []
     }"#;
 
@@ -758,6 +777,38 @@ pub(crate) mod tests {
                    Some("8B 44 24 04"));
     }
 
+    /// Each item's `data_files` and the plan's `link_file_paths` read as the closed data-file
+    /// set; the union says, before any build, which stores the set edits.
+    #[test]
+    fn data_files_and_link_file_paths_parse() {
+        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        assert_eq!(plan.link_file_paths, vec![DataFileRel::Shader3]);
+        assert_eq!(plan.items[2].data_files, vec![DataFileRel::Shader3]);
+        assert!(plan.items[0].data_files.is_empty());
+        assert_eq!(plan.data_files().into_iter().collect::<Vec<_>>(), vec![DataFileRel::Shader3]);
+    }
+
+    /// A path outside the closed set, or a plan without either key, is refused.
+    #[test]
+    fn a_data_file_outside_the_set_or_a_missing_key_is_refused() {
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["items"][2]["data_files"] = serde_json::json!(["data/shader4.bin"]);
+        let err = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        assert!(err.contains("is not a data file Modkit deploys"), "{err}");
+
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["link_file_paths"] = serde_json::json!(["data/Shader3Low.bin"]);
+        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v.as_object_mut().unwrap().remove("link_file_paths");
+        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["items"][1].as_object_mut().unwrap().remove("data_files");
+        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+    }
+
     /// The field was renamed; a plan still carrying the old name is refused, not read.
     #[test]
     fn the_old_script_block_paths_name_is_refused() {
@@ -769,9 +820,9 @@ pub(crate) mod tests {
     #[test]
     fn a_plan_of_another_format_is_refused() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
-        v["format"] = serde_json::json!(2);
+        v["format"] = serde_json::json!(1);
         let err = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
-        assert!(err.contains("format 2"), "{err}");
+        assert!(err.contains("format 1"), "{err}");
     }
 
     #[test]
