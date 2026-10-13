@@ -11266,7 +11266,7 @@
       "hash": "a1532b4c7652fe9feee1191f5bd04aa073cd0f036e49831c754e7d895241dfa8"
     },
     {
-      "id": "v10-unsigned",
+      "id": "archived-2-disk-dump",
       "version": "v1.0",
       "variant": "unsigned",
       "label": "retail unsigned",
@@ -11276,10 +11276,10 @@
       "hash": "ada5545526c4d09d8000f0e7600c0cbc24b7b360638fa2dde407cd7f976534d7"
     },
     {
-      "id": "v11-cracked-cruise",
+      "id": "archived-1-cracked-cruise",
       "version": "v1.1",
       "variant": "cracked",
-      "label": "cruise.dll crack (archive.org)",
+      "label": "cruise.dll crack (archived)",
       "requires": "cruise.dll",
       "note": "SecuROM bypass only — does NOT load ASI mods; use modkit's pmc_bb crack for modding.",
       "size": 53482288,
