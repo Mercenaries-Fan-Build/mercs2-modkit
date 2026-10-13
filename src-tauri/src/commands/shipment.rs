@@ -413,8 +413,8 @@ pub fn inspect_shipment(path: String) -> Result<ShipmentRef, String> {
 /// Locate the Workshop reference bundle whose `lua/` subtree is the corpus `qm` needs for
 /// script-touching Shipments. Resolution mirrors qm's own: an explicit hint, then
 /// `MERCS2_WORKSHOP_DATA`, then the `workshop_data/` companion that the toolset installs in qm's own
-/// version directory. `None` means non-script Shipments still build but a script Shipment will error
-/// clearly, telling the user to install the Workshop data.
+/// version directory. `None` fails every Shipment build: Modkit runs `qm link` on every build, and
+/// link always requires the corpus, whether or not any Shipment touches scripts.
 fn resolve_corpus_bundle(qm: &Path, hint: Option<&Path>) -> Option<PathBuf> {
     let is_bundle = |p: &Path| p.join("lua").is_dir();
     if let Some(h) = hint {
