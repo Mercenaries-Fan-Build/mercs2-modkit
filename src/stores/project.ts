@@ -21,7 +21,8 @@ import type {
   DeployWadResult,
   DeployedWadRecord,
   Origin,
-  ExeCandidate,
+  ExeIdentity,
+  LaunchPlan,
   GameInfo,
   IncompatibilityCheck,
   InstallDllResult,
@@ -32,6 +33,8 @@ import type {
   ModelVariant,
   ModkitUpdate,
   MercsInkInstall,
+  DependencyInstall,
+  DependencyPlan,
   RemovalOutcome,
   SavedShipments,
   ShipmentRemovalPlan,
@@ -340,6 +343,8 @@ interface ProjectState {
    * Nothing is removed until {@link confirmShipmentRemoval}; cancelling removes nothing.
    */
   pendingShipmentRemoval: ShipmentRemovalPlan | null;
+  /** Unmet Shipment requirements and what mercs.ink can supply, waiting for the player. */
+  pendingDependencies: DependencyPlan | null;
   /**
    * Saved Shipment rows the backend refused on restore (a library saved before dependency
    * tracking, or rows it cannot read). `saved` is the stored value, kept verbatim and written
@@ -402,6 +407,7 @@ export const useProjectStore = defineStore("project", {
     prebuilt: [],
     shipments: [],
     pendingShipmentRemoval: null,
+    pendingDependencies: null,
     refusedShipments: null,
     textures: [],
     textureCatalog: [],
@@ -424,10 +430,6 @@ export const useProjectStore = defineStore("project", {
       const conflicts = state.conflictGraph?.conflicts ?? [];
       return conflicts.filter((c) => !state.resolutions[String(c.asset_hash)])
         .length;
-    },
-    gameReady(state): boolean {
-      const g = state.gameInfo;
-      return !!g && g.version !== "unknown";
     },
     /** Host is missing the 32-bit VC++ 2008 runtime the game needs to launch. */
     vcRedistMissing(state): boolean {
@@ -475,27 +477,9 @@ export const useProjectStore = defineStore("project", {
       return this.managedComponent("dxwrapper")?.installedTag ?? null;
     },
 
-    /**
-     * The v1.1 cracked build we'll launch, whether that's the base exe (cracked
-     * in place) or the `Mercenaries2.cracked.exe` setup wrote next to it. The
-     * user does NOT have to overwrite the original for the install to be ready.
-     */
-    crackedBuild(state): ExeCandidate | null {
-      const g = state.gameInfo;
-      if (!g) return null;
-      if (g.cracked_exe?.version === "v1.1" && g.cracked_exe.variant === "cracked") {
-        return g.cracked_exe;
-      }
-      if (g.version === "v1.1" && g.variant === "cracked") {
-        return {
-          path: g.exe_path,
-          name: g.exe_path.split(/[\\/]/).pop() ?? g.exe_path,
-          size: g.exe_size,
-          version: g.version,
-          variant: g.variant,
-        };
-      }
-      return null;
+    /** An exe cracked by apply_crack (imports pmc_bb.dll), if the folder has one. */
+    crackedBuild(state): ExeIdentity | null {
+      return state.gameInfo?.exes.find((e) => e.kind === "cracked_importing_pmc_bb") ?? null;
     },
     /**
      * A legitimately licensed copy (SecuROM activation present). Setup steers
@@ -506,53 +490,28 @@ export const useProjectStore = defineStore("project", {
     },
 
     /**
-     * The exe we'd launch is already DRM-free — an apply_crack output OR a
-     * legitimately-owned DRM-free build (e.g. mercs2_nodrm_v3.exe). Such an exe
-     * imports pmc_bb.dll itself, so it needs neither a crack (done) nor dxwrapper
-     * (not the loader) — just pmc_bb.dll present. `crackedBuild` already captures
-     * "a v1.1 DRM-free build is the base or a sibling", by size class.
+     * How the launched exe gets mods, from its identity:
+     *   - self_loading: it imports pmc_bb.dll; just install pmc_bb;
+     *   - dxwrapper:    it doesn't; dxwrapper loads pmc_bb (cruise-cracked,
+     *                   DRM-free, or a stock exe with an activation/dxwrapper);
+     *   - crack:        stock SecuROM with no activation; crack it.
      */
-    exeDrmFree(): boolean {
-      return !!this.crackedBuild;
-    },
-
-    /**
-     * Which of the three setup paths applies, ordered by what would actually
-     * launch (mirrors `launch::launch_exe`):
-     *   1. dxwrapper installed → "licensed": it launches the stock exe untouched,
-     *      so respect that even if a DRM-free sibling is also lying around;
-     *   2. else a DRM-free exe would launch → "drm_free": just install pmc_bb.dll;
-     *   3. else SecuROM retail exe with an activation → "licensed": set up dxwrapper;
-     *   4. else → "crack": apply the bypass.
-     */
-    setupPath(state): "drm_free" | "licensed" | "crack" {
-      if (state.gameInfo?.has_dxwrapper) return "licensed";
-      if (this.exeDrmFree) return "drm_free";
-      if (this.isLicensed) return "licensed";
+    setupPath(state): "self_loading" | "dxwrapper" | "crack" {
+      const kind = state.gameInfo?.launch?.exe.kind;
+      if (kind === "cracked_importing_pmc_bb") return "self_loading";
+      if (kind === "cracked_importing_other" || kind === "drm_free") return "dxwrapper";
+      if (state.gameInfo?.has_dxwrapper || this.isLicensed) return "dxwrapper";
       return "crack";
     },
 
-    /** Licensed path ready: dxwrapper + the pmc_bb bridge are installed. */
     dxwrapperReady(state): boolean {
       return !!state.gameInfo?.has_dxwrapper && !!state.gameInfo?.has_pmc_bb;
     },
 
-    /**
-     * Fully prepared for modding, per path:
-     *   - drm_free: pmc_bb.dll present (the exe imports it);
-     *   - licensed: dxwrapper + pmc_bb (logging) installed, exe untouched;
-     *   - crack:    not set up yet — cracking produces a DRM-free exe, which
-     *               flips the path to "drm_free".
-     */
+    /** Set up for modding: the launch plan reports no problems. */
     gameFullySetUp(state): boolean {
-      switch (this.setupPath) {
-        case "drm_free":
-          return !!state.gameInfo?.has_pmc_bb;
-        case "licensed":
-          return this.dxwrapperReady;
-        default:
-          return false;
-      }
+      const plan = state.gameInfo?.launch;
+      return !!plan && plan.problems.length === 0 && this.setupPath !== "crack";
     },
     /** Filenames of ASI plugins currently present in the game install. */
     deployedAsiNames(state): Set<string> {
@@ -913,25 +872,9 @@ export const useProjectStore = defineStore("project", {
           installed: this.shipments,
           gamePath: this.gamePath ?? "",
         });
-        // Stamp a fresh staging revision so a reinstall dirties the load order like a new mod.
-        // The backend re-extracted the staging dir, but at the same slug/version, so nothing in
-        // the ShipmentRef would otherwise change — and the deployed WAD would look up to date
-        // when it isn't. This marker is what moves `loadOrderSignature` on a reinstall.
-        const rev = Date.now();
-        // Dependencies first, then the Shipment itself: each replaces the row at the same
-        // staging path (re-installing overwrites that directory, so the same path is the same
-        // row) or is appended. The root carries `install_reason: "user"`, which promotes a row
-        // that was a dependency.
-        let rows = this.shipments;
-        for (const next of [...res.dependencies.map((d) => d.shipment), res.shipment]) {
-          next.stagedRev = rev;
-          const existing = rows.findIndex((s) => s.path === next.path);
-          rows =
-            existing >= 0
-              ? rows.map((s, i) => (i === existing ? next : s))
-              : [...rows, next];
-        }
-        this.shipments = rows;
+        // Dependencies first, then the Shipment itself. The root carries
+        // `install_reason: "user"`, which promotes a row that was a dependency.
+        this.mergeShipmentRows([...res.dependencies.map((d) => d.shipment), res.shipment]);
         return res;
       } catch (e) {
         this.error = String(e);
@@ -1701,8 +1644,8 @@ export const useProjectStore = defineStore("project", {
       this.error = null;
       return await invoke<GenerateManifestResult>("generate_manifest", {
         gameRoot: this.gameInfo.root,
-        version: this.gameInfo.version,
-        variant: this.gameInfo.variant,
+        version: this.gameInfo.base_exe?.version ?? "unknown",
+        variant: this.gameInfo.base_exe?.variant ?? "unknown",
       });
     },
 
@@ -1819,6 +1762,15 @@ export const useProjectStore = defineStore("project", {
       this.buildResult = null;
       this.incompatibilityCheck = null;
       try {
+        if (this.shipments.length) {
+          const deps = await this.checkShipmentDependencies();
+          if (deps.unmet.length) {
+            throw new Error(
+              `${deps.unmet.length} Shipment requirement${deps.unmet.length === 1 ? " isn't" : "s aren't"} met, so nothing was built. ` +
+                "Review them in the dependency dialog.",
+            );
+          }
+        }
         this.buildResult = await invoke<BuildResult>("assemble_patch_wad", {
           options: this.buildOptions(opts.outputDir ?? null),
         });
@@ -2177,6 +2129,10 @@ export const useProjectStore = defineStore("project", {
         if (!this.shipments.some((s) => s.path === info.path)) {
           this.shipments = [...this.shipments, info];
         }
+        // A Shipment staged from a folder declares requirements nothing has resolved yet.
+        void this.checkShipmentDependencies().catch((e) => {
+          this.error = `Couldn't check what ${info.name} requires: ${e}`;
+        });
         return info;
       } catch (e) {
         this.error = String(e);
@@ -2233,6 +2189,63 @@ export const useProjectStore = defineStore("project", {
       } finally {
         this.busy = false;
       }
+    },
+
+    /**
+     * Put freshly staged rows into the load order: each replaces the row at the same staging
+     * path (re-installing overwrites that directory) or is appended.
+     */
+    mergeShipmentRows(incoming: ShipmentRef[]) {
+      // A fresh staging revision dirties the load order even when a reinstall left the
+      // ShipmentRef unchanged; this marker is what moves `loadOrderSignature`.
+      const rev = Date.now();
+      let rows = this.shipments;
+      for (const next of incoming) {
+        next.stagedRev = rev;
+        const existing = rows.findIndex((s) => s.path === next.path);
+        rows = existing >= 0 ? rows.map((s, i) => (i === existing ? next : s)) : [...rows, next];
+      }
+      this.shipments = rows;
+    },
+
+    /**
+     * Preflight the convoy and, when a `shipment` requirement is unmet, hold what mercs.ink can
+     * supply for the player to confirm. Returns the plan.
+     */
+    async checkShipmentDependencies(): Promise<DependencyPlan> {
+      const plan = await invoke<DependencyPlan>("plan_mercsink_dependencies", {
+        installed: this.shipments,
+        gamePath: this.gamePath ?? "",
+      });
+      this.pendingDependencies = plan.unmet.length ? plan : null;
+      return plan;
+    },
+
+    /** Install what the pending dependency plan offered, exactly as the player confirmed it. */
+    async confirmShipmentDependencies(): Promise<void> {
+      const plan = this.pendingDependencies;
+      if (!plan) return;
+      this.assertShipmentsWritable();
+      this.busy = true;
+      this.error = null;
+      try {
+        const deps = await invoke<DependencyInstall[]>("install_mercsink_dependencies", {
+          installed: this.shipments,
+          gamePath: this.gamePath ?? "",
+          expected: plan.install,
+        });
+        this.mergeShipmentRows(deps.map((d) => d.shipment));
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.pendingDependencies = null;
+        this.busy = false;
+      }
+    },
+
+    /** Close the dependency dialog. Nothing is installed. */
+    dismissShipmentDependencies() {
+      this.pendingDependencies = null;
     },
 
     /** Cancel a pending removal. Nothing was removed, and nothing is. */
@@ -2325,21 +2338,14 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
-    /**
-     * Install the pmc_bb build this game install wants.
-     *
-     * There is no longer one "the pmc_bb.dll" to fetch: upstream publishes six
-     * feature variants and the backend resolves which one belongs here from the
-     * exe's identity. Pass `variant` only to override that deliberately.
-     */
-    async installPmcBb(variant?: string): Promise<InstallDllResult> {
+    /** Install the launch plan's wanted pmc_bb build (the pinned one, else the exe's). */
+    async installPmcBb(): Promise<InstallDllResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.busy = true;
       this.error = null;
       try {
         const res = await invoke<InstallDllResult>("install_pmc_bb", {
           gameRoot: this.gameInfo.root,
-          variant: variant ?? null,
         });
         await this.refreshGame().catch(() => {});
         await this.refreshManaged();
@@ -2375,7 +2381,6 @@ export const useProjectStore = defineStore("project", {
         try {
           await invoke<InstallDllResult>("install_pmc_bb", {
             gameRoot: this.gameInfo.root,
-            variant: null,
           });
         } catch (e) {
           await this.refreshGame().catch(() => {});
@@ -2396,11 +2401,13 @@ export const useProjectStore = defineStore("project", {
     /** Crack the exe via apply_crack (auto-updates v1.0 → v1.1, then bypasses). */
     async crackGame(opts: { outputPath: string | null }): Promise<CrackResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
+      const base = this.gameInfo.base_exe;
+      if (!base) throw new Error("No Mercenaries2.exe or stock SecuROM exe to crack");
       this.busy = true;
       this.error = null;
       try {
         const res = await invoke<CrackResult>("crack_game", {
-          exePath: this.gameInfo.exe_path,
+          exePath: base.path,
           outputPath: opts.outputPath,
         });
         // apply_crack is a ledger component now, so the backend already recorded
@@ -2423,11 +2430,13 @@ export const useProjectStore = defineStore("project", {
      */
     async updateGame(): Promise<CrackResult> {
       if (!this.gameInfo) throw new Error("Set the game folder first");
+      const base = this.gameInfo.base_exe;
+      if (!base) throw new Error("No Mercenaries2.exe or stock SecuROM exe to update");
       this.busy = true;
       this.error = null;
       try {
         const res = await invoke<CrackResult>("update_game", {
-          exePath: this.gameInfo.exe_path,
+          exePath: base.path,
         });
         void this.refreshManaged();
         await this.refreshGame().catch(() => {});
@@ -2552,12 +2561,52 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
+    /**
+     * Bring what modkit installed in line with the exe it would launch (only where
+     * nothing is pinned), and return the plan so the caller can show its problems.
+     */
+    async prepareLaunch(): Promise<LaunchPlan> {
+      if (!this.gameInfo) throw new Error("Set the game folder first");
+      this.error = null;
+      try {
+        const plan = await invoke<LaunchPlan>("prepare_launch", { gameRoot: this.gameInfo.root });
+        await this.refreshGame();
+        return plan;
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      }
+    },
+
+    /** Pin the exe launches run; `null` hands the choice back to modkit. */
+    async setExeOverride(exe: string | null) {
+      this.error = null;
+      try {
+        await invoke("set_exe_override", { exe });
+        await this.refreshGame();
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      }
+    },
+
+    /** Pin the pmc_bb build; `null` hands the choice back to modkit. Doesn't install. */
+    async setPmcBbOverride(asset: string | null) {
+      this.error = null;
+      try {
+        await invoke("set_pmc_bb_override", { asset });
+        await this.refreshGame();
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      }
+    },
+
     async launchGame(verboseLog = false) {
       if (!this.gameInfo) throw new Error("Set the game folder first");
       this.error = null;
       try {
         await invoke("launch_game", {
-          exePath: this.gameInfo.exe_path,
           gameRoot: this.gameInfo.root,
           verboseLog,
         });
