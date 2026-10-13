@@ -57,8 +57,11 @@ async function runCrack() {
       <div class="flex items-center gap-3">
         <dt class="w-32 shrink-0 text-zinc-500">Input exe</dt>
         <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
-          {{ gameInfo.exe_path }}
-          <span class="text-zinc-500">— {{ gameInfo.version }} ({{ gameInfo.variant }})</span>
+          <template v-if="gameInfo.base_exe">
+            {{ gameInfo.base_exe.path }}
+            <span class="text-zinc-500">— {{ gameInfo.base_exe.label ?? "unrecognised" }}</span>
+          </template>
+          <template v-else>None found</template>
         </dd>
       </div>
       <div class="flex items-center gap-3">
@@ -82,11 +85,6 @@ async function runCrack() {
     >
       <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
       New apply_crack release → {{ crackUpdate.latest }} — the next crack uses it.
-    </p>
-
-    <p v-if="gameInfo.has_dxwrapper" class="mt-3 text-xs text-amber-300/90">
-      dxwrapper is installed, so modkit launches the stock exe and ignores any
-      cracked exe. Remove dxwrapper for the cracked exe to be the one launched.
     </p>
 
     <p v-if="store.crackedBuild" class="mt-3 text-sm text-emerald-300/80">
