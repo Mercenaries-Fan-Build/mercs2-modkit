@@ -82,8 +82,8 @@ pub struct ManifestEntry {
 /// with no way to notice — so extend this list, never edit it.
 pub const EXE_IDS: &[&str] = &[
     "v10-ea-signed",
-    "v10-unsigned",
-    "v11-cracked-cruise",
+    "archived-2-disk-dump",
+    "archived-1-cracked-cruise",
     "v11-cracked-pmcbb",
     "v11-patched-securom",
     // A v1.1 patched exe with SecuROM removed: import table rebuilt into an appended
@@ -98,7 +98,7 @@ pub const EXE_IDS: &[&str] = &[
 pub struct ExeEntry {
     /// Catalogue-assigned identifier from [`EXE_IDS`] — the stable key for this build.
     ///
-    /// `label` cannot serve: it is prose written for a human ("cruise.dll crack (archive.org)")
+    /// `label` cannot serve: it is prose written for a human ("cruise.dll crack (archived)")
     /// and rewording it would silently split one build's history in two.
     ///
     /// `None` for a manifest generated before ids existed, and for one a user generated from
@@ -1160,7 +1160,7 @@ mod tests {
         std::fs::write(dir.path().join("Mercenaries2.exe"), b"abc").unwrap();
 
         let mut cruise = exe("v1.1", "cracked", None, Some("cruise.dll"), "deadbeef");
-        cruise.id = Some("v11-cracked-cruise".into());
+        cruise.id = Some("archived-1-cracked-cruise".into());
         cruise.size = 3; // same size as the entry below — the collision the id exists to break
         let mut pmcbb = exe("v1.1", "cracked", None, Some("pmc_bb.dll"), SHA256_ABC);
         pmcbb.id = Some("v11-cracked-pmcbb".into());
@@ -1204,7 +1204,7 @@ mod tests {
 
         // The pair the descriptive tuple could not tell apart: same version, same variant, same
         // size, different id.
-        let cruise = manifest.exes.iter().find(|e| e.id.as_deref() == Some("v11-cracked-cruise"));
+        let cruise = manifest.exes.iter().find(|e| e.id.as_deref() == Some("archived-1-cracked-cruise"));
         let pmcbb = manifest.exes.iter().find(|e| e.id.as_deref() == Some("v11-cracked-pmcbb"));
         let (cruise, pmcbb) = (cruise.expect("cruise entry"), pmcbb.expect("pmc_bb entry"));
         assert_eq!((&cruise.version, &cruise.variant), (&pmcbb.version, &pmcbb.variant));
