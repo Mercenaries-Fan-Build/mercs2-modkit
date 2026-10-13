@@ -1,37 +1,30 @@
-//! Base-game detection: locate the install, identify its version/variant, and
-//! report modding state (pmc_bb.dll, ASI loader, deployed patch WADs).
+//! Base-game detection: locate the install, identify its exes, and report
+//! modding state (pmc_bb.dll, ASI loader, deployed patch WADs).
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tauri::Window;
+
+use super::exe_identity::ExeIdentity;
+use super::launch_plan::{self, LaunchPlan};
+use super::managed::pmc_bb::ExeKind;
 
 /// A detected Mercenaries 2 installation and its current modding state.
 #[derive(Debug, Serialize)]
 pub struct GameInfo {
     /// Absolute path to the folder the user selected.
     pub root: String,
-    /// Absolute path to the located `Mercenaries2.exe`. This is the *base* exe —
-    /// the input `apply_crack` patches — not necessarily the one we launch.
-    pub exe_path: String,
-    pub exe_size: u64,
-    /// `"v1.0"`, `"v1.1"`, or `"unknown"`.
-    pub version: String,
-    /// `"unsigned"`, `"ea-signed"`, `"patched"`, `"cracked"`, or `"unknown"`.
-    pub variant: String,
-    /// The de-DRM'd exe sitting alongside the base one (what setup writes as
-    /// `Mercenaries2.cracked.exe`), if any. `None` when the base exe is itself
-    /// the cracked build, or when no cracked sibling exists.
-    pub cracked_exe: Option<ExeCandidate>,
-    /// The exe `launch_game` will actually run: the cracked sibling when one is
-    /// present, else `exe_path`.
-    pub launch_exe_path: String,
-    /// `pmc_bb.dll` present in the install (the ASI loader / logging bridge —
-    /// the DRM-spoofing build on the crack path, or the logging-only build on
-    /// the licensed dxwrapper path; both live at this name).
+    /// Every `Mercenaries2*.exe` in the folder (plus a pinned exe elsewhere).
+    pub exes: Vec<ExeIdentity>,
+    /// `apply_crack`'s input: `Mercenaries2.exe`, else the first stock SecuROM exe.
+    pub base_exe: Option<ExeIdentity>,
+    /// What a launch would run. `None` with `launch_error` when it can't resolve.
+    pub launch: Option<LaunchPlan>,
+    pub launch_error: Option<String>,
+    /// `pmc_bb.dll` present in the install.
     pub has_pmc_bb: bool,
-    /// `dxwrapper.dll` present in the install — the non-destructive loader used
-    /// for licensed copies. When set, the modkit launches the stock exe and
-    /// never the cracked one.
+    /// `dxwrapper.dll` present in the install.
     pub has_dxwrapper: bool,
     /// Name of the Ultimate ASI Loader proxy DLL present, if any
     /// (e.g. `dinput8.dll`). `None` means no loader is installed.
@@ -44,18 +37,6 @@ pub struct GameInfo {
     pub deployed_asi: Vec<DeployedAsi>,
     /// Discovered `pmc_blackbox.log`, if present in the install.
     pub log_path: Option<String>,
-}
-
-/// One `Mercenaries2*.exe` found in the install, identified by size.
-#[derive(Debug, Clone, Serialize)]
-pub struct ExeCandidate {
-    pub path: String,
-    pub name: String,
-    pub size: u64,
-    /// `"v1.0"`, `"v1.1"`, or `"unknown"`.
-    pub version: String,
-    /// `"unsigned"`, `"ea-signed"`, `"patched"`, `"cracked"`, or `"unknown"`.
-    pub variant: String,
 }
 
 /// Discover the game's `pmc_blackbox.log` (written to the install root, with
@@ -175,104 +156,13 @@ fn list_deployed_asi(root: &Path) -> Vec<DeployedAsi> {
     out
 }
 
-// Exact sizes of known retail variants (see forensic analysis).
-const SIZE_V10_UNSIGNED: u64 = 16_846_848;
-const SIZE_V10_EA_SIGNED: u64 = 17_122_568;
-const SIZE_V11_PATCHED: u64 = 53_944_080;
-const SIZE_V11_CRACKED: u64 = 53_482_288;
-
-pub(crate) fn classify(size: u64) -> (&'static str, &'static str) {
-    match size {
-        SIZE_V10_UNSIGNED => ("v1.0", "unsigned"),
-        SIZE_V10_EA_SIGNED => ("v1.0", "ea-signed"),
-        SIZE_V11_PATCHED => ("v1.1", "patched"),
-        SIZE_V11_CRACKED => ("v1.1", "cracked"),
-        // Range fallback for unrecognised builds.
-        s if (16_500_000..=17_500_000).contains(&s) => ("v1.0", "unknown"),
-        s if (53_000_000..=54_500_000).contains(&s) => ("v1.1", "unknown"),
-        _ => ("unknown", "unknown"),
-    }
-}
-
-/// The stock executable name — the crack input and the game's own entry point.
-const BASE_EXE: &str = "mercenaries2.exe";
-/// The name setup writes the de-DRM'd exe to by default.
-const CRACKED_EXE: &str = "mercenaries2.cracked.exe";
-
-/// Every `Mercenaries2*.exe` in `root`, identified by size, sorted by filename
-/// so the pick below is deterministic.
-fn list_exes(root: &Path) -> Vec<ExeCandidate> {
-    let mut out = Vec::new();
-    let entries = match std::fs::read_dir(root) {
-        Ok(e) => e,
-        Err(_) => return out,
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if !p.is_file() {
-            continue;
-        }
-        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let lower = name.to_ascii_lowercase();
-        if !(lower.starts_with("mercenaries2") && lower.ends_with(".exe")) {
-            continue;
-        }
-        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        let (version, variant) = classify(size);
-        out.push(ExeCandidate {
-            path: p.to_string_lossy().to_string(),
-            name: lower,
-            size,
-            version: version.to_string(),
-            variant: variant.to_string(),
-        });
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
-/// True for an exe we should launch in preference to the base one: either it
-/// identifies as a cracked build, or it carries the name setup writes. The name
-/// check matters because a future `apply_crack` release can change the output
-/// size, and an unrecognised size must not silently demote it back to the
+/// `apply_crack`'s input: the game's own `Mercenaries2.exe`, else the first stock
 /// SecuROM exe.
-fn is_cracked(e: &ExeCandidate) -> bool {
-    e.variant == "cracked" || e.name == CRACKED_EXE
-}
-
-/// Split the install's executables into the base exe (what `apply_crack` takes
-/// as input, and what we report as the install's identity) and the cracked exe
-/// alongside it, if the user has produced one.
-///
-/// Returns `None` when the folder holds no Mercenaries 2 executable at all.
-pub fn resolve_exes(root: &Path) -> Option<(ExeCandidate, Option<ExeCandidate>)> {
-    let exes = list_exes(root);
-    if exes.is_empty() {
-        return None;
-    }
-
-    // Base: the stock filename, else the first exe that isn't a cracked build,
-    // else whatever is there (an install where only the cracked exe remains).
-    let base = exes
-        .iter()
-        .find(|e| e.name == BASE_EXE)
-        .or_else(|| exes.iter().find(|e| !is_cracked(e)))
-        .unwrap_or(&exes[0])
-        .clone();
-
-    // Cracked sibling: prefer setup's default name, else any other cracked build.
-    // Never the base itself — if the base *is* cracked, the install is already
-    // set up in place and there is no sibling to report.
-    let cracked = exes
-        .iter()
-        .filter(|e| e.path != base.path && is_cracked(e))
-        .find(|e| e.name == CRACKED_EXE)
-        .or_else(|| exes.iter().find(|e| e.path != base.path && is_cracked(e)))
-        .cloned();
-
-    Some((base, cracked))
+fn base_exe(exes: &[ExeIdentity]) -> Option<ExeIdentity> {
+    exes.iter()
+        .find(|e| e.name.eq_ignore_ascii_case("mercenaries2.exe"))
+        .or_else(|| exes.iter().find(|e| e.kind == ExeKind::SecuRom))
+        .cloned()
 }
 
 /// Pick the folder holding WADs: prefer `data/`, else the install root.
@@ -306,24 +196,19 @@ fn list_deployed_patches(dir: &Path) -> Vec<String> {
 
 /// Detect a Mercenaries 2 install from a folder the user selected.
 #[tauri::command(async)]
-pub fn detect_game(path: String) -> Result<GameInfo, String> {
+pub fn detect_game(window: Window, path: String) -> Result<GameInfo, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("Not a folder: {path}"));
     }
 
-    let (base, cracked) = resolve_exes(&root)
-        .ok_or_else(|| "No Mercenaries2.exe found in that folder".to_string())?;
-    // What we launch, mirroring `launch::launch_exe`: on the licensed dxwrapper
-    // path the stock exe is launched untouched; otherwise the cracked build wins.
-    let has_dxwrapper = root.join("dxwrapper.dll").is_file();
-    let launch_exe_path = if has_dxwrapper {
-        base.path.clone()
-    } else {
-        cracked
-            .as_ref()
-            .map(|c| c.path.clone())
-            .unwrap_or_else(|| base.path.clone())
+    let detected = launch_plan::detect(&window, &root)?;
+    if detected.exes.is_empty() {
+        return Err("No Mercenaries2*.exe found in that folder".to_string());
+    }
+    let (launch, launch_error) = match detected.plan {
+        Ok(p) => (Some(p), None),
+        Err(e) => (None, Some(e)),
     };
 
     let data_dir = find_data_dir(&root);
@@ -334,14 +219,12 @@ pub fn detect_game(path: String) -> Result<GameInfo, String> {
 
     Ok(GameInfo {
         root: root.to_string_lossy().to_string(),
-        exe_path: base.path.clone(),
-        exe_size: base.size,
-        version: base.version.clone(),
-        variant: base.variant.clone(),
-        cracked_exe: cracked,
-        launch_exe_path,
+        base_exe: base_exe(&detected.exes),
+        exes: detected.exes,
+        launch,
+        launch_error,
         has_pmc_bb: root.join("pmc_bb.dll").is_file(),
-        has_dxwrapper,
+        has_dxwrapper: root.join(super::dxwrapper::DLL).is_file(),
         asi_loader_proxy: find_asi_loader(&root),
         data_dir: data_dir.map(|d| d.to_string_lossy().to_string()),
         deployed_patches,
@@ -354,80 +237,35 @@ pub fn detect_game(path: String) -> Result<GameInfo, String> {
 mod tests {
     use super::*;
 
-    /// Write a file of exactly `size` bytes so `classify` sees the real variant.
-    fn exe(dir: &Path, name: &str, size: u64) {
-        std::fs::write(dir.join(name), vec![0u8; size as usize]).unwrap();
-    }
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("mercs2-exes-{tag}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn cracked_sibling_is_reported_without_renaming_the_original() {
-        let d = tmpdir("sibling");
-        exe(&d, "Mercenaries2.exe", SIZE_V11_PATCHED);
-        exe(&d, "Mercenaries2.cracked.exe", SIZE_V11_CRACKED);
-
-        let (base, cracked) = resolve_exes(&d).unwrap();
-        assert_eq!(base.name, "mercenaries2.exe");
-        assert_eq!(base.variant, "patched");
-        let cracked = cracked.expect("the cracked sibling must be detected");
-        assert_eq!(cracked.name, "mercenaries2.cracked.exe");
-        assert_eq!((cracked.version.as_str(), cracked.variant.as_str()), ("v1.1", "cracked"));
+    fn exe(name: &str, id: Option<&str>) -> ExeIdentity {
+        ExeIdentity {
+            path: format!("/g/{name}"),
+            name: name.into(),
+            size: 1,
+            sha256: "00".into(),
+            id: id.map(String::from),
+            version: None,
+            variant: None,
+            label: None,
+            requires: None,
+            kind: ExeKind::from_exe_id(id),
+        }
     }
 
     #[test]
-    fn cracked_in_place_reports_no_sibling() {
-        let d = tmpdir("in-place");
-        exe(&d, "Mercenaries2.exe", SIZE_V11_CRACKED);
+    fn the_base_is_the_stock_name_else_a_securom_exe() {
+        let exes = [
+            exe("Mercenaries2.cracked.exe", Some("v11-cracked-pmcbb")),
+            exe("Mercenaries2.EXE", None),
+        ];
+        assert_eq!(base_exe(&exes).unwrap().name, "Mercenaries2.EXE");
 
-        let (base, cracked) = resolve_exes(&d).unwrap();
-        assert_eq!((base.version.as_str(), base.variant.as_str()), ("v1.1", "cracked"));
-        assert!(cracked.is_none(), "the base exe is the cracked build; no sibling");
-    }
+        let exes = [
+            exe("Mercenaries2.cracked.exe", Some("v11-cracked-pmcbb")),
+            exe("Mercenaries2_orig.exe", Some("v11-patched-securom")),
+        ];
+        assert_eq!(base_exe(&exes).unwrap().name, "Mercenaries2_orig.exe");
 
-    /// A crack whose size the catalog doesn't know must still be preferred for
-    /// launch — the default filename identifies it.
-    #[test]
-    fn unrecognised_size_still_counts_by_name() {
-        let d = tmpdir("unknown-size");
-        exe(&d, "Mercenaries2.exe", SIZE_V11_PATCHED);
-        exe(&d, "Mercenaries2.cracked.exe", 53_500_000);
-
-        let (_, cracked) = resolve_exes(&d).unwrap();
-        let cracked = cracked.expect("name alone is enough to prefer it");
-        assert_eq!(cracked.variant, "unknown");
-    }
-
-    /// The user pointed the "Output exe" browser at a custom filename.
-    #[test]
-    fn custom_named_crack_is_found_by_classification() {
-        let d = tmpdir("custom-name");
-        exe(&d, "Mercenaries2.exe", SIZE_V11_PATCHED);
-        exe(&d, "Mercenaries2-nodrm.exe", SIZE_V11_CRACKED);
-
-        let (base, cracked) = resolve_exes(&d).unwrap();
-        assert_eq!(base.name, "mercenaries2.exe");
-        assert_eq!(cracked.expect("classified as cracked").name, "mercenaries2-nodrm.exe");
-    }
-
-    #[test]
-    fn only_a_cracked_exe_is_still_the_base() {
-        let d = tmpdir("only-cracked");
-        exe(&d, "Mercenaries2.cracked.exe", SIZE_V11_CRACKED);
-
-        let (base, cracked) = resolve_exes(&d).unwrap();
-        assert_eq!(base.name, "mercenaries2.cracked.exe");
-        assert!(cracked.is_none(), "nothing to prefer over the only exe present");
-    }
-
-    #[test]
-    fn no_executable_is_none() {
-        let d = tmpdir("empty");
-        assert!(resolve_exes(&d).is_none());
+        assert!(base_exe(&[exe("Mercenaries2.cracked.exe", Some("v11-cracked-pmcbb"))]).is_none());
     }
 }
