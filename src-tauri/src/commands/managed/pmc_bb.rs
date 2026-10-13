@@ -58,6 +58,9 @@ pub const REPO: &str = "Mercenaries-Fan-Build/pmc-blackbox";
 /// is underneath it.
 pub const INSTALL_NAME: &str = "pmc_bb.dll";
 
+/// The ledger entry for the installed build.
+pub const LEDGER_KEY: &str = "pmc_bb";
+
 /// Last-resort floor for a build, used only when the release declares no size.
 ///
 /// Deliberately far below the smallest published variant. The first value here
@@ -186,20 +189,26 @@ impl Variant {
 /// `classify(size)` calls the DRM-free rebuild "cracked" because it lands at
 /// exactly the cracked size, which is the misidentification that made modkit offer
 /// a spoof build to an exe that imports no sidecar at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExeKind {
     /// Cracked, with `pmc_bb.dll` in its import table — the `apply_crack` output.
     /// The crack is split across the exe patch and the DLL, so this build is the
     /// one that has to answer the SecuROM event.
     CrackedImportingPmcBb,
     /// Cracked by something else, importing that tool's own sidecar (`cruise.dll`).
-    /// It brings its own SecuROM handling and its own loader; pmc_bb must not fire
-    /// a second event or run a second loader.
+    /// The sidecar is the crack and nothing more — the equivalent of
+    /// `pmc_bb_crack_only.dll`: it answers SecuROM and has no ASI loader. pmc_bb
+    /// must not answer SecuROM a second time, and because the exe does not import
+    /// pmc_bb, dxwrapper has to inject it.
     CrackedImportingOther,
-    /// Not cracked: stock SecuROM satisfied by a real activation, or a DRM-free
-    /// build that imports no sidecar. Either way nothing here wants a spoof.
-    NotCracked,
-    /// No catalogue match. Treated as [`Self::NotCracked`] for feature purposes —
+    /// SecuROM removed and no sidecar imported. Nothing wants a spoof, and nothing
+    /// in the exe loads pmc_bb, so dxwrapper has to inject it.
+    DrmFree,
+    /// The stock SecuROM exe, satisfied by a real activation. Nothing wants a spoof,
+    /// and dxwrapper has to inject pmc_bb.
+    SecuRom,
+    /// No catalogue match. Treated as [`Self::SecuRom`] for feature purposes —
     /// the conservative direction, since installing a spoof where none is wanted
     /// is the harmful mistake.
     Unknown,
@@ -212,10 +221,20 @@ impl ExeKind {
         match id {
             Some("v11-cracked-pmcbb") => Self::CrackedImportingPmcBb,
             Some("v11-cracked-cruise") => Self::CrackedImportingOther,
-            Some("v10-ea-signed" | "v10-unsigned" | "v11-patched-securom" | "v11-patched-drmfree") => {
-                Self::NotCracked
-            }
+            Some("v11-patched-drmfree") => Self::DrmFree,
+            Some("v10-ea-signed" | "v10-unsigned" | "v11-patched-securom") => Self::SecuRom,
             _ => Self::Unknown,
+        }
+    }
+
+    /// Whether the exe loads `pmc_bb.dll` through its own import table. When it
+    /// does not, dxwrapper's `LoadCustomDllPath` is the only thing that loads it.
+    /// `None` for an exe modkit cannot identify.
+    pub fn imports_pmc_bb(self) -> Option<bool> {
+        match self {
+            Self::CrackedImportingPmcBb => Some(true),
+            Self::CrackedImportingOther | Self::DrmFree | Self::SecuRom => Some(false),
+            Self::Unknown => None,
         }
     }
 }
@@ -238,7 +257,11 @@ pub struct Choice {
 /// |---|---|---|---|---|
 /// | cracked, imports `pmc_bb.dll` | Y | Y | Y | `pmc_bb_fully_loaded.dll` |
 /// | cracked, imports another sidecar | – | – | Y | `pmc_bb_log_only.dll` |
-/// | not cracked | – | – | Y | `pmc_bb_log_only.dll` |
+/// | DRM-free, no sidecar | – | – | Y | `pmc_bb_log_only.dll` |
+/// | stock SecuROM | – | – | Y | `pmc_bb_log_only.dll` |
+///
+/// Every exe that does not import pmc_bb gets a build without the ASI loader,
+/// because dxwrapper is what loads pmc_bb there and dxwrapper scans the plugins.
 ///
 /// `log` is always on: `pmc_blackbox.log` is what the log analyzer, the debug
 /// bundle and every crash report modkit collects are built on. A build without it
@@ -272,14 +295,22 @@ pub fn resolve(kind: ExeKind, override_asset: Option<&str>) -> Result<Choice, St
         ),
         ExeKind::CrackedImportingOther => (
             f(false, false, true),
-            "Your exe is cracked by another tool and imports its sidecar, which already \
-             answers SecuROM and loads plugins. This build only logs, so nothing is done twice."
+            "Your exe is cracked by another tool whose sidecar answers SecuROM and loads no \
+             plugins. dxwrapper loads pmc_bb and scans your plugins, and this build handles \
+             logging and crash reports, so SecuROM is not answered twice."
                 .to_string(),
         ),
-        ExeKind::NotCracked => (
+        ExeKind::DrmFree => (
             f(false, false, true),
-            "Your exe is not cracked, so no SecuROM spoof is installed. Plugin loading is \
-             left to dxwrapper, and this build handles logging and crash reports."
+            "Your exe has no DRM and imports no sidecar, so no SecuROM spoof is installed. \
+             dxwrapper loads pmc_bb and scans your plugins, and this build handles logging \
+             and crash reports."
+                .to_string(),
+        ),
+        ExeKind::SecuRom => (
+            f(false, false, true),
+            "Your exe is not cracked, so no SecuROM spoof is installed. dxwrapper loads \
+             pmc_bb and scans your plugins, and this build handles logging and crash reports."
                 .to_string(),
         ),
         ExeKind::Unknown => (
@@ -348,7 +379,7 @@ mod tests {
         let c = resolve(ExeKind::CrackedImportingOther, None).unwrap();
         assert_eq!(c.asset, "pmc_bb_log_only.dll");
         assert!(!c.features.crack, "cruise already answers SecuROM");
-        assert!(!c.features.asi, "cruise already loads plugins");
+        assert!(!c.features.asi, "dxwrapper injects pmc_bb here, so dxwrapper scans");
         assert!(c.features.log);
     }
 
@@ -356,7 +387,7 @@ mod tests {
     /// must never be handed a build that fires the event.
     #[test]
     fn no_uncracked_exe_ever_receives_the_crack() {
-        for kind in [ExeKind::NotCracked, ExeKind::Unknown] {
+        for kind in [ExeKind::DrmFree, ExeKind::SecuRom, ExeKind::Unknown] {
             let c = resolve(kind, None).unwrap();
             assert!(
                 !c.features.crack,
@@ -373,8 +404,20 @@ mod tests {
     #[test]
     fn the_drm_free_rebuild_is_not_treated_as_cracked() {
         let kind = ExeKind::from_exe_id(Some("v11-patched-drmfree"));
-        assert_eq!(kind, ExeKind::NotCracked);
+        assert_eq!(kind, ExeKind::DrmFree);
         assert!(!resolve(kind, None).unwrap().features.crack);
+    }
+
+    /// Only an exe that imports pmc_bb loads it; every other known exe relies on
+    /// dxwrapper, so its automatic build must leave plugin scanning to dxwrapper.
+    #[test]
+    fn exes_that_rely_on_dxwrapper_get_no_loader() {
+        for kind in [ExeKind::CrackedImportingOther, ExeKind::DrmFree, ExeKind::SecuRom] {
+            assert_eq!(kind.imports_pmc_bb(), Some(false), "{kind:?}");
+            assert!(!resolve(kind, None).unwrap().features.asi, "{kind:?}");
+        }
+        assert_eq!(ExeKind::CrackedImportingPmcBb.imports_pmc_bb(), Some(true));
+        assert_eq!(ExeKind::Unknown.imports_pmc_bb(), None);
     }
 
     /// Every id the catalogue can assign must map to a deliberate kind. A new
@@ -393,14 +436,17 @@ mod tests {
         assert_eq!(ExeKind::from_exe_id(Some("not-a-real-id")), ExeKind::Unknown);
     }
 
+    const ALL_KINDS: [ExeKind; 5] = [
+        ExeKind::CrackedImportingPmcBb,
+        ExeKind::CrackedImportingOther,
+        ExeKind::DrmFree,
+        ExeKind::SecuRom,
+        ExeKind::Unknown,
+    ];
+
     #[test]
     fn every_resolution_explains_itself() {
-        for kind in [
-            ExeKind::CrackedImportingPmcBb,
-            ExeKind::CrackedImportingOther,
-            ExeKind::NotCracked,
-            ExeKind::Unknown,
-        ] {
+        for kind in ALL_KINDS {
             let c = resolve(kind, None).unwrap();
             assert!(!c.reason.is_empty(), "{kind:?} chose {} with no reason", c.asset);
         }
@@ -409,19 +455,14 @@ mod tests {
     /// Logging is what every diagnostic modkit offers is built on.
     #[test]
     fn every_automatic_choice_keeps_logging() {
-        for kind in [
-            ExeKind::CrackedImportingPmcBb,
-            ExeKind::CrackedImportingOther,
-            ExeKind::NotCracked,
-            ExeKind::Unknown,
-        ] {
+        for kind in ALL_KINDS {
             assert!(resolve(kind, None).unwrap().features.log, "{kind:?}");
         }
     }
 
     #[test]
     fn an_override_is_honoured_and_flagged() {
-        let c = resolve(ExeKind::NotCracked, Some("pmc_bb_asi_log.dll")).unwrap();
+        let c = resolve(ExeKind::SecuRom, Some("pmc_bb_asi_log.dll")).unwrap();
         assert_eq!(c.asset, "pmc_bb_asi_log.dll");
         assert!(c.features.asi);
         assert!(c.overridden);
@@ -429,14 +470,14 @@ mod tests {
 
     #[test]
     fn an_empty_override_falls_back_to_the_automatic_choice() {
-        let c = resolve(ExeKind::NotCracked, Some("   ")).unwrap();
+        let c = resolve(ExeKind::SecuRom, Some("   ")).unwrap();
         assert_eq!(c.asset, "pmc_bb_log_only.dll");
         assert!(!c.overridden);
     }
 
     #[test]
     fn an_unknown_override_is_refused_and_lists_the_real_builds() {
-        let err = resolve(ExeKind::NotCracked, Some("pmc_bb.dll")).unwrap_err();
+        let err = resolve(ExeKind::SecuRom, Some("pmc_bb.dll")).unwrap_err();
         assert!(err.contains("pmc_bb_fully_loaded.dll"), "{err}");
         assert!(err.contains("pmc_bb_log_only.dll"), "{err}");
     }
