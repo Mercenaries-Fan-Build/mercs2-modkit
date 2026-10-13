@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 
-use tauri::State;
+use tauri::{State, Window};
 
 use super::runtime_settings::{self, RuntimeSettings};
 
@@ -101,11 +101,15 @@ fn write_global_ini(game_dir: &Path) {
 /// instance while the one we launched is still running.
 #[tauri::command(async)]
 pub fn launch_game(
+    window: Window,
     state: State<'_, GameProcess>,
-    exe_path: String,
-    game_root: Option<String>,
+    game_root: String,
     verbose_log: Option<bool>,
 ) -> Result<(), String> {
+    let game_dir = PathBuf::from(&game_root);
+    // The exe comes from the launch plan, the same one Game Info shows.
+    let run_exe = PathBuf::from(super::launch_plan::for_root(&window, &game_dir)?.exe.path);
+
     let mut guard = state.0.lock().map_err(|_| "Game process lock poisoned")?;
 
     // Atomic: hold the lock across the liveness check and the spawn. Reap our
@@ -118,24 +122,12 @@ pub fn launch_game(
         }
     }
 
-    let exe = PathBuf::from(&exe_path);
-    if !exe.is_file() {
-        return Err(format!("Game exe not found: {exe_path}"));
-    }
-    let game_dir = game_root
-        .map(PathBuf::from)
-        .or_else(|| exe.parent().map(|p| p.to_path_buf()))
-        .ok_or("Could not resolve the game directory")?;
-
     // Note: the VC++ 2008 runtime is offered as an optional install in Game Info,
     // but it is NOT a launch precondition — the game ships its CRTs (msvcr71/80)
     // app-locally, so a missing system VC90 must not block launch. The real cause
     // of a "binkw32.dll was not found" dialog is usually a missing/damaged game
     // file; Diagnostics → "Verify game files" pinpoints that.
 
-    // Prefer the de-DRM'd exe (it imports pmc_bb.dll); the stock SecuROM exe
-    // won't run under Wine.
-    let run_exe = launch_exe(&game_dir, &exe);
     let settings = runtime_settings::read()?;
     // Verbose pmc_blackbox log hooks are opt-in per launch (expensive); default off.
     let verbose = verbose_log.unwrap_or(false);
@@ -167,24 +159,6 @@ pub fn discover_runtime() -> RuntimeInfo {
         }
     };
     resolve_runtime(&settings)
-}
-
-/// Pick the executable to actually launch.
-///
-/// Licensed (dxwrapper) path: if `dxwrapper.dll` is installed, the copy loads
-/// mods without touching the exe, so we launch the **stock** exe and never a
-/// cracked sibling — even if one happens to be lying around. Otherwise (crack
-/// path) prefer the cracked build (de-DRM'd, imports the ASI loader) over the
-/// detected/stock exe. Shares `game::resolve_exes` with detection so what we
-/// launch matches what Game Info reports as `launch_exe_path`.
-fn launch_exe(game_dir: &Path, detected: &Path) -> PathBuf {
-    if game_dir.join("dxwrapper.dll").is_file() {
-        return detected.to_path_buf();
-    }
-    match crate::commands::game::resolve_exes(game_dir) {
-        Some((_, Some(cracked))) => PathBuf::from(cracked.path),
-        _ => detected.to_path_buf(),
-    }
 }
 
 // ----------------------------------------------------------------------------
