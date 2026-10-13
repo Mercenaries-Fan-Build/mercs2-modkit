@@ -13,14 +13,14 @@ const { gameInfo, busy, componentUpdates, pmcBbVersion, license } = storeToRefs(
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
 
-// The UI shows the path detection resolved, but the user can switch between the
-// crack and licensed (dxwrapper) flows. "drm_free" isn't an override — it's a
-// fact about the exe (already DRM-free), so it's shown whenever it applies.
-const pathOverride = ref<"licensed" | "crack" | null>(null);
+// The user can switch between the crack and dxwrapper flows. "self_loading" is a
+// fact about the launched exe, not a choice.
+const pathOverride = ref<"dxwrapper" | "crack" | null>(null);
 const effectivePath = computed(() => {
-  if (store.setupPath === "drm_free") return "drm_free";
+  if (store.setupPath === "self_loading") return "self_loading";
   return pathOverride.value ?? store.setupPath;
 });
+const launchExe = computed(() => gameInfo.value?.launch?.exe ?? null);
 
 const showAnyway = ref(false);
 const stage = ref("");
@@ -68,35 +68,37 @@ async function runDxwrapper() {
 
     <template v-else>
       <p class="mt-4 text-sm text-zinc-400">
-        Detected
-        <span class="text-zinc-200">{{ gameInfo.version }}</span>
-        <span v-if="gameInfo.variant !== 'unknown'"> ({{ gameInfo.variant }})</span>.
+        Launching
+        <span class="font-mono text-xs text-zinc-200">{{ launchExe?.name ?? "nothing" }}</span>
+        <span v-if="launchExe"> ({{ launchExe.label ?? "unrecognised" }})</span>.
       </p>
 
       <!-- ============================ PATH BANNER ============================ -->
       <div
-        v-if="effectivePath === 'drm_free'"
+        v-if="effectivePath === 'self_loading'"
         class="mt-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4"
       >
-        <p class="text-sm font-medium text-emerald-300">DRM-free copy — no crack needed ✓</p>
+        <p class="text-sm font-medium text-emerald-300">No crack or wrapper needed ✓</p>
         <p class="mt-1 text-sm text-emerald-300/80">
-          Your exe is already DRM-free and loads <span class="font-mono text-xs">pmc_bb.dll</span>
-          itself, so there's nothing to crack or wrap — just install the loader below.
+          Your exe loads <span class="font-mono text-xs">pmc_bb.dll</span> itself — just
+          install the loader below.
         </p>
       </div>
       <div
-        v-else-if="effectivePath === 'licensed'"
+        v-else-if="effectivePath === 'dxwrapper'"
         class="mt-3 rounded-xl border border-sky-500/30 bg-sky-500/10 p-4"
       >
-        <p class="text-sm font-medium text-sky-300">Licensed copy — no exe changes needed ✓</p>
+        <p class="text-sm font-medium text-sky-300">dxwrapper — no exe changes needed ✓</p>
         <p class="mt-1 text-sm text-sky-300/80">
-          {{
-            license?.licensed
-              ? "A SecuROM activation was found on this machine, so your exe already passes DRM."
-              : "Using the non-destructive path: dxwrapper loads mods next to an untouched exe."
-          }}
-          Mods load via dxwrapper + a logging-only pmc_bb.dll — your
-          <span class="font-mono text-xs">Mercenaries2.exe</span> is never cracked.
+          <template v-if="launchExe?.kind === 'secu_rom'">
+            {{
+              license?.licensed
+                ? "A SecuROM activation was found on this machine, so your exe already passes DRM."
+                : "Using the non-destructive path: dxwrapper loads mods next to an untouched exe."
+            }}
+          </template>
+          Your exe doesn't load pmc_bb.dll itself, so dxwrapper loads it and scans your
+          plugins. The exe is never modified.
         </p>
         <button
           class="mt-2 text-xs text-zinc-400 underline hover:text-zinc-200"
@@ -113,7 +115,7 @@ async function runDxwrapper() {
         </p>
         <button
           class="mt-2 text-xs text-zinc-400 underline hover:text-zinc-200"
-          @click="pathOverride = 'licensed'"
+          @click="pathOverride = 'dxwrapper'"
         >
           I own this copy (or it's DRM-free) — use dxwrapper instead, leave the exe alone
         </button>
@@ -129,10 +131,10 @@ async function runDxwrapper() {
       >
         <p class="text-sm font-medium text-emerald-300">Your game is ready ✓</p>
         <p class="mt-1 text-sm text-emerald-300/80">
-          <template v-if="effectivePath === 'drm_free'">
-            DRM-free exe + pmc_bb.dll — mods will load. No crack, no wrapper.
+          <template v-if="effectivePath === 'self_loading'">
+            Your exe + pmc_bb.dll — mods will load. No crack, no wrapper.
           </template>
-          <template v-else-if="effectivePath === 'licensed'">
+          <template v-else-if="effectivePath === 'dxwrapper'">
             dxwrapper + pmc_bb.dll installed — mods load without touching the exe.
           </template>
           <template v-else>
@@ -149,13 +151,13 @@ async function runDxwrapper() {
 
       <template v-if="!store.gameFullySetUp || showAnyway">
         <!-- ========================= DRM-FREE PATH ========================= -->
-        <template v-if="effectivePath === 'drm_free'">
+        <template v-if="effectivePath === 'self_loading'">
           <section class="guilloche mt-6 rounded-xl border border-zinc-800 p-5">
             <div class="flex items-start justify-between gap-4">
               <div>
                 <h3 class="plate-title text-sm">Install pmc_bb.dll (ASI loader)</h3>
                 <p class="mt-1 text-sm text-zinc-400">
-                  Your DRM-free exe imports <span class="font-mono text-xs">pmc_bb.dll</span>
+                  Your exe imports <span class="font-mono text-xs">pmc_bb.dll</span>
                   directly — install it and mods load. Nothing else needed.
                 </p>
                 <p class="mt-1 text-xs" :class="gameInfo.has_pmc_bb ? 'text-emerald-400' : 'text-zinc-500'">
@@ -188,10 +190,10 @@ async function runDxwrapper() {
         </template>
 
         <!-- ========================= LICENSED PATH ========================= -->
-        <template v-else-if="effectivePath === 'licensed'">
+        <template v-else-if="effectivePath === 'dxwrapper'">
           <!-- Optional: update v1.0 → v1.1 (official patch, keeps DRM) -->
           <ExeUpdatePanel
-            v-if="gameInfo.version === 'v1.0'"
+            v-if="gameInfo.base_exe?.version === 'v1.0'"
             title="Optional · Update to v1.1 (official patch)"
             class="mt-6"
           />
@@ -242,8 +244,7 @@ async function runDxwrapper() {
           </section>
 
           <p class="mt-4 text-xs text-zinc-600">
-            The game launches your original <span class="font-mono">Mercenaries2.exe</span> —
-            SecuROM stays intact and is satisfied by your activation. Uninstall by deleting
+            Uninstall by deleting
             <span class="font-mono">d3d9.dll</span>, <span class="font-mono">dxwrapper.dll</span>,
             and <span class="font-mono">dxwrapper.ini</span>.
           </p>
