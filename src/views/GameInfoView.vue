@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import type { PmcBbChoice, PmcBbVariant } from "../types";
 import CrackPanel from "../components/CrackPanel.vue";
@@ -34,45 +35,52 @@ const pmcBbPending = computed(
   () => store.managedComponent("pmc_bb")?.pendingReason ?? null,
 );
 
-// Which pmc_bb build modkit would install here, and why. Resolved from the exe's
-// identity rather than the setup path — see managed::pmc_bb. Shown before the user
-// commits, so "why this one" never needs to be guessed at.
-const recommended = ref<PmcBbChoice | null>(null);
+// The pmc_bb build the launched exe calls for, and the one this install should
+// have (the pinned build, else that one) — both from the launch plan.
+const recommended = computed<PmcBbChoice | null>(() => gameInfo.value?.launch?.pmc_bb_auto ?? null);
+const wanted = computed<PmcBbChoice | null>(() => gameInfo.value?.launch?.pmc_bb_wanted ?? null);
 const variants = ref<PmcBbVariant[]>([]);
 const showVariants = ref(false);
 const chosenVariant = ref("");
 
-/** The installed build differs from what this install should have. */
-const variantMismatch = computed(
-  () =>
-    !!pmcBbAsset.value &&
-    !!recommended.value &&
-    pmcBbAsset.value !== recommended.value.asset,
+watch(
+  () => (wanted.value?.overridden ? wanted.value.asset : ""),
+  (v) => (chosenVariant.value = v),
+  { immediate: true },
 );
 
-async function loadPmcBbChoice() {
-  if (!gameInfo.value) {
-    recommended.value = null;
-    return;
-  }
+/** The installed build differs from what this install should have. */
+const variantMismatch = computed(
+  () => !!pmcBbAsset.value && !!wanted.value && pmcBbAsset.value !== wanted.value.asset,
+);
+
+async function loadPmcBbVariants() {
+  if (variants.value.length) return;
   try {
-    recommended.value = await invoke<PmcBbChoice>("resolve_pmc_bb", {
-      gameRoot: gameInfo.value.root,
-      variant: null,
-    });
+    variants.value = await invoke<PmcBbVariant[]>("pmc_bb_variants");
   } catch {
-    recommended.value = null;
-  }
-  if (!variants.value.length) {
-    try {
-      variants.value = await invoke<PmcBbVariant[]>("pmc_bb_variants");
-    } catch {
-      /* leave the advanced picker empty */
-    }
+    /* leave the advanced picker empty */
   }
 }
 
-watch(() => gameInfo.value?.root, loadPmcBbChoice, { immediate: true });
+watch(() => gameInfo.value?.root, loadPmcBbVariants, { immediate: true });
+
+const pinnedExe = computed(() =>
+  gameInfo.value?.launch?.selection === "override" ? gameInfo.value.launch.exe.path : null,
+);
+
+async function pinExe(path: string | null) {
+  await store.setExeOverride(path).catch(() => {});
+}
+
+async function browseExe() {
+  const f = await open({
+    title: "Pin an exe to launch",
+    defaultPath: gameInfo.value?.root,
+    filters: [{ name: "Executable", extensions: ["exe"] }],
+  });
+  if (typeof f === "string") await pinExe(f);
+}
 
 function featureList(f: { crack: boolean; asi: boolean; log: boolean }): string {
   const on = [f.crack && "SecuROM spoof", f.asi && "ASI loader", f.log && "logging"];
@@ -121,7 +129,6 @@ async function refreshAll() {
     await Promise.all([
       store.refreshGame().catch(() => {}),
       store.refreshManaged(),
-      loadPmcBbChoice(),
     ]);
   } finally {
     checking.value = false;
@@ -133,9 +140,12 @@ async function installPmcBb() {
   stage.value = `Downloading ${target}…`;
   pmcMsg.value = null;
   try {
-    const res = await store.installPmcBb(chosenVariant.value || undefined);
+    const pinned = wanted.value?.overridden ? wanted.value.asset : "";
+    if (chosenVariant.value !== pinned) {
+      await store.setPmcBbOverride(chosenVariant.value || null);
+    }
+    const res = await store.installPmcBb();
     pmcMsg.value = `Installed ${res.asset} ${res.version} as pmc_bb.dll (${featureList(res.features)})`;
-    await loadPmcBbChoice();
   } catch {
     /* surfaced via store.error */
   } finally {
@@ -238,41 +248,30 @@ async function normalizeRegion() {
             store.gameFullySetUp ? 'text-emerald-300/80' : 'text-amber-300/80'
           "
         >
-          <template v-if="store.gameFullySetUp">
-            <template v-if="store.setupPath === 'licensed'">
-              Licensed — dxwrapper + pmc_bb.dll installed, exe untouched.
-              Launching
-              <span class="font-mono text-xs">{{ gameInfo.launch_exe_path }}</span
-              >.
+          <template v-if="gameInfo.launch">
+            Launching
+            <span class="font-mono text-xs">{{ gameInfo.launch.exe.path }}</span>
+            ({{ gameInfo.launch.selection === "override" ? "pinned" : "chosen by modkit" }}).
+            <template v-if="store.gameFullySetUp">
+              {{
+                store.setupPath === "dxwrapper"
+                  ? "dxwrapper loads pmc_bb.dll; the exe is untouched."
+                  : "The exe loads pmc_bb.dll itself."
+              }}
             </template>
-            <template v-else-if="store.setupPath === 'drm_free'">
-              DRM-free exe + pmc_bb.dll installed — no crack or wrapper needed.
-              Launching
-              <span class="font-mono text-xs">{{ gameInfo.launch_exe_path }}</span
-              >.
-            </template>
-            <template v-else>
-              v1.1, cracked, and pmc_bb.dll installed — launching
-              <span class="font-mono text-xs">{{ store.crackedBuild?.name }}</span
-              >.
-            </template>
-          </template>
-          <template v-else>
-            <template v-if="store.setupPath === 'licensed'">
-              Licensed copy — install dxwrapper + pmc_bb.dll below (or in
-              <RouterLink to="/setup" class="underline">Setup</RouterLink>). Your
-              exe is never modified.
-            </template>
-            <template v-else-if="store.setupPath === 'drm_free'">
-              DRM-free exe — just install pmc_bb.dll below (or in
-              <RouterLink to="/setup" class="underline">Setup</RouterLink>).
-            </template>
-            <template v-else>
-              Needs v1.1 + cracked exe + pmc_bb.dll — crack it below (or in
+            <template v-else-if="store.setupPath === 'crack'">
+              Stock SecuROM exe with no activation — crack it below (or in
               <RouterLink to="/setup" class="underline">Setup</RouterLink>).
             </template>
           </template>
+          <template v-else>Nothing to launch: {{ gameInfo.launch_error }}</template>
         </p>
+        <ul
+          v-if="gameInfo.launch?.problems.length"
+          class="mt-2 list-disc pl-5 text-sm text-amber-300/90"
+        >
+          <li v-for="p in gameInfo.launch.problems" :key="p">{{ p }}</li>
+        </ul>
         <p
           v-if="store.vcRedistMissing"
           class="mt-2 text-sm font-medium text-amber-300"
@@ -297,51 +296,10 @@ async function normalizeRegion() {
       <section class="guilloche mt-4 rounded-xl border border-zinc-800 p-5">
         <h3 class="plate-title text-sm">Game</h3>
         <dl class="mt-3 space-y-2 text-sm">
-          <div class="flex items-center gap-3">
-            <dt class="w-32 shrink-0 text-zinc-500">Version</dt>
-            <dd>
-              <span
-                class="stamp"
-                :class="versionTone(gameInfo.version)"
-                >{{ gameInfo.version }}</span
-              >
-            </dd>
-          </div>
-          <div class="flex items-center gap-3">
-            <dt class="w-32 shrink-0 text-zinc-500">Variant</dt>
-            <dd class="text-zinc-300">{{ gameInfo.variant }}</dd>
-          </div>
           <div class="flex gap-3">
             <dt class="w-32 shrink-0 text-zinc-500">Install folder</dt>
             <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
               {{ gameInfo.root }}
-            </dd>
-          </div>
-          <div class="flex gap-3">
-            <dt class="w-32 shrink-0 text-zinc-500">Executable</dt>
-            <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
-              {{ gameInfo.exe_path }}
-            </dd>
-          </div>
-          <div class="flex gap-3">
-            <dt class="w-32 shrink-0 text-zinc-500">Exe size</dt>
-            <dd class="text-zinc-300">{{ fmtBytes(gameInfo.exe_size) }}</dd>
-          </div>
-          <div v-if="gameInfo.cracked_exe" class="flex gap-3">
-            <dt class="w-32 shrink-0 text-zinc-500">Cracked exe</dt>
-            <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
-              {{ gameInfo.cracked_exe.path }}
-              <span class="text-zinc-500">
-                — {{ gameInfo.cracked_exe.version }}
-                ({{ gameInfo.cracked_exe.variant }}),
-                {{ fmtBytes(gameInfo.cracked_exe.size) }}</span
-              >
-            </dd>
-          </div>
-          <div class="flex gap-3">
-            <dt class="w-32 shrink-0 text-zinc-500">Launches</dt>
-            <dd class="min-w-0 break-all font-mono text-xs text-zinc-300">
-              {{ gameInfo.launch_exe_path }}
             </dd>
           </div>
           <div v-if="gameInfo.data_dir" class="flex gap-3">
@@ -363,6 +321,58 @@ async function normalizeRegion() {
             </dd>
           </div>
         </dl>
+
+        <!-- Which exe launches. Picking one pins it; modkit then stops switching
+             anything automatically for the launch. -->
+        <h4 class="mt-5 text-xs tracking-wider text-zinc-500 uppercase">Executable to launch</h4>
+        <div class="mt-2 space-y-1.5 text-sm">
+          <label class="flex items-start gap-2 text-zinc-300">
+            <input
+              type="radio"
+              class="mt-1"
+              :checked="pinnedExe === null && !gameInfo.launch_error"
+              :disabled="busy"
+              @change="pinExe(null)"
+            />
+            <span>Automatic — modkit picks the best identified exe</span>
+          </label>
+          <label
+            v-for="e in gameInfo.exes"
+            :key="e.path"
+            class="flex items-start gap-2 text-zinc-300"
+          >
+            <input
+              type="radio"
+              class="mt-1"
+              :checked="pinnedExe === e.path"
+              :disabled="busy"
+              @change="pinExe(e.path)"
+            />
+            <span class="min-w-0">
+              <span class="font-mono text-xs break-all">{{ e.name }}</span>
+              <span
+                v-if="gameInfo.launch?.exe.path === e.path"
+                class="ml-1 text-xs text-emerald-300"
+                >← launches</span
+              >
+              <span class="block text-xs" :class="e.id ? 'text-zinc-500' : 'text-amber-300/90'">
+                <template v-if="e.id">
+                  <span :class="versionTone(e.version ?? '')">{{ e.version }}</span>
+                  {{ e.variant }} — {{ e.label }}
+                </template>
+                <template v-else>unrecognised build</template>
+                · {{ fmtBytes(e.size) }} · sha256 {{ e.sha256.slice(0, 12) }}…
+              </span>
+            </span>
+          </label>
+          <button
+            class="text-xs text-zinc-500 underline hover:text-zinc-300"
+            :disabled="busy"
+            @click="browseExe"
+          >
+            Pin an exe from elsewhere…
+          </button>
+        </div>
       </section>
 
       <!-- pmc_bb.dll — shown on every setup path.
@@ -424,6 +434,10 @@ async function normalizeRegion() {
                   <p class="mt-1 text-xs text-zinc-500">{{ recommended.reason }}</p>
                 </dd>
               </div>
+              <div v-if="wanted?.overridden" class="flex items-center gap-3">
+                <dt class="w-32 shrink-0 text-zinc-500">Pinned</dt>
+                <dd class="font-mono text-xs text-amber-300">{{ wanted.asset }}</dd>
+              </div>
               <div
                 v-if="
                   gameInfo.asi_loader_proxy &&
@@ -472,8 +486,9 @@ async function normalizeRegion() {
               class="mt-2 flex items-center gap-1.5 text-xs text-amber-300"
             >
               <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              The installed build isn't the one this exe calls for — reinstall to
-              switch to {{ recommended?.asset }}.
+              The installed build isn't
+              {{ wanted?.overridden ? "the one you pinned" : "the one this exe calls for" }} —
+              reinstall to switch to {{ wanted?.asset }}.
             </p>
             <p v-if="pmcBbModified" class="mt-2 text-xs text-amber-300">
               This file has changed since modkit installed it — something replaced
@@ -555,7 +570,7 @@ async function normalizeRegion() {
 
       <!-- dxwrapper -->
       <section
-        v-if="store.setupPath === 'licensed' || gameInfo.has_dxwrapper"
+        v-if="store.setupPath === 'dxwrapper' || gameInfo.has_dxwrapper"
         class="guilloche mt-4 rounded-xl border border-zinc-800 p-5"
       >
         <div class="flex items-start justify-between gap-4">
