@@ -28,18 +28,21 @@ use commands::managed::managed_status;
 use commands::managed::wine::{install_wine, remove_wine, select_wine, wine_status};
 use commands::mercsink::{
     fetch_mercsink_mod, fetch_mercsink_registry, fetch_mercsink_release, fetch_mercsink_releases,
-    install_mercsink_shipment,
+    install_mercsink_dependencies, install_mercsink_shipment, plan_mercsink_dependencies,
 };
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::model_view::{model_geometry, model_variants, texture_parts};
 use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
-use commands::runtime_settings::{get_runtime_settings, set_runtime_env};
+use commands::launch_plan::prepare_launch;
+use commands::runtime_settings::{
+    get_runtime_settings, set_exe_override, set_pmc_bb_override, set_runtime_env,
+};
 use commands::save_backup::{
     backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
     set_saves_dir,
 };
-use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, resolve_pmc_bb, update_game};
+use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, update_game};
 use commands::shipment::{
     inspect_shipment, restore_saved_shipments, take_pending_shipment, PendingShipment,
 };
@@ -165,7 +168,6 @@ pub fn run() {
             deploy_asi,
             trash_paths,
             install_pmc_bb,
-            resolve_pmc_bb,
             pmc_bb_variants,
             managed_status,
             crack_game,
@@ -173,10 +175,13 @@ pub fn run() {
             detect_license,
             install_dxwrapper,
             launch_game,
+            prepare_launch,
             discover_runtime,
             select_proton,
             get_runtime_settings,
             set_runtime_env,
+            set_exe_override,
+            set_pmc_bb_override,
             wine_status,
             install_wine,
             select_wine,
@@ -212,6 +217,8 @@ pub fn run() {
             fetch_mercsink_releases,
             fetch_mercsink_release,
             install_mercsink_shipment,
+            plan_mercsink_dependencies,
+            install_mercsink_dependencies,
             plan_shipment_removal,
             remove_shipments,
         ])
