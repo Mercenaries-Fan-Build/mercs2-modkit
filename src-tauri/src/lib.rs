@@ -29,6 +29,7 @@ use commands::managed::wine::{install_wine, remove_wine, select_wine, wine_statu
 use commands::mercsink::{
     fetch_mercsink_mod, fetch_mercsink_registry, fetch_mercsink_release, fetch_mercsink_releases,
     install_mercsink_dependencies, install_mercsink_shipment, plan_mercsink_dependencies,
+    reinstall_missing_shipment,
 };
 use commands::mod_loader::{load_mod, validate_manifest};
 use commands::model_view::{model_geometry, model_variants, texture_parts};
@@ -44,7 +45,8 @@ use commands::save_backup::{
 };
 use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, update_game};
 use commands::shipment::{
-    inspect_shipment, restore_saved_shipments, take_pending_shipment, PendingShipment,
+    inspect_shipment, missing_shipment_folders, restore_saved_shipments, take_pending_shipment,
+    PendingShipment,
 };
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
@@ -211,6 +213,7 @@ pub fn run() {
             set_saves_dir,
             inspect_shipment,
             restore_saved_shipments,
+            missing_shipment_folders,
             take_pending_shipment,
             fetch_mercsink_registry,
             fetch_mercsink_mod,
@@ -219,6 +222,7 @@ pub fn run() {
             install_mercsink_shipment,
             plan_mercsink_dependencies,
             install_mercsink_dependencies,
+            reinstall_missing_shipment,
             plan_shipment_removal,
             remove_shipments,
         ])

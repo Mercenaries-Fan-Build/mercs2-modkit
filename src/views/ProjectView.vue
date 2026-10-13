@@ -23,6 +23,7 @@ const {
   mods,
   asiMods,
   shipments,
+  missingShipmentIds,
   prebuilt,
   wardrobe,
   textures,
@@ -138,6 +139,7 @@ async function updateMod(m: AsiMod) {
 
 onMounted(() => {
   if (store.catalog.length === 0) store.fetchCatalog();
+  void store.refreshMissingShipments();
 });
 
 const ASI_TARGETS = [
@@ -227,12 +229,22 @@ const nothingHere = computed(
               <span class="font-medium text-zinc-100">{{ s.name }}</span>
               <span class="stamp" :class="provenance(s.origin).cls">{{ provenance(s.origin).label }}</span>
               <span class="stamp text-zinc-300">Shipment</span>
+              <span v-if="missingShipmentIds.includes(s.id)" class="stamp text-red-300">files missing</span>
             </div>
             <p class="truncate font-mono text-xs text-zinc-500">
               <span v-if="s.version">v{{ s.version }} · </span>{{ s.slug ?? s.name }}
             </p>
           </div>
           <span class="rounded-full px-2 py-0.5 text-[11px]" :class="wadState().cls">{{ wadState().label }}</span>
+          <button
+            v-if="missingShipmentIds.includes(s.id) && s.origin.source === 'registry'"
+            class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-700/40 hover:text-zinc-200 disabled:opacity-40"
+            :disabled="busy"
+            title="Download the latest release from mercs.ink again"
+            @click="store.reinstallMissingShipment(s.id)"
+          >
+            Reinstall
+          </button>
           <button
             class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-red-500/10 hover:text-red-400"
             title="Remove this Shipment from the load order"

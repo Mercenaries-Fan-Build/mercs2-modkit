@@ -32,6 +32,7 @@ const {
   wardrobe,
   prebuilt,
   shipments,
+  missingShipmentIds,
   textures,
 } = storeToRefs(store);
 
@@ -63,6 +64,7 @@ const placement = ref<PlacementOutcome | null>(null);
 
 onMounted(() => {
   void store.loadWadBackups().catch(() => {});
+  void store.refreshMissingShipments();
   // Deep link from the game bar: land on the validation report and flag it.
   if (route.query.show === "validation" && store.validation) void focusValidation();
 });
@@ -262,17 +264,38 @@ function outcomeText(o: GroupOutcome): string {
           </div>
           <button class="btn-secondary shrink-0" @click="addShipment">Add Shipment…</button>
         </div>
+        <p
+          v-if="missingShipmentIds.length"
+          class="mt-4 rounded-lg border border-red-600/30 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+        >
+          The files of {{ missingShipmentIds.length === 1 ? "one Shipment are" : `${missingShipmentIds.length} Shipments are` }}
+          missing, so nothing can be built. Reinstall a mercs.ink Shipment to download it again, or
+          remove it from the load order.
+        </p>
         <ul v-if="shipments.length" class="mt-4 space-y-2">
           <li
             v-for="(s, i) in shipments"
             :key="s.id"
-            class="engraved flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2"
+            class="engraved flex items-center gap-3 rounded-lg border bg-zinc-900/50 px-3 py-2"
+            :class="missingShipmentIds.includes(s.id) ? 'border-red-600/40' : 'border-zinc-800'"
           >
             <span class="w-6 text-right text-xs text-zinc-600">{{ i + 1 }}</span>
             <div class="min-w-0 flex-1">
-              <p class="truncate text-sm text-zinc-200">{{ s.name }}</p>
+              <p class="truncate text-sm text-zinc-200">
+                {{ s.name }}
+                <span v-if="missingShipmentIds.includes(s.id)" class="stamp ml-2 text-red-300">files missing</span>
+              </p>
               <p class="truncate font-mono text-xs text-zinc-500">{{ s.path }}</p>
             </div>
+            <button
+              v-if="missingShipmentIds.includes(s.id) && s.origin.source === 'registry'"
+              class="btn-secondary px-2 py-1"
+              :disabled="busy"
+              title="Download the latest release from mercs.ink again"
+              @click="store.reinstallMissingShipment(s.id)"
+            >
+              Reinstall
+            </button>
             <button class="btn-secondary px-2 py-1" @click="store.planShipmentRemoval(s.id)">
               ✕
             </button>

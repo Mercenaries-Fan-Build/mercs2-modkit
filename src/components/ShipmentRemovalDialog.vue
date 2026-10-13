@@ -2,8 +2,8 @@
 /**
  * Confirm a Shipment removal, showing the whole chain first: the Shipment the
  * player chose, every Shipment the cascade takes with the requirement that pulls it in, and the
- * dependencies nothing will require any more. One confirmation removes exactly that list;
- * Cancel removes nothing.
+ * dependencies nothing will require any more. Rows whose folders are missing are all removed
+ * together. One confirmation removes exactly that list; Cancel removes nothing.
  */
 import { computed } from "vue";
 import { storeToRefs } from "pinia";
@@ -12,10 +12,15 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import type { PulledBy } from "../types";
 
 const store = useProjectStore();
-const { pendingShipmentRemoval: plan } = storeToRefs(store);
+const { pendingShipmentRemoval: plan, missingShipmentIds } = storeToRefs(store);
 
 const total = computed(() =>
-  plan.value ? 1 + plan.value.cascade.length + plan.value.orphans.length : 0,
+  plan.value
+    ? 1 + plan.value.missing_too.length + plan.value.cascade.length + plan.value.orphans.length
+    : 0,
+);
+const removedIsMissing = computed(
+  () => !!plan.value && missingShipmentIds.value.includes(plan.value.removed.id),
 );
 
 function requirement(p: PulledBy): string {
@@ -34,10 +39,24 @@ function requirement(p: PulledBy): string {
     @cancel="store.cancelShipmentRemoval()"
   >
     <template v-if="plan">
-      <p>
+      <p v-if="removedIsMissing">
+        <strong class="text-zinc-200">{{ plan.removed.name }}</strong>
+        will be removed from the load order. Its folder is already missing, so there are no files to
+        remove.
+      </p>
+      <p v-else>
         <strong class="text-zinc-200">{{ plan.removed.name }}</strong>
         will be removed from the Library. Its staged files go to Modkit's trash.
       </p>
+      <div
+        v-if="plan.missing_too.length"
+        class="mt-3 rounded-lg border border-red-600/30 bg-red-500/10 px-3 py-2 text-red-200"
+      >
+        <p class="font-medium">Their folders are missing too, so they are removed with it:</p>
+        <ul class="mt-1 list-inside list-disc">
+          <li v-for="m in plan.missing_too" :key="m.id">{{ m.name }}</li>
+        </ul>
+      </div>
       <div
         v-if="plan.cascade.length"
         class="mt-3 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-amber-200"

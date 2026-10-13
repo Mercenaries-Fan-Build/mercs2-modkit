@@ -613,6 +613,31 @@ pub(crate) async fn qm_tool(window: Window) -> Result<PathBuf, String> {
     }
 }
 
+/// The rows whose folder is not a directory on disk: qm's own test (`find_manifest`), so a row
+/// listed here is one qm refuses with "the path is not a directory".
+pub fn missing_rows(rows: &[ShipmentRef]) -> Vec<&ShipmentRef> {
+    rows.iter().filter(|r| !Path::new(&r.path).is_dir()).collect()
+}
+
+/// The refusal for a set that contains rows whose folders are missing, naming each one.
+pub fn missing_rows_error(missing: &[&ShipmentRef]) -> String {
+    let list: Vec<String> = missing.iter().map(|r| format!("{}: {}", r.name, r.path)).collect();
+    format!(
+        "The files of {} Shipment{} in your load order are missing, so nothing can be checked or \
+         built:\n{}\nReinstall or remove {} in the Shipments list.",
+        missing.len(),
+        if missing.len() == 1 { "" } else { "s" },
+        list.join("\n"),
+        if missing.len() == 1 { "it" } else { "each one" }
+    )
+}
+
+/// The ids of the rows whose folders are missing.
+#[tauri::command(async)]
+pub fn missing_shipment_folders(rows: Vec<ShipmentRef>) -> Vec<String> {
+    missing_rows(&rows).into_iter().map(|r| r.id.clone()).collect()
+}
+
 /// Run `qm preflight` over `rows` in a fresh work dir, returning the plan whether or not it is
 /// `ok`. Used by the dependency resolver and the removal cascade, which read the plan's
 /// requirement data; a build uses [`shipment_groups`], which refuses a plan that is not ok.

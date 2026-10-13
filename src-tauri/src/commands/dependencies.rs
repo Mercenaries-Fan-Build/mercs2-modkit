@@ -30,6 +30,10 @@
 //! `dependency` rows that nothing still requires are removed as orphans, repeated to a fixed
 //! point. The whole chain is computed first and shown to the player, who confirms once; the
 //! confirmed set is exactly what is removed.
+//!
+//! A row whose folder is missing has no manifest for preflight to read. Removing one removes
+//! every such row at once, and takes the rows that require one of them by name; see
+//! [`plan_removal`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -41,7 +45,7 @@ use tauri::Window;
 use super::load_plan::{LoadPlan, Requirement, RequirementKind, RequirementStatus};
 use super::managed::trash;
 use super::paths::staging_dir;
-use super::shipment::{preflight_rows, InstallReason, ShipmentRef};
+use super::shipment::{missing_rows, preflight_rows, InstallReason, ShipmentRef};
 use crate::models::origin::OriginSource;
 
 // ---------------------------------------------------------------------------------------
@@ -464,6 +468,8 @@ pub struct Cascaded {
 pub struct RemovalPlan {
     /// The Shipment the player asked to remove.
     pub removed: ShipmentRef,
+    /// The other rows whose folders are missing, removed with it (see [`plan_removal`]).
+    pub missing_too: Vec<ShipmentRef>,
     /// Everything the cascade takes, with the requirement that pulled each one in.
     pub cascade: Vec<Cascaded>,
     /// The dependencies the orphan pass then removes.
@@ -474,6 +480,7 @@ impl RemovalPlan {
     /// Every row the plan removes, in the order it was computed.
     pub fn all(&self) -> Vec<&ShipmentRef> {
         std::iter::once(&self.removed)
+            .chain(self.missing_too.iter())
             .chain(self.cascade.iter().map(|c| &c.shipment))
             .chain(self.orphans.iter())
             .collect()
@@ -501,6 +508,14 @@ fn pulled_by(r: &Requirement) -> PulledBy {
 /// Orphans: of the rows left, a `dependency` row that no other remaining row's requirement
 /// names as a provider is an orphan; removed, and repeated to a fixed point. `user` rows never
 /// are.
+///
+/// Rows whose folders are missing are the rows of `rows` that `plan` does not name: preflight
+/// cannot read them, so their requirements are unknown. Every one of them is removed together
+/// (`missing_too`), because the orphan pass is exact only when every remaining row is in the
+/// plan; removing a row whose folder exists while any is missing is refused. A row requires a
+/// missing one when it has a `shipment` requirement with no provider whose target is that row's
+/// `slug`. What a missing row provided is unknown, so a capability requirement never pulls a row in
+/// through one; preflight reports a capability left unmet at the next build.
 pub fn plan_removal(
     target_id: &str,
     rows: &[ShipmentRef],
@@ -517,9 +532,24 @@ pub fn plan_removal(
             return Err(format!("the preflight plan names {}, which is not a library row", item.id));
         }
     }
+    let planned: HashSet<&str> = plan.items.iter().map(|i| i.id.as_str()).collect();
+    let missing: Vec<&ShipmentRef> = rows.iter().filter(|r| !planned.contains(r.id.as_str())).collect();
+    if !missing.is_empty() && planned.contains(removed.id.as_str()) {
+        return Err(format!(
+            "{} can't be removed yet: Modkit can't tell what else depends on it while the files of \
+             {} are missing. Reinstall or remove {} first.",
+            removed.name,
+            missing.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "),
+            if missing.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    let missing_too: Vec<ShipmentRef> =
+        missing.iter().filter(|r| r.id != removed.id).map(|r| (*r).clone()).collect();
+    let missing_names: HashSet<&str> = missing.iter().filter_map(|r| r.slug.as_deref()).collect();
 
     let by_consumer = plan.requirements_by_consumer();
-    let mut set: BTreeSet<String> = BTreeSet::from([removed.id.clone()]);
+    let mut set: BTreeSet<String> = missing.iter().map(|r| r.id.clone()).collect();
+    set.insert(removed.id.clone());
     let mut cascade: Vec<Cascaded> = Vec::new();
 
     loop {
@@ -530,7 +560,10 @@ pub fn plan_removal(
             }
             let Some(reqs) = by_consumer.get(row.id.as_str()) else { continue };
             let pulled = reqs.iter().find(|r| match r.kind {
-                RequirementKind::Shipment => r.providers.iter().any(|p| set.contains(p)),
+                RequirementKind::Shipment => {
+                    r.providers.iter().any(|p| set.contains(p))
+                        || (r.providers.is_empty() && missing_names.contains(r.target.as_str()))
+                }
                 RequirementKind::Capability => {
                     !r.providers.is_empty() && r.providers.iter().all(|p| set.contains(p))
                 }
@@ -575,7 +608,7 @@ pub fn plan_removal(
         }
     }
 
-    Ok(RemovalPlan { removed, cascade, orphans })
+    Ok(RemovalPlan { removed, missing_too, cascade, orphans })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -615,14 +648,15 @@ fn staging_child(path: &Path, staging: &Path) -> Result<Option<PathBuf>, String>
 }
 
 /// Remove each row in order: its staging directory goes to the trash (`trash::discard`), and
-/// its id is reported removed. The first failure stops the run; the rest are reported as not
-/// attempted.
+/// its id is reported removed. A row whose staging directory is already gone has nothing to
+/// trash and leaves the load order only. The first failure stops the run; the rest are
+/// reported as not attempted.
 pub fn remove_rows(rows: &[ShipmentRef], staging: &Path, trash_into: Option<&Path>) -> RemovalOutcome {
     let mut out = RemovalOutcome { removed: Vec::new(), failed: None, not_attempted: Vec::new() };
     for (i, row) in rows.iter().enumerate() {
         let result = staging_child(Path::new(&row.path), staging).and_then(|dir| match dir {
-            Some(d) => trash::discard(&d, trash_into).map(|_| ()),
-            None => Ok(()),
+            Some(d) if d.exists() => trash::discard(&d, trash_into).map(|_| ()),
+            Some(_) | None => Ok(()),
         });
         match result {
             Ok(()) => out.removed.push(row.id.clone()),
@@ -641,7 +675,8 @@ pub fn remove_rows(rows: &[ShipmentRef], staging: &Path, trash_into: Option<&Pat
 // ---------------------------------------------------------------------------------------
 
 /// Compute, without removing anything, what removing `id` takes with it, for the player to
-/// confirm. Runs `qm preflight` over the whole library first.
+/// confirm. Runs `qm preflight` over every row whose folder exists first; when none does, there
+/// is nothing left to cascade to or orphan.
 #[tauri::command]
 pub async fn plan_shipment_removal(
     window: Window,
@@ -649,7 +684,19 @@ pub async fn plan_shipment_removal(
     rows: Vec<ShipmentRef>,
     game_path: String,
 ) -> Result<RemovalPlan, String> {
-    let plan = preflight_rows(window, &rows, &game_path).await?;
+    let missing: HashSet<&str> = missing_rows(&rows).into_iter().map(|r| r.id.as_str()).collect();
+    let present: Vec<ShipmentRef> =
+        rows.iter().filter(|r| !missing.contains(r.id.as_str())).cloned().collect();
+    if present.is_empty() {
+        let removed = rows
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("{id} is not in the library"))?
+            .clone();
+        let missing_too = rows.iter().filter(|r| r.id != id).cloned().collect();
+        return Ok(RemovalPlan { removed, missing_too, cascade: Vec::new(), orphans: Vec::new() });
+    }
+    let plan = preflight_rows(window, &present, &game_path).await?;
     plan_removal(&id, &rows, &plan)
 }
 
@@ -1110,15 +1157,94 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let staging = tmp.path().join("staging");
         let a = staged_row(&staging, "a", false);
+        let bad = ShipmentRef {
+            path: staging.to_string_lossy().into(),
+            ..row("bad", InstallReason::User)
+        };
+        let c = staged_row(&staging, "c", false);
+        let out = remove_rows(&[a, bad, c], &staging, Some(&tmp.path().join("trash")));
+        assert_eq!(out.removed, vec!["shipment:a"]);
+        assert_eq!(out.failed.as_ref().unwrap().id, "shipment:bad");
+        assert_eq!(out.not_attempted, vec!["shipment:c"]);
+        assert!(staging.join("mercsink-c").exists());
+    }
+
+    /// A row whose staging directory is already gone leaves the load order with nothing trashed.
+    #[test]
+    fn a_row_whose_folder_is_gone_is_removed_without_trashing_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let bin = tmp.path().join("trash");
         let gone = ShipmentRef {
             path: staging.join("mercsink-gone").to_string_lossy().into(),
             ..row("gone", InstallReason::User)
         };
-        let c = staged_row(&staging, "c", false);
-        let out = remove_rows(&[a, gone, c], &staging, Some(&tmp.path().join("trash")));
-        assert_eq!(out.removed, vec!["shipment:a"]);
-        assert_eq!(out.failed.as_ref().unwrap().id, "shipment:gone");
-        assert_eq!(out.not_attempted, vec!["shipment:c"]);
-        assert!(staging.join("mercsink-c").exists());
+        let out = remove_rows(&[gone], &staging, Some(&bin));
+        assert_eq!(out.removed, vec!["shipment:gone"]);
+        assert!(out.failed.is_none());
+        assert!(!bin.exists() || std::fs::read_dir(&bin).unwrap().count() == 0);
+    }
+
+    // --- rows whose folders are missing ---
+
+    /// m2-sdk and the patch requiring it are both missing; `ui` requires m2-sdk by name, `other`
+    /// has m2-sdk from another provider, `dep` was installed only for `ui`. Removing the patch
+    /// takes m2-sdk too, cascades to `ui`, orphans `dep`, and keeps `other`.
+    #[test]
+    fn removing_a_missing_row_takes_every_missing_row_and_what_requires_them() {
+        use InstallReason::*;
+        let rows = vec![
+            row("m2-sdk", Dependency),
+            row("patch", User),
+            row("dep", Dependency),
+            row("ui", User),
+            row("other", User),
+            row("fork", User),
+        ];
+        let present: Vec<ShipmentRef> = rows[2..].to_vec();
+        let mut ui_needs = req("ui", RequirementKind::Shipment, "m2-sdk", &[]);
+        ui_needs.status = RequirementStatus::Missing;
+        let p = plan(
+            &present,
+            vec![
+                ui_needs,
+                req("ui", RequirementKind::Shipment, "dep", &["dep"]),
+                req("other", RequirementKind::Shipment, "m2-sdk", &["fork"]),
+            ],
+        );
+        let r = plan_removal("shipment:patch", &rows, &p).unwrap();
+        assert_eq!(ids(&r.missing_too), vec!["m2-sdk"]);
+        let cascaded: Vec<(&str, &str)> = r
+            .cascade
+            .iter()
+            .map(|c| (c.shipment.name.as_str(), c.pulled_by.target.as_str()))
+            .collect();
+        assert_eq!(cascaded, vec![("ui", "m2-sdk")]);
+        assert_eq!(ids(&r.orphans), vec!["dep"]);
+        let all: Vec<&str> = r.all().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(all, vec!["patch", "m2-sdk", "ui", "dep"], "other and fork stay");
+    }
+
+    /// While any row is missing, removing a row whose folder exists is refused, naming the
+    /// missing rows.
+    #[test]
+    fn removing_a_present_row_while_one_is_missing_is_refused() {
+        use InstallReason::*;
+        let rows = vec![row("gone", User), row("here", User)];
+        let p = plan(&rows[1..], vec![]);
+        let e = plan_removal("shipment:here", &rows, &p).unwrap_err();
+        assert!(e.contains("gone"), "{e}");
+    }
+
+    /// What a missing row provided is unknown, so an unprovided capability pulls nothing in.
+    #[test]
+    fn an_unprovided_capability_does_not_cascade_from_a_missing_row() {
+        use InstallReason::*;
+        let rows = vec![row("gone", User), row("x", User)];
+        let mut cap = req("x", RequirementKind::Capability, "gone", &[]);
+        cap.status = RequirementStatus::Missing;
+        let p = plan(&rows[1..], vec![cap]);
+        let r = plan_removal("shipment:gone", &rows, &p).unwrap();
+        assert!(r.cascade.is_empty());
     }
 }

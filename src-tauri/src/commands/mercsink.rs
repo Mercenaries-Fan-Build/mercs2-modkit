@@ -51,6 +51,13 @@
 //! artifact *is* a Shipment source tree — a manifest file exists — because a release of loose
 //! `.wad` files would otherwise stage into a load-order entry that builds nothing.
 //!
+//! # Staging replaces without a gap
+//!
+//! A reinstall moves the staged copy aside, moves the new one in, and only then trashes the old
+//! one ([`replace_staged`]). A failed move puts the old copy back, so a row never points at a
+//! folder that is gone. A row whose folder is gone anyway is reinstalled through
+//! [`reinstall_missing_shipment`].
+//!
 //! # Both catalogues, side by side
 //!
 //! The crash-reporting contract calls `catalog` "legacy-but-supported", and it has permanent
@@ -75,12 +82,13 @@ use crate::commands::incompatibility::{parse_index, IncompatibilityIndex, ListSt
 use crate::commands::installer::{download_bytes, extract_zip, stage_file_count};
 use crate::commands::managed::ledger::now_unix;
 use crate::commands::managed::place::sha256_hex;
+use crate::commands::managed::trash;
 use crate::commands::net;
 use crate::commands::paths::{app_data_dir, downloading_dir, staging_dir};
 use crate::commands::shipment::{
-    has_manifest, preflight_rows, InstallReason, ShipmentRef, MANIFEST_NAMES,
+    has_manifest, missing_rows, preflight_rows, InstallReason, ShipmentRef, MANIFEST_NAMES,
 };
-use crate::models::origin::Origin;
+use crate::models::origin::{Origin, OriginSource};
 
 /// Where the registry lives when nothing overrides it (spec §1).
 const DEFAULT_BASE_URL: &str = "https://mercs.ink";
@@ -1100,6 +1108,44 @@ fn stage_incoming(key: &str, zip: &VerifiedZip, what: &str) -> Result<Staged, St
     Ok(Staged { key: key.to_string(), incoming, root_rel, asset: zip.name.clone() })
 }
 
+/// Move `incoming` into place at `dest`. The Shipment already at `dest` is moved aside to
+/// `<dest>.replaced` first and put back if the move fails, so a failed replace never leaves the
+/// row without its folder. The displaced copy goes to `trash_into` (the app trash when `None`);
+/// nothing is hard-deleted.
+fn replace_staged(incoming: &Path, dest: &Path, trash_into: Option<&Path>) -> Result<(), String> {
+    let mut aside = dest.as_os_str().to_os_string();
+    aside.push(".replaced");
+    let aside = PathBuf::from(aside);
+    if aside.exists() {
+        // Left by an earlier replace that was interrupted after moving the old copy aside.
+        trash::discard(&aside, trash_into)?;
+    }
+    let had_old = dest.exists();
+    if had_old {
+        std::fs::rename(dest, &aside)
+            .map_err(|e| format!("Could not move {} aside to replace it: {e}", dest.display()))?;
+    }
+    if let Err(e) = std::fs::rename(incoming, dest) {
+        let moved = format!("Could not move {} into place: {e}", incoming.display());
+        if !had_old {
+            return Err(moved);
+        }
+        return Err(match std::fs::rename(&aside, dest) {
+            Ok(()) => format!("{moved}. The Shipment that was there is back in place."),
+            Err(back) => format!(
+                "{moved}. The Shipment that was there could not be put back ({back}); it is at {}.",
+                aside.display()
+            ),
+        });
+    }
+    if had_old {
+        trash::discard(&aside, trash_into).map_err(|e| {
+            format!("{} is in place, but the copy it replaced is still at {}: {e}", dest.display(), aside.display())
+        })?;
+    }
+    Ok(())
+}
+
 /// Move every incoming directory into place, replacing what was staged under the same key. The
 /// first failure stops, naming what was committed and what was not. Returns each final root.
 fn commit_staged(staged: &[Staged]) -> Result<Vec<PathBuf>, String> {
@@ -1107,15 +1153,7 @@ fn commit_staged(staged: &[Staged]) -> Result<Vec<PathBuf>, String> {
     let mut roots = Vec::with_capacity(staged.len());
     for (i, s) in staged.iter().enumerate() {
         let dest = staging.join(&s.key);
-        let step = || -> Result<(), String> {
-            if dest.exists() {
-                std::fs::remove_dir_all(&dest)
-                    .map_err(|e| format!("Could not replace {}: {e}", dest.display()))?;
-            }
-            std::fs::rename(&s.incoming, &dest)
-                .map_err(|e| format!("Could not move {} into place: {e}", s.incoming.display()))
-        };
-        if let Err(e) = step() {
+        if let Err(e) = replace_staged(&s.incoming, &dest, None) {
             let done: Vec<&str> = staged[..i].iter().map(|s| s.key.as_str()).collect();
             let left: Vec<&str> = staged[i..].iter().map(|s| s.key.as_str()).collect();
             return Err(format!(
@@ -1246,9 +1284,78 @@ pub async fn install_mercsink_shipment(
 
     let item: RegistryMod =
         unwrap_envelope(&fetch(&client, &mod_url(&slug), &cache).await?.body, "mod")?;
+    let release = pick_release(&client, &cache, &item, version.as_deref()).await?;
+    install_release(window, item, release, &installed, &[], &game_path, InstallReason::User).await
+}
 
-    let wanted = version
+/// Reinstall the latest release of a row whose folder is missing, keeping its install reason.
+///
+/// Only a row installed from mercs.ink can be reinstalled, and only from the mod it was
+/// installed from: the mod mercs.ink now serves under the row's slug must carry the row's
+/// opaque id. Preflight reads only the rows whose folders exist; a requirement on another missing
+/// row is resolved like any unmet one, and the dependency staged under that row's key keeps its
+/// install reason.
+#[tauri::command]
+pub async fn reinstall_missing_shipment(
+    window: Window,
+    id: String,
+    rows: Vec<ShipmentRef>,
+    game_path: String,
+) -> Result<MercsInkInstall, String> {
+    let row = rows
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("{id} is not in the library"))?;
+    let missing: Vec<ShipmentRef> = missing_rows(&rows).into_iter().cloned().collect();
+    if !missing.iter().any(|r| r.id == id) {
+        return Err(format!("{}'s folder is still there ({}); there is nothing to reinstall.", row.name, row.path));
+    }
+    if row.origin.source != OriginSource::Registry {
+        return Err(format!(
+            "{} was not installed from mercs.ink, so Modkit can't download it again. Remove it, \
+             or put its folder back at {}.",
+            row.name, row.path
+        ));
+    }
+    let slug = row
+        .slug
         .as_deref()
+        .ok_or_else(|| format!("{} has no recorded Shipment name, so it can't be looked up on mercs.ink", row.name))?;
+
+    let client = client()?;
+    let cache = cache_path()?;
+    let item: RegistryMod =
+        unwrap_envelope(&fetch(&client, &mod_url(slug), &cache).await?.body, "mod")?;
+    if item.id != row.origin.id {
+        return Err(format!(
+            "mercs.ink's {slug} is now a different mod (id {:?}) than the one {} was installed \
+             from (id {:?}), so it was not reinstalled. Remove it instead.",
+            item.id, row.name, row.origin.id
+        ));
+    }
+    let key = stage_key(&item);
+    if format!("shipment:{key}") != row.id {
+        return Err(format!(
+            "{} would be staged as shipment:{key}, not as its own row {}, so it was not reinstalled. \
+             Remove it and install it again.",
+            row.name, row.id
+        ));
+    }
+    let release = pick_release(&client, &cache, &item, None).await?;
+    let present: Vec<ShipmentRef> =
+        rows.iter().filter(|r| !missing.iter().any(|m| m.id == r.id)).cloned().collect();
+    install_release(window, item, release, &present, &missing, &game_path, row.install_reason).await
+}
+
+/// The release `version` names, or the mod's latest when `None`.
+async fn pick_release(
+    client: &reqwest::Client,
+    cache: &Path,
+    item: &RegistryMod,
+    version: Option<&str>,
+) -> Result<RegistryRelease, String> {
+    let slug = &item.slug;
+    let wanted = version
         .map(str::to_string)
         .or_else(|| item.latest_version.clone())
         .or_else(|| item.latest_release.as_ref().map(|r| r.version.clone()))
@@ -1256,14 +1363,30 @@ pub async fn install_mercsink_shipment(
 
     // §9 step 2: prefer what the mod resource already embedded. The common case — installing
     // the latest — then costs no extra round trip.
-    let release = match &item.latest_release {
+    Ok(match &item.latest_release {
         Some(r) if r.version == wanted => r.clone(),
         _ => {
-            let got = fetch(&client, &release_url(&slug, &wanted), &cache).await?;
+            let got = fetch(client, &release_url(slug, &wanted), cache).await?;
             unwrap_envelope::<RegistryRelease>(&got.body, "release")?
         }
-    };
+    })
+}
 
+/// Install `release` of `item` with every Shipment it requires, as a row with `reason`.
+/// `installed` are the library rows preflight reads; `missing` are rows whose folders are
+/// missing, whose install reasons a dependency staged under their name keeps.
+async fn install_release(
+    window: Window,
+    item: RegistryMod,
+    release: RegistryRelease,
+    installed: &[ShipmentRef],
+    missing: &[ShipmentRef],
+    game_path: &str,
+    reason: InstallReason,
+) -> Result<MercsInkInstall, String> {
+    let client = client()?;
+    let cache = cache_path()?;
+    let slug = &item.slug;
     let what = format!("{slug} {}", release.version);
     ensure_supported_format(declared_format(&release)?, &what)?;
 
@@ -1278,8 +1401,8 @@ pub async fn install_mercsink_shipment(
     let (installed_rows, installed_needs) = if installed.is_empty() {
         (Vec::new(), Vec::new())
     } else {
-        let plan = preflight_rows(window, &installed, &game_path).await?;
-        installed_from_plan(&plan, &installed, Some(&root_name))?
+        let plan = preflight_rows(window, installed, game_path).await?;
+        installed_from_plan(&plan, installed, Some(&root_name))?
     };
 
     let resolved = resolve_against_registry(&client, &cache, |catalog| {
@@ -1289,7 +1412,7 @@ pub async fn install_mercsink_shipment(
 
     // Download and verify everything before any staged Shipment is replaced.
     let (mut staged, dep_meta) =
-        stage_picks(&client, &cache, &resolved, &installed_rows, &installed).await?;
+        stage_picks(&client, &cache, &resolved, &installed_rows, installed, missing).await?;
     let root_key = stage_key(&item);
     let root_zip = fetch_verified_zip(&client, &item, &release).await?;
     staged.push(stage_incoming(&root_key, &root_zip, &what)?);
@@ -1298,7 +1421,7 @@ pub async fn install_mercsink_shipment(
 
     let dependencies = dependency_installs(dep_meta, &staged, &roots);
     let root = roots.last().expect("the root is always staged last");
-    let shipment = shipment_ref(&item, &release, &root_key, root, InstallReason::User);
+    let shipment = shipment_ref(&item, &release, &root_key, root, reason);
 
     Ok(MercsInkInstall {
         staged_files: stage_file_count(root),
@@ -1346,19 +1469,23 @@ async fn resolve_against_registry(
 type DepMeta = (RegistryMod, RegistryRelease, InstallReason, Option<String>);
 
 /// Download, verify and unpack every pick beside its final place. A pick that updates an
-/// installed row keeps that row's install reason; anything new is a dependency.
+/// installed row, or is staged under the key of a `missing` row, keeps that row's install
+/// reason; anything new is a dependency.
 async fn stage_picks(
     client: &reqwest::Client,
     cache: &Path,
     resolved: &Resolved,
     installed_rows: &[InstalledRow],
     installed: &[ShipmentRef],
+    missing: &[ShipmentRef],
 ) -> Result<(Vec<Staged>, Vec<DepMeta>), String> {
-    let reason_of = |name: &str| -> InstallReason {
+    let reason_of = |name: &str, key: &str| -> InstallReason {
+        let row_id = format!("shipment:{key}");
         installed_rows
             .iter()
             .find(|r| r.name == name)
             .and_then(|r| installed.iter().find(|s| s.id == r.id))
+            .or_else(|| missing.iter().find(|s| s.id == row_id))
             .map(|s| s.install_reason)
             .unwrap_or(InstallReason::Dependency)
     };
@@ -1380,7 +1507,8 @@ async fn stage_picks(
             Action::Update { from } => Some(from.clone()),
             Action::Install => None,
         };
-        meta.push((dep_item, dep_release, reason_of(&pick.name), from));
+        let reason = reason_of(&pick.name, &stage_key(&dep_item));
+        meta.push((dep_item, dep_release, reason, from));
     }
     Ok((staged, meta))
 }
@@ -1522,7 +1650,7 @@ pub async fn install_mercsink_dependencies(
     };
     let client = client()?;
     let cache = cache_path()?;
-    let (staged, meta) = stage_picks(&client, &cache, &resolved, &rows, &installed).await?;
+    let (staged, meta) = stage_picks(&client, &cache, &resolved, &rows, &installed, &[]).await?;
     let roots = commit_staged(&staged)?;
     Ok(dependency_installs(meta, &staged, &roots))
 }
@@ -1941,6 +2069,57 @@ mod tests {
         let bare = tempfile::tempdir().unwrap();
         std::fs::write(bare.path().join("vz-patch.wad"), b"x").unwrap();
         assert!(find_shipment_root(bare.path()).is_none());
+    }
+
+    fn dir_with(path: &Path, body: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("manifest.yaml"), body).unwrap();
+    }
+
+    fn body(path: &Path) -> String {
+        std::fs::read_to_string(path.join("manifest.yaml")).unwrap()
+    }
+
+    /// The new copy lands in place and the old one goes to the trash, not away.
+    #[test]
+    fn a_replace_puts_the_new_copy_in_place_and_trashes_the_old() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (incoming, dest, bin) =
+            (tmp.path().join("k.incoming"), tmp.path().join("k"), tmp.path().join("trash"));
+        dir_with(&incoming, "new");
+        dir_with(&dest, "old");
+        replace_staged(&incoming, &dest, Some(&bin)).unwrap();
+        assert_eq!(body(&dest), "new");
+        assert!(!incoming.exists());
+        assert!(!tmp.path().join("k.replaced").exists());
+        let trashed: Vec<PathBuf> = std::fs::read_dir(&bin).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(body(&trashed[0]), "old");
+    }
+
+    /// A move that fails puts the old copy back, so the row keeps its folder.
+    #[test]
+    fn a_failed_replace_puts_the_old_copy_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (incoming, dest) = (tmp.path().join("k.incoming"), tmp.path().join("k"));
+        dir_with(&dest, "old");
+        let e = replace_staged(&incoming, &dest, Some(&tmp.path().join("trash"))).unwrap_err();
+        assert!(e.contains("back in place"), "{e}");
+        assert_eq!(body(&dest), "old");
+    }
+
+    /// An old copy an interrupted replace left aside goes to the trash before the next replace.
+    #[test]
+    fn a_leftover_replaced_copy_is_trashed_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (incoming, dest, bin) =
+            (tmp.path().join("k.incoming"), tmp.path().join("k"), tmp.path().join("trash"));
+        dir_with(&incoming, "new");
+        dir_with(&tmp.path().join("k.replaced"), "stale");
+        replace_staged(&incoming, &dest, Some(&bin)).unwrap();
+        assert_eq!(body(&dest), "new");
+        assert!(!tmp.path().join("k.replaced").exists());
+        assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1);
     }
 
     #[test]

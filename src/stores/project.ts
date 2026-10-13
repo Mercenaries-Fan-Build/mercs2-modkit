@@ -339,6 +339,12 @@ interface ProjectState {
   /** Workshop Shipments (qm source projects) staged for the next build, in load order. */
   shipments: ShipmentRef[];
   /**
+   * Ids of the Shipment rows whose folders are missing on disk, as of the last
+   * {@link refreshMissingShipments}. qm refuses every preflight while one is listed, so each must
+   * be reinstalled or removed before anything builds.
+   */
+  missingShipmentIds: string[];
+  /**
    * A Shipment removal waiting for the player's confirmation: the full chain it takes.
    * Nothing is removed until {@link confirmShipmentRemoval}; cancelling removes nothing.
    */
@@ -406,6 +412,7 @@ export const useProjectStore = defineStore("project", {
     wardrobe: [],
     prebuilt: [],
     shipments: [],
+    missingShipmentIds: [],
     pendingShipmentRemoval: null,
     pendingDependencies: null,
     refusedShipments: null,
@@ -718,6 +725,7 @@ export const useProjectStore = defineStore("project", {
             });
             if (restored.state === "loaded") {
               this.shipments = restored.rows;
+              await this.refreshMissingShipments();
             } else {
               this.refusedShipments = {
                 message: restored.message,
@@ -2193,7 +2201,8 @@ export const useProjectStore = defineStore("project", {
 
     /**
      * Put freshly staged rows into the load order: each replaces the row at the same staging
-     * path (re-installing overwrites that directory) or is appended.
+     * path or with the same id (a mercs.ink row's id names its staging directory, which
+     * re-installing overwrites, even when the Shipment root inside it moved), or is appended.
      */
     mergeShipmentRows(incoming: ShipmentRef[]) {
       // A fresh staging revision dirties the load order even when a reinstall left the
@@ -2202,10 +2211,45 @@ export const useProjectStore = defineStore("project", {
       let rows = this.shipments;
       for (const next of incoming) {
         next.stagedRev = rev;
-        const existing = rows.findIndex((s) => s.path === next.path);
+        const existing = rows.findIndex((s) => s.path === next.path || s.id === next.id);
         rows = existing >= 0 ? rows.map((s, i) => (i === existing ? next : s)) : [...rows, next];
       }
       this.shipments = rows;
+    },
+
+    /** Re-read which Shipment rows' folders are missing. A failed check is reported, not hidden. */
+    async refreshMissingShipments(): Promise<void> {
+      try {
+        this.missingShipmentIds = await invoke<string[]>("missing_shipment_folders", {
+          rows: this.shipments,
+        });
+      } catch (e) {
+        this.error = `Couldn't check whether your Shipments' folders are still there: ${e}`;
+      }
+    },
+
+    /**
+     * Download the latest release of a mercs.ink row whose folder is missing, into the same
+     * row. Rows whose folders exist are what the resolver reads; another missing row the
+     * Shipment requires is reinstalled with it.
+     */
+    async reinstallMissingShipment(id: string): Promise<void> {
+      this.assertShipmentsWritable();
+      this.busy = true;
+      this.error = null;
+      try {
+        const res = await invoke<MercsInkInstall>("reinstall_missing_shipment", {
+          id,
+          rows: this.shipments,
+          gamePath: this.gamePath ?? "",
+        });
+        this.mergeShipmentRows([...res.dependencies.map((d) => d.shipment), res.shipment]);
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.busy = false;
+        await this.refreshMissingShipments();
+      }
     },
 
     /**
@@ -2264,6 +2308,7 @@ export const useProjectStore = defineStore("project", {
       this.assertShipmentsWritable();
       const rows = [
         plan.removed,
+        ...plan.missing_too,
         ...plan.cascade.map((c) => c.shipment),
         ...plan.orphans,
       ];
@@ -2285,6 +2330,7 @@ export const useProjectStore = defineStore("project", {
       } finally {
         this.pendingShipmentRemoval = null;
         this.busy = false;
+        await this.refreshMissingShipments();
       }
     },
 

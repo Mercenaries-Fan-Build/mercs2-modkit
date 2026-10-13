@@ -530,6 +530,9 @@ pub fn map_order(order: &[String], request: &LoadRequest) -> Result<Vec<usize>, 
 /// Write `load-request.json` into `work` and run
 /// `qm preflight --request <file> --out <work> --game <game>`.
 ///
+/// A row whose folder is missing is refused here, naming every such row, before qm runs: qm's
+/// own refusal names only the row id.
+///
 /// Exit 0 and 1 both write a plan, which is read and checked here; exit 0 must carry `ok: true`
 /// and exit 1 `ok: false`. Exit 2 means qm could not run, and its stderr is the error. Any other
 /// exit, or a plan missing after exit 0 or 1, is an error too. The caller decides what `ok:
@@ -541,6 +544,10 @@ pub fn run_preflight(
     game: &OsStr,
     work: &Path,
 ) -> Result<LoadPlan, String> {
+    let missing = super::shipment::missing_rows(rows);
+    if !missing.is_empty() {
+        return Err(super::shipment::missing_rows_error(&missing));
+    }
     let request = LoadRequest::for_rows(rows);
     let request_path = work.join(REQUEST_FILE);
     let text = serde_json::to_string_pretty(&request)
@@ -953,5 +960,30 @@ pub(crate) mod tests {
                 { "id": "shipment:b", "path": "/p/shipment:b" },
                 { "id": "shipment:a", "path": "/p/shipment:a" } ] })
         );
+    }
+
+    /// A row whose folder is missing is refused by name and path before qm runs: the qm path
+    /// here does not exist, so reaching qm would fail with "running qm preflight" instead.
+    #[test]
+    fn a_missing_folder_is_refused_before_qm_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let here = tmp.path().join("here");
+        std::fs::create_dir(&here).unwrap();
+        let row = |id: &str, path: &Path| ShipmentRef {
+            id: format!("shipment:{id}"),
+            name: id.into(),
+            path: path.to_string_lossy().into(),
+            slug: Some(id.into()),
+            version: None,
+            origin: crate::models::origin::Origin::local_unknown(),
+            install_reason: crate::commands::shipment::InstallReason::User,
+        };
+        let gone = tmp.path().join("gone");
+        let rows = [row("here", &here), row("gone", &gone)];
+        let e = run_preflight(&tmp.path().join("no-qm"), &rows, OsStr::new("vz.wad"), tmp.path())
+            .unwrap_err();
+        assert!(e.starts_with("The files of 1 Shipment"), "{e}");
+        assert!(e.contains(&format!("gone: {}", gone.display())), "{e}");
+        assert!(!e.contains("here:"), "{e}");
     }
 }

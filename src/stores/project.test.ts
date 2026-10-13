@@ -32,6 +32,7 @@ describe("Shipment removal", () => {
     const bridge = shipment("lua-bridge", "dependency");
     const plan: ShipmentRemovalPlan = {
       removed: consumer,
+      missing_too: [],
       cascade: [],
       orphans: [ess, bridge],
     };
@@ -55,6 +56,74 @@ describe("Shipment removal", () => {
     expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["plan_shipment_removal"]);
     expect(invokeMock).not.toHaveBeenCalledWith("remove_shipments", expect.anything());
     expect(store.shipments).toEqual(before);
+  });
+});
+
+describe("Shipments whose folders are missing", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    invokeMock.mockReset();
+  });
+
+  it("a reinstall replaces the broken rows in place, even where the Shipment root moved", async () => {
+    const sdk = shipment("m2-sdk", "dependency");
+    const patch = shipment("patch", "user");
+    const ui = shipment("ui", "user");
+    const sdkBack = { ...sdk, path: "/staging/m2-sdk/m2-sdk-v2" };
+    const patchBack = { ...patch, version: "2.0.0" };
+    let missing = [sdk.id, patch.id];
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "reinstall_missing_shipment") {
+        missing = [];
+        return { shipment: patchBack, dependencies: [{ shipment: sdkBack }] };
+      }
+      if (cmd === "missing_shipment_folders") return missing;
+      throw new Error(`unexpected command in this test: ${cmd}`);
+    });
+
+    const store = useProjectStore();
+    store.shipments = [sdk, patch, ui];
+    await store.refreshMissingShipments();
+    expect(store.missingShipmentIds).toEqual([sdk.id, patch.id]);
+
+    await store.reinstallMissingShipment(patch.id);
+    expect(store.error).toBeNull();
+    expect(store.shipments.map((s) => [s.id, s.path, s.version])).toEqual([
+      [sdk.id, sdkBack.path, "1.0.0"],
+      [patch.id, patch.path, "2.0.0"],
+      [ui.id, ui.path, "1.0.0"],
+    ]);
+    expect(store.missingShipmentIds).toEqual([]);
+  });
+
+  it("confirming removes the chosen row and every other missing row with it", async () => {
+    const sdk = shipment("m2-sdk", "dependency");
+    const patch = shipment("patch", "user");
+    const ui = shipment("ui", "user");
+    const keep = shipment("keep", "user");
+    const plan: ShipmentRemovalPlan = {
+      removed: patch,
+      missing_too: [sdk],
+      cascade: [{ shipment: ui, pulled_by: { kind: "shipment", target: "m2-sdk", range: null } }],
+      orphans: [],
+    };
+    let removedRows: string[] = [];
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === "plan_shipment_removal") return plan;
+      if (cmd === "remove_shipments") {
+        removedRows = (args as { rows: ShipmentRef[] }).rows.map((r) => r.id);
+        return { removed: removedRows, failed: null, not_attempted: [] };
+      }
+      if (cmd === "missing_shipment_folders") return [];
+      throw new Error(`unexpected command in this test: ${cmd}`);
+    });
+
+    const store = useProjectStore();
+    store.shipments = [sdk, patch, ui, keep];
+    await store.planShipmentRemoval(patch.id);
+    await store.confirmShipmentRemoval();
+    expect(removedRows).toEqual([patch.id, sdk.id, ui.id]);
+    expect(store.shipments.map((s) => s.id)).toEqual([keep.id]);
   });
 });
 

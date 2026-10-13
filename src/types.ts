@@ -913,6 +913,8 @@ export interface CascadedShipment {
 /** The full chain a removal takes, shown before anything is removed. */
 export interface ShipmentRemovalPlan {
   removed: ShipmentRef;
+  /** The other rows whose folders are missing: they are removed with it. */
+  missing_too: ShipmentRef[];
   cascade: CascadedShipment[];
   /** Dependencies nothing will require any more. */
   orphans: ShipmentRef[];
