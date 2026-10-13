@@ -68,7 +68,8 @@ use serde::{Deserialize, Serialize};
 use tauri::Window;
 
 use crate::commands::dependencies::{
-    installed_from_plan, relayed_shipment_needs, resolve, Action, Candidate, Step,
+    installed_from_plan, relayed_shipment_needs, resolve, resolve_set, unmet_shipment_requirements,
+    Action, Candidate, InstalledRow, Pick, Step, UnmetRequirement,
 };
 use crate::commands::incompatibility::{parse_index, IncompatibilityIndex, ListState, LoadedList};
 use crate::commands::installer::{download_bytes, extract_zip, stage_file_count};
@@ -1278,70 +1279,24 @@ pub async fn install_mercsink_shipment(
         (Vec::new(), Vec::new())
     } else {
         let plan = preflight_rows(window, &installed, &game_path).await?;
-        installed_from_plan(&plan, &installed, &root_name)?
+        installed_from_plan(&plan, &installed, Some(&root_name))?
     };
 
-    let mut releases: BTreeMap<String, Vec<RegistryRelease>> = BTreeMap::new();
-    let mut catalog: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
-    let picks = loop {
-        match resolve(&root_name, &root_needs, &installed_rows, &installed_needs, &catalog)? {
-            Step::Done(picks) => break picks,
-            Step::NeedReleases(name) => {
-                let url = format!("{}/releases", mod_url(&name));
-                let list: Vec<RegistryRelease> =
-                    unwrap_envelope(&fetch(&client, &url, &cache).await?.body, "releases")?;
-                catalog.insert(name.clone(), candidates(&name, &list)?);
-                releases.insert(name, list);
-            }
-        }
-    };
+    let resolved = resolve_against_registry(&client, &cache, |catalog| {
+        resolve(&root_name, &root_needs, &installed_rows, &installed_needs, catalog)
+    })
+    .await?;
 
     // Download and verify everything before any staged Shipment is replaced.
-    let reason_of = |name: &str| -> InstallReason {
-        installed_rows
-            .iter()
-            .find(|r| r.name == name)
-            .and_then(|r| installed.iter().find(|s| s.id == r.id))
-            .map(|s| s.install_reason)
-            .unwrap_or(InstallReason::Dependency)
-    };
-    let mut staged: Vec<Staged> = Vec::new();
-    let mut dep_meta: Vec<(RegistryMod, RegistryRelease, InstallReason, Option<String>)> = Vec::new();
-    for pick in &picks {
-        let dep_item: RegistryMod =
-            unwrap_envelope(&fetch(&client, &mod_url(&pick.name), &cache).await?.body, "mod")?;
-        let dep_release = releases[&pick.name]
-            .iter()
-            .find(|r| r.version == pick.release_version)
-            .cloned()
-            .ok_or_else(|| format!("{} {} vanished from its release list", pick.name, pick.release_version))?;
-        let dep_what = format!("{} {}", pick.name, dep_release.version);
-        ensure_supported_format(declared_format(&dep_release)?, &dep_what)?;
-        let zip = fetch_verified_zip(&client, &dep_item, &dep_release).await?;
-        staged.push(stage_incoming(&stage_key(&dep_item), &zip, &dep_what)?);
-        let from = match &pick.action {
-            Action::Update { from } => Some(from.clone()),
-            Action::Install => None,
-        };
-        dep_meta.push((dep_item, dep_release, reason_of(&pick.name), from));
-    }
+    let (mut staged, dep_meta) =
+        stage_picks(&client, &cache, &resolved, &installed_rows, &installed).await?;
     let root_key = stage_key(&item);
     let root_zip = fetch_verified_zip(&client, &item, &release).await?;
     staged.push(stage_incoming(&root_key, &root_zip, &what)?);
 
     let roots = commit_staged(&staged)?;
 
-    let dependencies = dep_meta
-        .into_iter()
-        .zip(&staged)
-        .zip(&roots)
-        .map(|(((dep_item, dep_release, reason, from), s), root)| DependencyInstall {
-            shipment: shipment_ref(&dep_item, &dep_release, &s.key, root, reason),
-            release_version: dep_release.version.clone(),
-            updated_from: from,
-            asset: s.asset.clone(),
-        })
-        .collect();
+    let dependencies = dependency_installs(dep_meta, &staged, &roots);
     let root = roots.last().expect("the root is always staged last");
     let shipment = shipment_ref(&item, &release, &root_key, root, InstallReason::User);
 
@@ -1355,6 +1310,221 @@ pub async fn install_mercsink_shipment(
         assets: vec![root_zip.name],
         dependencies,
     })
+}
+
+/// The resolver's picks, and every release list read to reach them.
+struct Resolved {
+    picks: Vec<Pick>,
+    releases: BTreeMap<String, Vec<RegistryRelease>>,
+    catalog: BTreeMap<String, Vec<Candidate>>,
+}
+
+/// Run `step` to completion, fetching from mercs.ink each Shipment's releases it asks for.
+async fn resolve_against_registry(
+    client: &reqwest::Client,
+    cache: &Path,
+    step: impl Fn(&BTreeMap<String, Vec<Candidate>>) -> Result<Step, String>,
+) -> Result<Resolved, String> {
+    let mut releases: BTreeMap<String, Vec<RegistryRelease>> = BTreeMap::new();
+    let mut catalog: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+    loop {
+        match step(&catalog)? {
+            Step::Done(picks) => return Ok(Resolved { picks, releases, catalog }),
+            Step::NeedReleases(name) => {
+                let url = format!("{}/releases", mod_url(&name));
+                let got = fetch(client, &url, cache).await.map_err(|e| {
+                    format!("{name} is required, but its releases could not be read from mercs.ink: {e}")
+                })?;
+                let list: Vec<RegistryRelease> = unwrap_envelope(&got.body, "releases")?;
+                catalog.insert(name.clone(), candidates(&name, &list)?);
+                releases.insert(name, list);
+            }
+        }
+    }
+}
+
+type DepMeta = (RegistryMod, RegistryRelease, InstallReason, Option<String>);
+
+/// Download, verify and unpack every pick beside its final place. A pick that updates an
+/// installed row keeps that row's install reason; anything new is a dependency.
+async fn stage_picks(
+    client: &reqwest::Client,
+    cache: &Path,
+    resolved: &Resolved,
+    installed_rows: &[InstalledRow],
+    installed: &[ShipmentRef],
+) -> Result<(Vec<Staged>, Vec<DepMeta>), String> {
+    let reason_of = |name: &str| -> InstallReason {
+        installed_rows
+            .iter()
+            .find(|r| r.name == name)
+            .and_then(|r| installed.iter().find(|s| s.id == r.id))
+            .map(|s| s.install_reason)
+            .unwrap_or(InstallReason::Dependency)
+    };
+    let mut staged = Vec::new();
+    let mut meta = Vec::new();
+    for pick in &resolved.picks {
+        let dep_item: RegistryMod =
+            unwrap_envelope(&fetch(client, &mod_url(&pick.name), cache).await?.body, "mod")?;
+        let dep_release = resolved.releases[&pick.name]
+            .iter()
+            .find(|r| r.version == pick.release_version)
+            .cloned()
+            .ok_or_else(|| format!("{} {} vanished from its release list", pick.name, pick.release_version))?;
+        let dep_what = format!("{} {}", pick.name, dep_release.version);
+        ensure_supported_format(declared_format(&dep_release)?, &dep_what)?;
+        let zip = fetch_verified_zip(client, &dep_item, &dep_release).await?;
+        staged.push(stage_incoming(&stage_key(&dep_item), &zip, &dep_what)?);
+        let from = match &pick.action {
+            Action::Update { from } => Some(from.clone()),
+            Action::Install => None,
+        };
+        meta.push((dep_item, dep_release, reason_of(&pick.name), from));
+    }
+    Ok((staged, meta))
+}
+
+/// The load-order rows for committed picks. `staged` and `roots` start with the picks, in order.
+fn dependency_installs(meta: Vec<DepMeta>, staged: &[Staged], roots: &[PathBuf]) -> Vec<DependencyInstall> {
+    meta.into_iter()
+        .zip(staged)
+        .zip(roots)
+        .map(|(((dep_item, dep_release, reason, from), s), root)| DependencyInstall {
+            shipment: shipment_ref(&dep_item, &dep_release, &s.key, root, reason),
+            release_version: dep_release.version.clone(),
+            updated_from: from,
+            asset: s.asset.clone(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------
+// Dependencies the convoy is missing
+// ---------------------------------------------------------------------------------------
+
+/// One Shipment the convoy needs from mercs.ink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedDependency {
+    pub name: String,
+    pub release_version: String,
+    /// The installed version it would replace, when it is an update.
+    pub updated_from: Option<String>,
+    /// What requires it: Shipment names, or `name version` for another planned dependency.
+    pub required_by: Vec<String>,
+}
+
+/// What the convoy is missing, and what mercs.ink can supply.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyPlan {
+    pub unmet: Vec<UnmetRequirement>,
+    pub install: Vec<PlannedDependency>,
+    /// Why the unmet requirements can't be met from mercs.ink. `None` when `install` meets them.
+    pub unresolved: Option<String>,
+}
+
+fn required_by(name: &str, plan_names: &[(String, String)], resolved: &Resolved) -> Vec<String> {
+    let mut out: Vec<String> = plan_names
+        .iter()
+        .filter(|(_, target)| target == name)
+        .map(|(consumer, _)| consumer.clone())
+        .collect();
+    for p in &resolved.picks {
+        let cand = resolved.catalog[&p.name].iter().find(|c| c.release_version == p.release_version);
+        if cand.is_some_and(|c| c.needs.iter().any(|n| n.target == name)) {
+            out.push(format!("{} {}", p.name, p.release_version));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Preflight the convoy, and resolve its unmet `shipment` requirements against mercs.ink.
+async fn plan_dependencies(
+    window: Window,
+    installed: &[ShipmentRef],
+    game_path: &str,
+) -> Result<(DependencyPlan, Option<(Resolved, Vec<InstalledRow>)>), String> {
+    let none = |unmet, unresolved| (DependencyPlan { unmet, install: Vec::new(), unresolved }, None);
+    if installed.is_empty() {
+        return Ok(none(Vec::new(), None));
+    }
+    let plan = preflight_rows(window, installed, game_path).await?;
+    let unmet = unmet_shipment_requirements(&plan)?;
+    if unmet.is_empty() {
+        return Ok(none(unmet, None));
+    }
+    let (rows, needs) = installed_from_plan(&plan, installed, None)?;
+    let plan_names: Vec<(String, String)> =
+        needs.iter().map(|n| (n.declarer.clone(), n.need.target.clone())).collect();
+
+    let client = client()?;
+    let cache = cache_path()?;
+    let resolved =
+        match resolve_against_registry(&client, &cache, |c| resolve_set(&rows, &needs, c)).await {
+            Ok(r) => r,
+            Err(e) => return Ok(none(unmet, Some(e))),
+        };
+    if resolved.picks.is_empty() {
+        return Ok(none(
+            unmet,
+            Some("Nothing on mercs.ink changes these requirements; they have to be met by hand.".into()),
+        ));
+    }
+    let install = resolved
+        .picks
+        .iter()
+        .map(|p| PlannedDependency {
+            name: p.name.clone(),
+            release_version: p.release_version.clone(),
+            updated_from: match &p.action {
+                Action::Update { from } => Some(from.clone()),
+                Action::Install => None,
+            },
+            required_by: required_by(&p.name, &plan_names, &resolved),
+        })
+        .collect();
+    Ok((DependencyPlan { unmet, install, unresolved: None }, Some((resolved, rows))))
+}
+
+/// What the convoy's unmet `shipment` requirements need from mercs.ink. Installs nothing.
+#[tauri::command]
+pub async fn plan_mercsink_dependencies(
+    window: Window,
+    installed: Vec<ShipmentRef>,
+    game_path: String,
+) -> Result<DependencyPlan, String> {
+    Ok(plan_dependencies(window, &installed, &game_path).await?.0)
+}
+
+/// Install what [`plan_mercsink_dependencies`] offered. Re-plans first and refuses if the plan
+/// no longer matches `expected`, which is what the player confirmed.
+#[tauri::command]
+pub async fn install_mercsink_dependencies(
+    window: Window,
+    installed: Vec<ShipmentRef>,
+    game_path: String,
+    expected: Vec<PlannedDependency>,
+) -> Result<Vec<DependencyInstall>, String> {
+    let (plan, resolved) = plan_dependencies(window, &installed, &game_path).await?;
+    if let Some(e) = plan.unresolved {
+        return Err(e);
+    }
+    if plan.install != expected {
+        return Err(
+            "What your Shipments need from mercs.ink changed since you confirmed, so nothing was installed. Review it again."
+                .into(),
+        );
+    }
+    let Some((resolved, rows)) = resolved else {
+        return Err("Every Shipment requirement is already met; nothing was installed.".into());
+    };
+    let client = client()?;
+    let cache = cache_path()?;
+    let (staged, meta) = stage_picks(&client, &cache, &resolved, &rows, &installed).await?;
+    let roots = commit_staged(&staged)?;
+    Ok(dependency_installs(meta, &staged, &roots))
 }
 
 #[cfg(test)]
