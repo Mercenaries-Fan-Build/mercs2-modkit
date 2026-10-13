@@ -654,28 +654,47 @@ export type Resolution =
   | { kind: "priority"; modId: string }
   | { kind: "exclude"; modId: string };
 
-/** One Mercenaries2*.exe found in the install, identified by size. */
-export interface ExeCandidate {
+export type ExeKind =
+  | "cracked_importing_pmc_bb"
+  | "cracked_importing_other"
+  | "drm_free"
+  | "secu_rom"
+  | "unknown";
+
+/** One exe, identified by sha256 against the catalogue (mirrors exe_identity::ExeIdentity). */
+export interface ExeIdentity {
   path: string;
   name: string;
   size: number;
-  version: string; // "v1.0" | "v1.1" | "unknown"
-  variant: string; // "unsigned" | "ea-signed" | "patched" | "cracked" | "unknown"
+  sha256: string;
+  /** Catalogue id; null when the digest isn't catalogued. */
+  id: string | null;
+  version: string | null;
+  variant: string | null;
+  label: string | null;
+  requires: string | null;
+  kind: ExeKind;
+}
+
+/** What a launch would run (mirrors launch_plan::LaunchPlan). */
+export interface LaunchPlan {
+  exe: ExeIdentity;
+  selection: "auto" | "override";
+  needs_dxwrapper: boolean | null;
+  pmc_bb_auto: PmcBbChoice;
+  pmc_bb_wanted: PmcBbChoice;
+  pmc_bb_installed: string | null;
+  problems: string[];
 }
 
 export interface GameInfo {
   root: string;
-  /** The base exe — apply_crack's input, not necessarily the one we launch. */
-  exe_path: string;
-  exe_size: number;
-  version: string; // "v1.0" | "v1.1" | "unknown"
-  variant: string; // "unsigned" | "ea-signed" | "patched" | "cracked" | "unknown"
-  /** The de-DRM'd exe next to the base one (Mercenaries2.cracked.exe), if any. */
-  cracked_exe: ExeCandidate | null;
-  /** The exe launch_game actually runs: the cracked one when present. */
-  launch_exe_path: string;
+  exes: ExeIdentity[];
+  /** apply_crack's input. */
+  base_exe: ExeIdentity | null;
+  launch: LaunchPlan | null;
+  launch_error: string | null;
   has_pmc_bb: boolean;
-  /** dxwrapper.dll present — the non-destructive loader for licensed copies. */
   has_dxwrapper: boolean;
   asi_loader_proxy: string | null; // e.g. "pmc_bb.dll", or null if none
   data_dir: string | null;
@@ -850,6 +869,31 @@ export interface DependencyInstall {
   /** The version it replaced, when this was an update of an installed row. */
   updated_from: string | null;
   asset: string;
+}
+
+/** A `shipment` requirement preflight reports as not met (mirrors dependencies::UnmetRequirement). */
+export interface UnmetRequirement {
+  consumer: string;
+  target: string;
+  range: string | null;
+  status: "missing" | "version_unsatisfied";
+}
+
+/** One Shipment the convoy needs from mercs.ink (mirrors mercsink::PlannedDependency). */
+export interface PlannedDependency {
+  name: string;
+  release_version: string;
+  updated_from: string | null;
+  /** Shipment names, or `name version` for another planned dependency. */
+  required_by: string[];
+}
+
+/** What the convoy is missing, and what mercs.ink can supply (mirrors mercsink::DependencyPlan). */
+export interface DependencyPlan {
+  unmet: UnmetRequirement[];
+  install: PlannedDependency[];
+  /** Why the unmet requirements can't be met from mercs.ink. */
+  unresolved: string | null;
 }
 
 /** The requirement of a Shipment's that pulled it into a removal. */
@@ -1514,6 +1558,7 @@ export interface RuntimeSettings {
   registry: RegistryValue[];
   winedebug: string | null;
   exeArgs: string[];
+  overrides: { exe: string | null; pmcBb: string | null };
 }
 
 /** Mirrors Rust `RuntimeSettingsView`. */
