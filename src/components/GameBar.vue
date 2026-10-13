@@ -5,6 +5,8 @@ import { useRouter } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import Spinner from "./Spinner.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
+import type { LaunchPlan } from "../types";
 
 const store = useProjectStore();
 const router = useRouter();
@@ -62,8 +64,29 @@ onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer);
 });
 
+// Problems with the launch plan (or an unrecognised exe) are shown before launching;
+// the user decides whether to continue.
+const pendingPlan = ref<LaunchPlan | null>(null);
+
 async function play() {
   if (transitioning.value || gameRunning.value) return;
+  transitioning.value = true;
+  try {
+    const plan = await store.prepareLaunch();
+    if (plan.problems.length || !plan.exe.id) {
+      pendingPlan.value = plan;
+      return;
+    }
+    await store.launchGame(verboseLog.value);
+  } catch {
+    /* surfaced via store.error */
+  } finally {
+    transitioning.value = false;
+  }
+}
+
+async function launchAnyway() {
+  pendingPlan.value = null;
   transitioning.value = true;
   try {
     await store.launchGame(verboseLog.value);
@@ -73,6 +96,8 @@ async function play() {
     transitioning.value = false;
   }
 }
+
+const launchExe = computed(() => gameInfo.value?.launch?.exe ?? null);
 
 async function stop() {
   if (transitioning.value) return;
@@ -135,17 +160,41 @@ function versionTone(v: string): string {
         <!-- Status badges live under the folder path so they don't crowd the
              launch controls; compact 10px chips that wrap as needed. -->
         <div class="mt-1 flex flex-wrap items-center gap-1.5">
-          <span
-            class="stamp serial"
-            :class="versionTone(gameInfo.version)"
-          >
-            {{ gameInfo.version }}
-          </span>
-          <span
-            v-if="gameInfo.variant !== 'unknown'"
-            class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
-          >
-            {{ gameInfo.variant }}
+          <!-- The exe a launch would run. -->
+          <template v-if="launchExe">
+            <span
+              class="stamp serial"
+              :class="versionTone(launchExe.version ?? '')"
+              :title="launchExe.path"
+            >
+              {{ launchExe.version ?? "unrecognised" }}
+            </span>
+            <span
+              v-if="launchExe.variant"
+              class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400"
+              :title="launchExe.label ?? launchExe.path"
+            >
+              {{ launchExe.variant }}
+            </span>
+            <span
+              v-if="gameInfo.launch?.selection === 'override'"
+              class="chip chip-off"
+              title="Exe pinned in Game Info"
+            >
+              pinned: {{ launchExe.name }}
+            </span>
+            <span
+              v-if="gameInfo.launch?.problems.length"
+              class="chip !text-amber-300"
+              :title="gameInfo.launch.problems.join('\n')"
+            >
+              ⚠ {{ gameInfo.launch.problems.length }} setup problem{{
+                gameInfo.launch.problems.length === 1 ? "" : "s"
+              }}
+            </span>
+          </template>
+          <span v-else class="chip !text-red-300" :title="gameInfo.launch_error ?? ''">
+            nothing to launch
           </span>
           <span
             class="chip"
@@ -273,6 +322,26 @@ function versionTone(v: string): string {
         </button>
       </div>
     </template>
+
+  <ConfirmDialog
+    :open="!!pendingPlan"
+    title="Launch anyway?"
+    confirm-label="Launch anyway"
+    cancel-label="Go back"
+    @confirm="launchAnyway"
+    @cancel="pendingPlan = null"
+  >
+    <template v-if="pendingPlan">
+      <p class="font-mono text-xs break-all">{{ pendingPlan.exe.path }}</p>
+      <p v-if="!pendingPlan.exe.id" class="mt-2 text-amber-300">
+        This exe isn't a version modkit knows (sha256 {{ pendingPlan.exe.sha256.slice(0, 12) }}…),
+        so modkit can't tell what it needs.
+      </p>
+      <ul v-if="pendingPlan.problems.length" class="mt-2 list-disc pl-5 text-amber-300">
+        <li v-for="p in pendingPlan.problems" :key="p">{{ p }}</li>
+      </ul>
+    </template>
+  </ConfirmDialog>
   </header>
 </template>
 
