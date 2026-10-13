@@ -614,7 +614,7 @@ mod tests {
                 file: "Mercenaries2.exe".into(),
                 size: 53_482_288,
                 hash: "deadbeef".into(),
-                identified_id: Some("v11-cracked-cruise".into()),
+                identified_id: Some("archived-1-cracked-cruise".into()),
                 identified_as: Some("v1.1 cracked".into()),
                 notes: vec!["bypass only — does not load ASI mods".into()],
             }],
