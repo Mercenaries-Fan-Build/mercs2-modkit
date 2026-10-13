@@ -3,9 +3,9 @@ import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
-import type { PmcBbChoice, PmcBbVariant } from "../types";
+import type { ComponentRemoval, PmcBbChoice, PmcBbVariant } from "../types";
 import CrackPanel from "../components/CrackPanel.vue";
 import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
 import RuntimePanel from "../components/RuntimePanel.vue";
@@ -150,6 +150,35 @@ async function installPmcBb() {
     /* surfaced via store.error */
   } finally {
     stage.value = "";
+  }
+}
+
+/** Whether Modkit's ledger records installing `key`, so there is something of its to remove. */
+function recorded(key: "pmc_bb" | "dxwrapper"): boolean {
+  return !!store.managedComponent(key)?.installedTag;
+}
+
+/** One line on what a removal did, naming every file it did not trash. */
+function describeRemoval(label: string, r: ComponentRemoval): string {
+  const parts = [`Removed ${label}: ${r.removed.length} file${r.removed.length === 1 ? "" : "s"} moved to Modkit's trash.`];
+  if (r.kept_modified.length) parts.push(`Left in place because they were changed since Modkit installed them: ${r.kept_modified.join(", ")}.`);
+  if (r.missing.length) parts.push(`Already gone: ${r.missing.join(", ")}.`);
+  return parts.join(" ");
+}
+
+async function removeComponent(key: "pmc_bb" | "dxwrapper", label: string) {
+  const ok = await ask(
+    `Remove ${label} from the game folder? The files Modkit installed go to Modkit's trash. ` +
+      "Nothing is put back in their place.",
+    { title: `Remove ${label}`, kind: "warning" },
+  );
+  if (!ok) return;
+  const msg = key === "pmc_bb" ? pmcMsg : dxMsg;
+  msg.value = null;
+  try {
+    msg.value = describeRemoval(label, await store.removeManagedComponent(key));
+  } catch {
+    /* surfaced via store.error */
   }
 }
 
@@ -560,6 +589,15 @@ async function normalizeRegion() {
                     : "Install"
             }}
           </button>
+          <button
+            v-if="recorded('pmc_bb')"
+            class="shrink-0 rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-50"
+            :disabled="busy"
+            title="Move the pmc_bb.dll Modkit installed to Modkit's trash"
+            @click="removeComponent('pmc_bb', 'pmc_bb')"
+          >
+            Remove
+          </button>
         </div>
       </section>
 
@@ -637,6 +675,15 @@ async function normalizeRegion() {
                   ? "Reinstall"
                   : "Install"
             }}
+          </button>
+          <button
+            v-if="recorded('dxwrapper')"
+            class="shrink-0 rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-50"
+            :disabled="busy"
+            title="Move the dxwrapper files Modkit installed to Modkit's trash"
+            @click="removeComponent('dxwrapper', 'dxwrapper')"
+          >
+            Remove
           </button>
         </div>
       </section>
