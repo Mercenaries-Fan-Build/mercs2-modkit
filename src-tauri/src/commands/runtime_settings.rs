@@ -1,5 +1,5 @@
-//! How the game is run on a non-Windows host: which Wine/Proton, which prefix, and
-//! every knob passed to it. One file, read by the launcher itself.
+//! How the game is run: which exe, and on a non-Windows host which Wine/Proton,
+//! which prefix, and every knob passed to it. One file, read by the launcher itself.
 //!
 //! # Why the backend owns this
 //!
@@ -11,9 +11,11 @@
 //! # The file is the full surface; the UI is a subset
 //!
 //! `<app-data>/runtime.json` can set the runner, the prefix, environment variables,
-//! DLL overrides, registry values written into the prefix, `WINEDEBUG`, and extra
-//! game arguments. The UI exposes only the runner selection and the environment
-//! list; everything else is an "I know what I'm doing" edit of this file.
+//! DLL overrides, registry values written into the prefix, `WINEDEBUG`, extra
+//! game arguments, and `overrides` — the exe to launch and the pmc_bb build, when
+//! the user picks them instead of modkit. The UI exposes the runner selection, the
+//! environment list, and the two overrides; everything else is an "I know what I'm
+//! doing" edit of this file. `overrides` applies on every host, Windows included.
 //!
 //! Because the file is hand-edited, it is parsed strictly: an unknown field, a bad
 //! value, or a format from a newer modkit **fails the launch** with the file's path
@@ -38,6 +40,20 @@ const FORMAT: u32 = 1;
 
 /// The settings file's name under the app-data dir.
 const FILE: &str = "runtime.json";
+
+/// Choices the user made by hand, which modkit would otherwise make itself. While
+/// one is set, modkit does not change it to suit anything else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+pub struct Overrides {
+    /// Absolute path of the exe to launch. Unset: modkit ranks the identified exes
+    /// (see [`super::launch_plan`]). A pinned exe that has gone missing fails the
+    /// launch; another one is never substituted.
+    pub exe: Option<String>,
+    /// The pmc_bb release asset to install, e.g. `pmc_bb_asi_log.dll`. Unset:
+    /// modkit installs the build the launched exe calls for.
+    pub pmc_bb: Option<String>,
+}
 
 /// One environment variable passed to Wine/Proton. A list, not a map, so the UI
 /// keeps the order the user entered.
@@ -103,6 +119,9 @@ pub struct RuntimeSettings {
     pub winedebug: Option<String>,
     /// Extra arguments after the game exe.
     pub exe_args: Vec<String>,
+
+    /// The exe and pmc_bb build, when the user picked them by hand.
+    pub overrides: Overrides,
 }
 
 impl Default for RuntimeSettings {
@@ -120,6 +139,7 @@ impl Default for RuntimeSettings {
             registry: Vec::new(),
             winedebug: None,
             exe_args: Vec::new(),
+            overrides: Overrides::default(),
         }
     }
 }
@@ -184,6 +204,24 @@ impl RuntimeSettings {
                 return Err(format!(
                     "registry value '{}\\{}' must be single-line ASCII",
                     r.key, r.name
+                ));
+            }
+        }
+
+        if let Some(exe) = &self.overrides.exe {
+            if !Path::new(exe).is_absolute() {
+                return Err(format!("overrides.exe '{exe}' must be an absolute path"));
+            }
+        }
+        if let Some(asset) = &self.overrides.pmc_bb {
+            if super::managed::pmc_bb::Variant::by_asset(asset).is_none() {
+                return Err(format!(
+                    "overrides.pmcBb '{asset}' is not a pmc_bb build (known: {})",
+                    super::managed::pmc_bb::VARIANTS
+                        .iter()
+                        .map(|v| v.asset)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
@@ -353,6 +391,24 @@ pub fn get_runtime_settings() -> Result<RuntimeSettingsView, String> {
 #[tauri::command(async)]
 pub fn set_runtime_env(env: Vec<EnvVar>) -> Result<RuntimeSettings, String> {
     update(|s| s.env = env)
+}
+
+/// Pin the exe launches run (`None` hands the choice back to modkit).
+#[tauri::command(async)]
+pub fn set_exe_override(exe: Option<String>) -> Result<RuntimeSettings, String> {
+    if let Some(p) = &exe {
+        if !Path::new(p).is_file() {
+            return Err(format!("{p} is not a file"));
+        }
+    }
+    update(|s| s.overrides.exe = exe)
+}
+
+/// Pin the pmc_bb build (`None` hands the choice back to modkit). Records the
+/// choice only; `install_pmc_bb` installs it.
+#[tauri::command(async)]
+pub fn set_pmc_bb_override(asset: Option<String>) -> Result<RuntimeSettings, String> {
+    update(|s| s.overrides.pmc_bb = asset)
 }
 
 #[cfg(test)]
@@ -554,6 +610,22 @@ mod tests {
         .unwrap();
         assert_eq!(s.registry[1].value, RegData::Dword(1));
         assert_eq!(s.registry[2].value, RegData::Delete);
+    }
+
+    #[test]
+    fn overrides_round_trip_and_bad_ones_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.json");
+        let exe = dir.path().join("Mercenaries2.exe");
+        let json = serde_json::json!({ "overrides": { "exe": exe, "pmcBb": "pmc_bb_asi_log.dll" } });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let s = read_at(&path).unwrap();
+        assert_eq!(s.overrides.pmc_bb.as_deref(), Some("pmc_bb_asi_log.dll"));
+
+        std::fs::write(&path, r#"{ "overrides": { "pmcBb": "pmc_bb.dll" } }"#).unwrap();
+        assert!(read_at(&path).unwrap_err().contains("not a pmc_bb build"));
+        std::fs::write(&path, r#"{ "overrides": { "exe": "Mercenaries2.exe" } }"#).unwrap();
+        assert!(read_at(&path).unwrap_err().contains("absolute"));
     }
 
     #[test]
