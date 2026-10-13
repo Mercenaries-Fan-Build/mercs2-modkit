@@ -78,6 +78,34 @@ fn dispatch_deep_link(app: &tauri::AppHandle, url: &str) {
     }
 }
 
+/// The configured window has no position, so Windows creates it at `CW_USEDEFAULT`: a cascade
+/// offset that ignores the window's size and the taskbar, which pushes its bottom off-screen on
+/// smaller or high-scale displays. Shrink it to the monitor's work area and pin it to that area's
+/// top-left corner.
+#[cfg(desktop)]
+fn fit_to_work_area(window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::PhysicalSize;
+
+    let monitor = window
+        .current_monitor()?
+        .ok_or("the main window is not on any monitor the OS reports")?;
+    let area = *monitor.work_area();
+
+    let outer = window.outer_size()?;
+    let inner = window.inner_size()?;
+    let frame_w = outer.width - inner.width;
+    let frame_h = outer.height - inner.height;
+    if outer.width > area.size.width || outer.height > area.size.height {
+        window.set_size(PhysicalSize::new(
+            outer.width.min(area.size.width).saturating_sub(frame_w),
+            outer.height.min(area.size.height).saturating_sub(frame_h),
+        ))?;
+    }
+
+    window.set_position(area.position)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -124,6 +152,17 @@ pub fn run() {
                         dispatch_deep_link(&handle, url.as_str());
                     }
                 });
+            }
+
+            // The window starts hidden (tauri.conf.json) so it appears already fitted.
+            #[cfg(desktop)]
+            {
+                use tauri::Manager;
+                let window = app
+                    .get_webview_window("main")
+                    .ok_or("the main window was not created")?;
+                fit_to_work_area(&window)?;
+                window.show()?;
             }
             Ok(())
         })
