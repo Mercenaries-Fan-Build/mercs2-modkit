@@ -58,7 +58,7 @@ fn meta_for(name: &str) -> ExeMeta {
     };
     let (id, label, requires, note): (&str, &str, Option<&str>, Option<&str>) = match name {
         "Mercenaries2 (v1.0 unsigned).exe" => (
-            "v10-unsigned",
+            "archived-2-disk-dump",
             "retail unsigned",
             None,
             Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
@@ -82,8 +82,8 @@ fn meta_for(name: &str) -> ExeMeta {
             Some("Loads ASI mods via the pmc_bb.dll loader — modkit's supported crack."),
         ),
         "Mercenaries2(v1.1 cruise.dll).exe" => (
-            "v11-cracked-cruise",
-            "cruise.dll crack (archive.org)",
+            "archived-1-cracked-cruise",
+            "cruise.dll crack (archived)",
             Some("cruise.dll"),
             Some("SecuROM bypass only — does NOT load ASI mods; use modkit's pmc_bb crack for modding."),
         ),
