@@ -16,6 +16,7 @@ use std::path::PathBuf;
 pub mod ledger;
 pub mod place;
 pub mod pmc_bb;
+pub mod remove;
 pub mod status;
 pub mod trash;
 pub mod wine;
