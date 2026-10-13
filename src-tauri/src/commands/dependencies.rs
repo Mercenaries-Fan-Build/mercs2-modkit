@@ -14,6 +14,9 @@
 //! * `shipment` requirements (a bare name, or `{ shipment, version }`) are resolved: the
 //!   resolver installs the highest release that satisfies every range on that name, and never
 //!   goes below an installed version.
+//! * A Shipment staged from a folder or the Workshop is not resolved when added; the unmet
+//!   `shipment` rows of the whole set are resolved on request ([`resolve_set`]) and offered to
+//!   the player before anything is installed.
 //! * `capability` requirements are **not** auto-installed. Which provider to install is not
 //!   decided, and Modkit never infers an undeclared need. An unmet capability is reported by
 //!   preflight as M0204.
@@ -35,7 +38,7 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
-use super::load_plan::{LoadPlan, Requirement, RequirementKind};
+use super::load_plan::{LoadPlan, Requirement, RequirementKind, RequirementStatus};
 use super::managed::trash;
 use super::paths::staging_dir;
 use super::shipment::{preflight_rows, InstallReason, ShipmentRef};
@@ -214,6 +217,26 @@ pub fn resolve(
     installed_needs: &[InstalledNeed],
     catalog: &BTreeMap<String, Vec<Candidate>>,
 ) -> Result<Step, String> {
+    resolve_inner(Some(root), root_needs, installed, installed_needs, catalog)
+}
+
+/// Resolve the requirements the installed set declares, with no Shipment being installed:
+/// what the convoy needs from mercs.ink for every requirement to be met.
+pub fn resolve_set(
+    installed: &[InstalledRow],
+    installed_needs: &[InstalledNeed],
+    catalog: &BTreeMap<String, Vec<Candidate>>,
+) -> Result<Step, String> {
+    resolve_inner(None, &[], installed, installed_needs, catalog)
+}
+
+fn resolve_inner(
+    root: Option<&str>,
+    root_needs: &[ShipmentNeed],
+    installed: &[InstalledRow],
+    installed_needs: &[InstalledNeed],
+    catalog: &BTreeMap<String, Vec<Candidate>>,
+) -> Result<Step, String> {
     let installed_by_name: HashMap<&str, &InstalledRow> =
         installed.iter().map(|r| (r.name.as_str(), r)).collect();
 
@@ -224,7 +247,8 @@ pub fn resolve(
         // Every range currently in force, by target, with who declares it.
         let mut ranges: BTreeMap<&str, Vec<(String, &ShipmentNeed)>> = BTreeMap::new();
         for n in root_needs {
-            ranges.entry(n.target.as_str()).or_default().push((root.to_string(), n));
+            let who = root.unwrap_or_default().to_string();
+            ranges.entry(n.target.as_str()).or_default().push((who, n));
         }
         for n in installed_needs {
             // An installed row being replaced by a new release declares that release's needs
@@ -249,7 +273,7 @@ pub fn resolve(
 
         let mut next: BTreeMap<String, usize> = BTreeMap::new();
         for (&target, declared) in &ranges {
-            if target == root {
+            if Some(target) == root {
                 continue;
             }
             let why = || {
@@ -330,18 +354,53 @@ pub fn resolve(
         chosen = next;
     }
     Err(format!(
-        "Resolving the requirements of {root} did not settle after {MAX_PASSES} passes; the ranges its dependencies declare keep excluding each other's picks."
+        "Resolving the requirements of {} did not settle after {MAX_PASSES} passes; the ranges its dependencies declare keep excluding each other's picks.",
+        root.unwrap_or("your Shipments")
     ))
+}
+
+/// A `shipment` requirement preflight reports as not met.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnmetRequirement {
+    /// The requiring Shipment's name.
+    pub consumer: String,
+    pub target: String,
+    pub range: Option<String>,
+    pub status: RequirementStatus,
+}
+
+/// Every `shipment` requirement in `plan` that is missing or out of range. Capability
+/// requirements are not installed by Modkit (module docs), so they are not listed.
+pub fn unmet_shipment_requirements(plan: &LoadPlan) -> Result<Vec<UnmetRequirement>, String> {
+    let names: HashMap<&str, &str> =
+        plan.items.iter().map(|i| (i.id.as_str(), i.name.as_str())).collect();
+    let mut out = Vec::new();
+    for r in &plan.requirements {
+        let unmet = matches!(r.status, RequirementStatus::Missing | RequirementStatus::VersionUnsatisfied);
+        if r.kind != RequirementKind::Shipment || !unmet {
+            continue;
+        }
+        let consumer = names.get(r.consumer.as_str()).ok_or_else(|| {
+            format!("the preflight plan's requirement names {}, which is not one of its items", r.consumer)
+        })?;
+        out.push(UnmetRequirement {
+            consumer: consumer.to_string(),
+            target: r.target.clone(),
+            range: r.range.clone(),
+            status: r.status,
+        });
+    }
+    Ok(out)
 }
 
 /// The installed rows and their requirements, read off a preflight plan.
 ///
-/// `root` names the Shipment being installed: requirements its current row declares are dropped,
-/// because the release being installed replaces them.
+/// `root` names the Shipment being installed, if any: requirements its current row declares are
+/// dropped, because the release being installed replaces them.
 pub fn installed_from_plan(
     plan: &LoadPlan,
     rows: &[ShipmentRef],
-    root: &str,
+    root: Option<&str>,
 ) -> Result<(Vec<InstalledRow>, Vec<InstalledNeed>), String> {
     let by_id: HashMap<&str, &ShipmentRef> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
     let mut installed = Vec::new();
@@ -369,7 +428,7 @@ pub fn installed_from_plan(
         let declarer = names
             .get(r.consumer.as_str())
             .ok_or_else(|| format!("the preflight plan's requirement names {}, which is not one of its items", r.consumer))?;
-        if *declarer == root {
+        if Some(*declarer) == root {
             continue;
         }
         needs.push(InstalledNeed {
@@ -874,6 +933,33 @@ mod tests {
 
     fn ids(v: &[ShipmentRef]) -> Vec<&str> {
         v.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    /// Ess staged from a folder, lua-bridge absent: the unmet row is reported by name, and the
+    /// set resolves it to the top of its range.
+    #[test]
+    fn a_folder_shipments_missing_dependency_is_found_and_resolved() {
+        let mut ess = row("ess", InstallReason::User);
+        ess.origin = Origin::local(None);
+        let mut r = req("ess", RequirementKind::Shipment, "lua-bridge", &[]);
+        r.range = Some("^1.0.0".into());
+        r.status = RequirementStatus::Missing;
+        let mut cap = req("ess", RequirementKind::Capability, "m2-sdk", &[]);
+        cap.status = RequirementStatus::Missing;
+        let p = plan(std::slice::from_ref(&ess), vec![r, cap]);
+
+        let unmet = unmet_shipment_requirements(&p).unwrap();
+        assert_eq!(unmet.len(), 1, "capabilities are not installed: {unmet:?}");
+        assert_eq!((unmet[0].consumer.as_str(), unmet[0].target.as_str()), ("ess", "lua-bridge"));
+
+        let (rows, needs) = installed_from_plan(&p, &[ess], None).unwrap();
+        let mut catalog = BTreeMap::new();
+        assert!(matches!(resolve_set(&rows, &needs, &catalog).unwrap(), Step::NeedReleases(ref n) if n == "lua-bridge"));
+        catalog.insert("lua-bridge".into(), vec![cand("1.0.0", vec![]), cand("1.3.1", vec![]), cand("2.0.0", vec![])]);
+        assert_eq!(
+            done(resolve_set(&rows, &needs, &catalog).unwrap()),
+            vec![Pick { name: "lua-bridge".into(), release_version: "1.3.1".into(), action: Action::Install }]
+        );
     }
 
     /// Removing Ess orphans lua-bridge, which was installed only because Ess needed it.
