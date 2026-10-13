@@ -89,7 +89,7 @@ pub const EXE_IDS: &[&str] = &[
     // A v1.1 patched exe with SecuROM removed: import table rebuilt into an appended
     // `reloaded` section, `.securom` left inert, and no sidecar import at all. It is the
     // build that makes size classification indefensible — a rebuild of the *patched* exe
-    // that lands at exactly the *cracked* size, so `classify` names it `cracked`.
+    // that lands at exactly the *cracked* size, so a size classifier names it `cracked`.
     "v11-patched-drmfree",
 ];
 
@@ -940,9 +940,8 @@ fn identify_exe(
     let (size, hash) = hash_file(algo, &path).ok()?;
 
     let mut notes = Vec::new();
-    // Identification is by content hash against the catalogue. Not by size — two catalogued
-    // builds share a size — and not by `classify(size)` in `game.rs`, which is a cruder path
-    // that predates this one and cannot tell those two apart at all.
+    // Identification is by content hash against the catalogue, never by size: three
+    // catalogued builds share a size.
     let matched = catalog.iter().find(|e| e.hash == hash);
     let identified_id = matched.and_then(|e| e.id.clone());
     let identified_as = match matched {
@@ -988,6 +987,7 @@ fn identify_exe(
 /// a few hundred thousand strings to reach six of them.
 #[derive(Debug, Deserialize)]
 struct ExeCatalog {
+    algo: String,
     #[serde(default)]
     exes: Vec<ExeEntry>,
 }
@@ -996,38 +996,33 @@ static EXE_CATALOG: std::sync::OnceLock<Vec<ExeEntry>> = std::sync::OnceLock::ne
 
 /// The bundled exe catalogue, parsed once per run.
 ///
-/// An empty slice when the resource cannot be read or parsed. That degrades to
-/// "unrecognised build", which every caller must already handle — a user with a
-/// modified install has always been able to produce it.
-pub fn exe_catalog(window: &Window) -> &'static [ExeEntry] {
+/// Every exe modkit launches is identified against this, so a catalogue that
+/// cannot be read is an error. It used to read as empty, which made every exe
+/// "unrecognised" with nothing to say why.
+///
+/// The catalogue's digests must be sha256: [`super::exe_identity`] hashes with
+/// sha256 and compares digests directly.
+pub fn exe_catalog(window: &Window) -> Result<&'static [ExeEntry], String> {
     if let Some(cached) = EXE_CATALOG.get() {
-        return cached;
+        return Ok(cached);
     }
-    let loaded = window
+    let path = window
         .path()
         .resolve(BUNDLED_MANIFEST, BaseDirectory::Resource)
-        .ok()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|bytes| serde_json::from_slice::<ExeCatalog>(&bytes).ok())
-        .map(|c| c.exes);
-
-    match loaded {
-        // Not cached on failure: a missing resource is worth retrying, and caching
-        // the empty answer would pin every later lookup to "unrecognised".
-        None => &[],
-        Some(exes) => EXE_CATALOG.get_or_init(|| exes),
+        .map_err(|e| format!("Could not locate the bundled exe catalogue: {e}"))?;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("Could not read the exe catalogue {}: {e}", path.display()))?;
+    let catalog = serde_json::from_slice::<ExeCatalog>(&bytes)
+        .map_err(|e| format!("The exe catalogue {} is not valid: {e}", path.display()))?;
+    if HashAlgo::parse(&catalog.algo)? != HashAlgo::Sha256 {
+        return Err(format!(
+            "The exe catalogue {} uses {} digests; exe identification needs sha256",
+            path.display(),
+            catalog.algo
+        ));
     }
-}
-
-/// Identify `Mercenaries2.exe` under `game_root` against the bundled catalogue.
-///
-/// By content hash, like [`identify_exe`], and for the same reason: two catalogued
-/// builds are the same byte size because swapping the `cruise.dll` import for
-/// `pmc_bb.dll` is length-preserving, and a third lands at exactly the cracked
-/// size. Size cannot separate them, and which one this is decides which pmc_bb
-/// build gets installed.
-pub fn identify_main_exe(window: &Window, game_root: &Path) -> Option<ExeReport> {
-    identify_exe(GENERATED_ALGO, game_root, MAIN_EXE, exe_catalog(window))
+    // Not cached on failure: a missing resource is worth retrying.
+    Ok(EXE_CATALOG.get_or_init(|| catalog.exes))
 }
 
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
@@ -1220,10 +1215,10 @@ mod tests {
     /// The entry that makes size classification indefensible, pinned so nobody "corrects" it.
     ///
     /// `v11-patched-drmfree` is a rebuild of the **patched** exe with SecuROM stripped, and it
-    /// lands at exactly the **cracked** size — so `classify(size)` calls it `cracked` while the
-    /// catalogue calls it `patched`, and the catalogue is right. The disagreement is the point:
-    /// were it ever resolved in `classify`'s favour, this build's crash offsets would pool with
-    /// two unrelated binaries that merely weigh the same.
+    /// lands at exactly the **cracked** size — so a size-based classifier (modkit had one) calls
+    /// it `cracked` while the catalogue calls it `patched`, and the catalogue is right. Were it
+    /// ever identified by size, this build's crash offsets would pool with two unrelated
+    /// binaries that merely weigh the same.
     #[test]
     fn the_drm_free_build_is_catalogued_against_what_its_size_claims() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../manifests/mercs2.manifest.json");
@@ -1237,7 +1232,12 @@ mod tests {
             .expect("the DRM-free entry is catalogued");
 
         assert_eq!(drmfree.variant, "patched");
-        assert_eq!(crate::commands::game::classify(drmfree.size).1, "cracked");
+        let cracked = manifest
+            .exes
+            .iter()
+            .find(|e| e.id.as_deref() == Some("v11-cracked-pmcbb"))
+            .expect("the pmc_bb crack is catalogued");
+        assert_eq!(drmfree.size, cracked.size, "same size, different build");
         // It imports no sidecar — which it shares with the SecuROM build, so `requires` cannot
         // distinguish the two either. Only the id does.
         assert_eq!(drmfree.requires, None);
