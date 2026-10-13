@@ -1,4 +1,5 @@
-//! Non-destructive mod-loader setup for LICENSED copies of the game.
+//! dxwrapper: loads pmc_bb.dll into any exe that does not import it (stock
+//! SecuROM, DRM-free, cruise-cracked).
 //!
 //! Instead of cracking the exe (which de-DRMs it and rewrites its import table),
 //! a legitimately activated copy loads mods through **dxwrapper**: a stub the game
@@ -36,12 +37,13 @@
 //!   scripts/*.asi  <- mods, scanned by whichever side owns it
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::Window;
 
-use crate::commands::managed::pmc_bb;
+use crate::commands::launch_plan;
+use crate::commands::managed::place::sha256_of_file;
 use crate::commands::managed::{self, place, Component, Ledger, PlaceOpts};
 use crate::commands::net::{self, archive, AssetRule, ReleaseHost};
 
@@ -49,13 +51,103 @@ use crate::commands::net::{self, archive, AssetRule, ReleaseHost};
 const DXWRAPPER_REPO: &str = "elishacloud/dxwrapper";
 
 /// Ledger key.
-const KEY: &str = "dxwrapper";
+pub const KEY: &str = "dxwrapper";
 
 /// Which DLL dxwrapper masquerades as. Mercenaries 2 is a Direct3D 9 title, so it
 /// always loads `d3d9.dll` (and it's not a KnownDLL, so a local copy wins the
 /// search) — the one stub guaranteed to load. It's also dxwrapper's primary
 /// purpose, and the proxy verified working on the reference install.
-const PROXY_DLL: &str = "d3d9.dll";
+pub const PROXY_DLL: &str = "d3d9.dll";
+
+/// dxwrapper itself, beside the stub.
+pub const DLL: &str = "dxwrapper.dll";
+
+/// dxwrapper's config, read whatever the stub is called.
+pub const INI: &str = "dxwrapper.ini";
+
+/// The two `dxwrapper.ini` keys modkit owns, as they are on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IniFacts {
+    /// `LoadPlugins`; `None` when the key is absent.
+    pub load_plugins: Option<bool>,
+    /// `LoadCustomDllPath`; `None` when the key is absent.
+    pub custom_dll: Option<String>,
+}
+
+/// Read the two keys modkit owns. A `LoadPlugins` that is neither `0` nor `1` is
+/// an error rather than a guess at what dxwrapper makes of it.
+fn parse_ini_facts(text: &str) -> Result<IniFacts, String> {
+    let mut facts = IniFacts { load_plugins: None, custom_dll: None };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with([';', '#', '[']) {
+            continue;
+        }
+        let Some((key, value)) = t.split_once('=') else {
+            continue;
+        };
+        let value = value.split(';').next().unwrap_or("").trim();
+        let key = key.trim();
+        if key.eq_ignore_ascii_case("LoadPlugins") && facts.load_plugins.is_none() {
+            facts.load_plugins = Some(match value {
+                "1" => true,
+                "0" => false,
+                other => return Err(format!("{INI}: LoadPlugins = {other:?} is neither 0 nor 1")),
+            });
+        } else if key.eq_ignore_ascii_case("LoadCustomDllPath") && facts.custom_dll.is_none() {
+            facts.custom_dll = Some(value.to_string());
+        }
+    }
+    Ok(facts)
+}
+
+/// The modkit-owned keys of `<root>/dxwrapper.ini`, or `None` when there is no ini.
+pub fn read_ini_facts(root: &Path) -> Result<Option<IniFacts>, String> {
+    let path = root.join(INI);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_ini_facts(&text).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Could not read {}: {e}", path.display())),
+    }
+}
+
+/// Flip `LoadPlugins` to `loads`, so exactly one loader scans for plugins after
+/// the pmc_bb build changes.
+///
+/// Touches only an ini modkit installed and that is unchanged since: one edited
+/// by hand is the user's, and the launch plan reports the disagreement instead.
+/// Returns whether the file changed.
+pub fn sync_load_plugins(
+    root: &Path,
+    ledger: &Ledger,
+    loads: bool,
+    opts: PlaceOpts,
+) -> Result<bool, String> {
+    let ini_path = root.join(INI);
+    let Some(mut component) = ledger.get(KEY) else {
+        return Ok(false);
+    };
+    let Some(idx) = component
+        .files
+        .iter()
+        .position(|f| Path::new(&f.abs_path) == ini_path)
+    else {
+        return Ok(false);
+    };
+    if !ini_path.is_file() || sha256_of_file(&ini_path)? != component.files[idx].sha256 {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(&ini_path)
+        .map_err(|e| format!("Could not read {}: {e}", ini_path.display()))?;
+    if parse_ini_facts(&text)?.load_plugins != Some(!loads) {
+        return Ok(false);
+    }
+    let placed = place(&ini_path, patch_ini(&text, loads).as_bytes(), opts.keeping_no_bak())?;
+    component.files[idx] = placed.into();
+    component.features = if loads { vec!["loads-plugins".to_string()] } else { Vec::new() };
+    ledger.record(component)?;
+    Ok(true)
+}
 
 /// A dxwrapper DLL smaller than this is not a build.
 const MIN_DLL_SIZE: u64 = 32 * 1024;
@@ -147,10 +239,16 @@ pub async fn install_dxwrapper(
 
     // Which pmc_bb build this install will get decides who owns plugin scanning.
     // Resolved rather than assumed — the assumption is what would silently stop
-    // mods loading. Same resolution `install_pmc_bb` performs, so the config
-    // written here and the DLL installed there cannot disagree.
-    let kind = crate::commands::setup::exe_kind(&window, &root).await;
-    let choice = pmc_bb::resolve(kind, None)?;
+    // mods loading. It is the launch plan's wanted build, the one `install_pmc_bb`
+    // installs, so the config written here and the DLL installed there cannot
+    // disagree.
+    let plan = {
+        let (window, root) = (window.clone(), root.clone());
+        tauri::async_runtime::spawn_blocking(move || launch_plan::for_root(&window, &root))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    let choice = plan.pmc_bb_wanted;
     let loads_plugins = !choice.features.asi;
 
     let client = net::client()?;
@@ -202,8 +300,8 @@ pub async fn install_dxwrapper(
         .unwrap_or_else(|| dxwrapper_ini(loads_plugins));
 
     let proxy_path = root.join(PROXY_DLL);
-    let dxwrapper_path = root.join("dxwrapper.dll");
-    let ini_path = root.join("dxwrapper.ini");
+    let dxwrapper_path = root.join(DLL);
+    let ini_path = root.join(INI);
 
     let placed_proxy = place(
         &proxy_path,
@@ -265,7 +363,60 @@ pub async fn install_dxwrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::managed::pmc_bb::ExeKind;
+    use crate::commands::managed::pmc_bb::{self, ExeKind};
+
+    #[test]
+    fn ini_facts_read_the_two_owned_keys() {
+        let f = parse_ini_facts("[General]\r\n; LoadPlugins = 1\r\nLoadCustomDllPath = pmc_bb.dll ; x\r\n[Plugins]\r\nLoadPlugins = 0\r\n").unwrap();
+        assert_eq!(f.load_plugins, Some(false));
+        assert_eq!(f.custom_dll.as_deref(), Some("pmc_bb.dll"));
+        assert!(parse_ini_facts("LoadPlugins = yes").is_err());
+        assert_eq!(parse_ini_facts("").unwrap().load_plugins, None);
+    }
+
+    fn ledgered_ini(dir: &Path, body: &str) -> Ledger {
+        let ini = dir.join(INI);
+        std::fs::write(&ini, body).unwrap();
+        let ledger = Ledger::at(&dir.join("installed.json"));
+        ledger
+            .record(Component {
+                key: KEY.into(),
+                tag: "v1".into(),
+                asset: "dx9.games.zip".into(),
+                features: Vec::new(),
+                source: DXWRAPPER_REPO.into(),
+                installed_at: 0,
+                files: vec![managed::InstalledFile {
+                    abs_path: ini.to_string_lossy().to_string(),
+                    sha256: sha256_of_file(&ini).unwrap(),
+                    size: body.len() as u64,
+                    backup: None,
+                }],
+            })
+            .unwrap();
+        ledger
+    }
+
+    #[test]
+    fn sync_flips_load_plugins_and_keeps_the_ledger_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledgered_ini(dir.path(), "[Plugins]\r\nLoadPlugins = 0\r\n");
+        let opts = || PlaceOpts::default().backing_up_into(&dir.path().join("trash"));
+        assert!(sync_load_plugins(dir.path(), &ledger, true, opts()).unwrap());
+        assert_eq!(read_ini_facts(dir.path()).unwrap().unwrap().load_plugins, Some(true));
+        assert!(ledger.get(KEY).unwrap().is_intact());
+        assert!(!sync_load_plugins(dir.path(), &ledger, true, opts()).unwrap(), "already right");
+    }
+
+    #[test]
+    fn sync_leaves_a_hand_edited_ini_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledgered_ini(dir.path(), "LoadPlugins = 0\r\n");
+        std::fs::write(dir.path().join(INI), "LoadPlugins = 0\r\n; mine\r\n").unwrap();
+        let opts = PlaceOpts::default().backing_up_into(&dir.path().join("trash"));
+        assert!(!sync_load_plugins(dir.path(), &ledger, true, opts).unwrap());
+        assert_eq!(read_ini_facts(dir.path()).unwrap().unwrap().load_plugins, Some(false));
+    }
 
     fn value_of(ini: &str, key: &str) -> Option<String> {
         ini.lines()
@@ -285,7 +436,7 @@ mod tests {
     /// success.
     #[test]
     fn dxwrapper_takes_over_scanning_when_pmc_bb_has_no_loader() {
-        let choice = pmc_bb::resolve(ExeKind::NotCracked, None).unwrap();
+        let choice = pmc_bb::resolve(ExeKind::SecuRom, None).unwrap();
         assert!(!choice.features.asi, "the premise of this test changed");
 
         let loads_plugins = !choice.features.asi;
@@ -294,7 +445,7 @@ mod tests {
 
     #[test]
     fn dxwrapper_stands_down_when_pmc_bb_carries_the_loader() {
-        let choice = pmc_bb::resolve(ExeKind::NotCracked, Some("pmc_bb_asi_log.dll")).unwrap();
+        let choice = pmc_bb::resolve(ExeKind::SecuRom, Some("pmc_bb_asi_log.dll")).unwrap();
         assert!(choice.features.asi);
 
         let ini = dxwrapper_ini(!choice.features.asi);
@@ -349,7 +500,8 @@ mod tests {
         for kind in [
             ExeKind::CrackedImportingPmcBb,
             ExeKind::CrackedImportingOther,
-            ExeKind::NotCracked,
+            ExeKind::DrmFree,
+            ExeKind::SecuRom,
             ExeKind::Unknown,
         ] {
             let choice = pmc_bb::resolve(kind, None).unwrap();
