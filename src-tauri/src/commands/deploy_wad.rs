@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::data_files::{self, DataFileOutcome, DataFileStore};
+use crate::commands::managed::trash;
 use crate::commands::paths::{deployed_dir, trash_dir};
 use crate::commands::placement::{self, StagedFile, StreamCopy};
 
@@ -165,6 +166,55 @@ fn backups_dir() -> Result<PathBuf, String> {
     let dir = deployed_dir()?.join("wad-backups");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create WAD backup dir: {e}"))?;
     Ok(dir)
+}
+
+/// The snapshot name for a WAD whose sha256 is `hash`.
+fn snapshot_name(hash: &str) -> String {
+    format!("vz-patch.{}.wad", &hash[..16])
+}
+
+/// Snapshot the WAD at `dest` into `dir`, keyed by its own content hash so the same WAD is
+/// stored once. The copy goes to a temporary sibling and is renamed into place only once its
+/// hash matches, so an interrupted copy never sits under a snapshot's name. A snapshot already
+/// under that name is kept when its bytes match, and otherwise moved to the trash (`trash_into`,
+/// the app trash when `None`) and taken again.
+fn snapshot_wad(dest: &Path, dir: &Path, trash_into: Option<&Path>) -> Result<WadBackup, String> {
+    let hash = sha256_of(dest)?;
+    let file = snapshot_name(&hash);
+    let snap = dir.join(&file);
+    if snap.is_file() && sha256_of(&snap)? != hash {
+        trash::discard(&snap, trash_into)?;
+    }
+    if !snap.is_file() {
+        let part = dir.join(format!("{file}.part"));
+        std::fs::copy(dest, &part).map_err(|e| format!("Failed to back up the existing WAD: {e}"))?;
+        let copied = sha256_of(&part)?;
+        if copied != hash {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!(
+                "The backup copy of {} has sha256 {copied}, not {hash}, so it was not kept.",
+                dest.display()
+            ));
+        }
+        std::fs::rename(&part, &snap).map_err(|e| format!("Failed to back up the existing WAD: {e}"))?;
+    }
+    let byte_size = std::fs::metadata(&snap).map_err(|e| format!("stat backup: {e}"))?.len();
+    Ok(WadBackup { file, path: snap.to_string_lossy().to_string(), byte_size, sha256: hash })
+}
+
+/// The snapshot `file` in `dir`, refused unless its bytes still match the hash in its name.
+fn verified_snapshot(dir: &Path, file: &str) -> Result<PathBuf, String> {
+    let snap = dir.join(file);
+    if !snap.is_file() {
+        return Err(format!("No such backup: {file}"));
+    }
+    let hash = sha256_of(&snap)?;
+    if snapshot_name(&hash) != file {
+        return Err(format!(
+            "The backup {file} is damaged (its sha256 is {hash}), so it was not restored."
+        ));
+    }
+    Ok(snap)
 }
 
 /// The single-row ledger file.
@@ -719,23 +769,9 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
         return Err(format!("Game data dir not found: {}", dest_dir.display()));
     }
 
-    // Snapshot the WAD we're about to displace, keyed by its own content hash so
-    // re-deploying the same WAD twice doesn't pile up identical copies.
+    // Snapshot the WAD we're about to displace.
     let backed_up = if dest.is_file() {
-        let hash = sha256_of(&dest)?;
-        let file = format!("vz-patch.{}.wad", &hash[..16]);
-        let snap = backups_dir()?.join(&file);
-        if !snap.exists() {
-            std::fs::copy(&dest, &snap)
-                .map_err(|e| format!("Failed to back up the existing WAD: {e}"))?;
-        }
-        let meta = std::fs::metadata(&snap).map_err(|e| format!("stat backup: {e}"))?;
-        Some(WadBackup {
-            file,
-            path: snap.to_string_lossy().to_string(),
-            byte_size: meta.len(),
-            sha256: hash,
-        })
+        Some(snapshot_wad(&dest, &backups_dir()?, None)?)
     } else {
         None
     };
@@ -850,18 +886,7 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
 
     // Snapshot whatever is installed now, so restoring is not a one-way door.
     let backed_up = if dest.is_file() {
-        let hash = sha256_of(&dest)?;
-        let file = format!("vz-patch.{}.wad", &hash[..16]);
-        let snap = backups_dir()?.join(&file);
-        if !snap.exists() {
-            std::fs::copy(&dest, &snap).map_err(|e| format!("Failed to snapshot current WAD: {e}"))?;
-        }
-        Some(WadBackup {
-            file,
-            path: snap.to_string_lossy().to_string(),
-            byte_size: std::fs::metadata(&snap).map_err(|e| format!("stat: {e}"))?.len(),
-            sha256: hash,
-        })
+        Some(snapshot_wad(&dest, &backups_dir()?, None)?)
     } else {
         None
     };
@@ -869,10 +894,7 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
     match args.file {
         // Restore a specific snapshot.
         Some(file) => {
-            let snap = backups_dir()?.join(&file);
-            if !snap.is_file() {
-                return Err(format!("No such backup: {file}"));
-            }
+            let snap = verified_snapshot(&backups_dir()?, &file)?;
             std::fs::copy(&snap, &dest).map_err(|e| {
                 format!("Failed to restore {file}: {e} — is the game still running?")
             })?;
@@ -923,6 +945,41 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A snapshot is stored once under its hash, and one whose bytes no longer match its name
+    /// (an interrupted copy) is trashed and taken again rather than kept.
+    #[test]
+    fn a_damaged_snapshot_is_replaced_not_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (dir, bin) = (tmp.path().join("wad-backups"), tmp.path().join("trash"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wad = tmp.path().join("vz-patch.wad");
+        std::fs::write(&wad, b"the deployed patch").unwrap();
+
+        let first = snapshot_wad(&wad, &dir, Some(&bin)).unwrap();
+        assert_eq!(std::fs::read(&first.path).unwrap(), b"the deployed patch");
+
+        std::fs::write(&first.path, b"the depl").unwrap();
+        let again = snapshot_wad(&wad, &dir, Some(&bin)).unwrap();
+        assert_eq!(again.path, first.path);
+        assert_eq!(std::fs::read(&again.path).unwrap(), b"the deployed patch");
+        assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 1, "the damaged copy went to the trash");
+        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().path().to_string_lossy().ends_with(".part")));
+    }
+
+    /// Restoring refuses a snapshot whose bytes no longer match its name.
+    #[test]
+    fn a_damaged_snapshot_is_not_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wad = tmp.path().join("vz-patch.wad");
+        std::fs::write(&wad, b"the deployed patch").unwrap();
+        let snap = snapshot_wad(&wad, tmp.path(), None).unwrap();
+        assert!(verified_snapshot(tmp.path(), &snap.file).is_ok());
+        std::fs::write(&snap.path, b"truncated").unwrap();
+        let e = verified_snapshot(tmp.path(), &snap.file).unwrap_err();
+        assert!(e.contains("damaged"), "{e}");
+        assert!(verified_snapshot(tmp.path(), "vz-patch.0000000000000000.wad").is_err());
+    }
 
     fn rec(sha: &str) -> DeployedWadRecord {
         DeployedWadRecord {
