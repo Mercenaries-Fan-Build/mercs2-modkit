@@ -220,9 +220,9 @@ impl ExeKind {
     pub fn from_exe_id(id: Option<&str>) -> Self {
         match id {
             Some("v11-cracked-pmcbb") => Self::CrackedImportingPmcBb,
-            Some("v11-cracked-cruise") => Self::CrackedImportingOther,
+            Some("archived-1-cracked-cruise") => Self::CrackedImportingOther,
             Some("v11-patched-drmfree") => Self::DrmFree,
-            Some("v10-ea-signed" | "v10-unsigned" | "v11-patched-securom") => Self::SecuRom,
+            Some("v10-ea-signed" | "archived-2-disk-dump" | "v11-patched-securom") => Self::SecuRom,
             _ => Self::Unknown,
         }
     }
