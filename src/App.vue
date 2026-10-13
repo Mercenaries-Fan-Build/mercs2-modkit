@@ -10,6 +10,7 @@ import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
 import ShipmentRemovalDialog from "./components/ShipmentRemovalDialog.vue";
+import ShipmentDependencyDialog from "./components/ShipmentDependencyDialog.vue";
 import RefusedShipmentsBanner from "./components/RefusedShipmentsBanner.vue";
 import IncompatibilityBanner from "./components/IncompatibilityBanner.vue";
 
@@ -282,6 +283,7 @@ onMounted(async () => {
     </div>
     <!-- One instance for every view that removes a Shipment: the chain is confirmed here. -->
     <ShipmentRemovalDialog />
+    <ShipmentDependencyDialog />
   </div>
 </template>
 
