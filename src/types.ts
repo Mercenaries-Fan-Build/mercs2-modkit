@@ -1132,6 +1132,16 @@ export interface PmcBbChoice {
   overridden: boolean;
 }
 
+/** What removing a managed component did with each recorded file (absolute paths). */
+export interface ComponentRemoval {
+  /** Moved to Modkit's trash. */
+  removed: string[];
+  /** Changed since Modkit wrote it, so left in place. */
+  kept_modified: string[];
+  /** Already gone. */
+  missing: string[];
+}
+
 export interface InstallDllResult {
   path: string;
   version: string;
