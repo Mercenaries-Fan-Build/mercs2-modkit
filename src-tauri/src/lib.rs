@@ -25,6 +25,7 @@ use commands::launch::{
 use commands::license::detect_license;
 use commands::logprobe::{analyze_log, locate_log};
 use commands::managed::managed_status;
+use commands::managed::remove::remove_managed_component;
 use commands::managed::wine::{install_wine, remove_wine, select_wine, wine_status};
 use commands::mercsink::{
     fetch_mercsink_mod, fetch_mercsink_registry, fetch_mercsink_release, fetch_mercsink_releases,
@@ -172,6 +173,7 @@ pub fn run() {
             install_pmc_bb,
             pmc_bb_variants,
             managed_status,
+            remove_managed_component,
             crack_game,
             update_game,
             detect_license,
