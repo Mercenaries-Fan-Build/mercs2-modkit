@@ -50,6 +50,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Window};
 
+use super::managed::place::sha256_of_file;
 use super::managed::{place, PlaceOpts};
 use super::net;
 
@@ -446,8 +447,8 @@ pub struct ToolStatus {
     /// Name of the data bundle this tool needs beside it, or null if it needs
     /// none. Lets the page say the install is more than one file.
     pub companion_dir: Option<String>,
-    /// Whether that bundle is unpacked. False alongside an installed `path`
-    /// means a half-finished install — re-running the install repairs it.
+    /// Whether that bundle is completely unpacked. False alongside an installed
+    /// `path` means a half-finished install — re-running the install repairs it.
     pub companion_ready: bool,
 }
 
@@ -555,7 +556,7 @@ fn status_from(root: &Path, state: &InstalledState, latest: Option<Latest>) -> T
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len());
             let companion_ready = match (&t.companion, &dir) {
-                (Some(c), Some(d)) => d.join(c.dir).is_dir(),
+                (Some(c), Some(d)) => companion_complete(d, c),
                 // No bundle to want is trivially "ready".
                 (None, _) => true,
                 (Some(_), None) => false,
@@ -642,13 +643,23 @@ pub async fn toolset_status(check_remote: bool) -> Result<ToolsetStatus, String>
 // Install / update
 // ----------------------------------------------------------------------------
 
+/// The file written inside a companion bundle once it is completely unpacked.
+const COMPANION_MARKER: &str = ".modkit-complete";
+
+/// Whether `companion` is completely unpacked in `version_dir`: its directory holds the marker
+/// [`install_companion`] writes last. A directory without it is a partial unpack.
+fn companion_complete(version_dir: &Path, companion: &Companion) -> bool {
+    version_dir.join(companion.dir).join(COMPANION_MARKER).is_file()
+}
+
 /// Download and unpack a tool's companion bundle into `version_dir`, beside the
 /// binary that needs it.
 ///
-/// The zip carries its own top-level directory, so extracting at the version dir
-/// lands it exactly where the tool's exe-relative lookup expects. Already-present
-/// bundles are left alone — a version dir only ever holds one release, so if the
-/// directory is there it came from this same tag.
+/// The zip carries its own top-level directory. It is unpacked into a scratch directory, marked
+/// complete, and renamed into place, so the bundle's directory exists only once it is whole. A
+/// complete bundle is left alone — a version dir only ever holds one release, so it came from
+/// this same tag. A partial one (no marker: an unpack interrupted before this rule existed) is
+/// removed, like the superseded version dirs [`prune`] removes, and unpacked again.
 async fn install_companion(
     window: &Window,
     client: &reqwest::Client,
@@ -657,10 +668,10 @@ async fn install_companion(
     t: &Tool,
     companion: &Companion,
 ) -> Result<(), String> {
-    let unpacked = version_dir.join(companion.dir);
-    if unpacked.is_dir() {
+    if companion_complete(version_dir, companion) {
         return Ok(());
     }
+    let unpacked = version_dir.join(companion.dir);
 
     let asset = assets.get(companion.asset).ok_or_else(|| {
         format!(
@@ -680,16 +691,41 @@ async fn install_companion(
 
     // Unpacked straight from memory: staging the archive beside its own output
     // only to delete it again bought nothing, and the guarded extractor rejects
-    // an entry that would escape `version_dir` — which the bare `z.extract` here
+    // an entry that would escape the scratch dir — which the bare `z.extract` here
     // did not.
-    net::archive::extract_bytes(bytes, version_dir)
+    let scratch = version_dir.join(format!(".{}.incoming", companion.dir));
+    clear_dir(&scratch)?;
+    net::archive::extract_bytes(bytes, &scratch)
         .map_err(|e| format!("Failed to unpack the {} data bundle: {e}", t.label))?;
-
-    if !unpacked.is_dir() {
+    let staged = scratch.join(companion.dir);
+    if !staged.is_dir() {
         return Err(format!(
             "The {} data bundle did not contain a '{}' directory — its layout may have changed.",
             t.label, companion.dir
         ));
+    }
+    std::fs::write(staged.join(COMPANION_MARKER), b"")
+        .map_err(|e| format!("Could not mark the {} data bundle complete: {e}", t.label))?;
+    clear_dir(&unpacked)?;
+    std::fs::rename(&staged, &unpacked)
+        .map_err(|e| format!("Could not move the {} data bundle into place: {e}", t.label))?;
+    clear_dir(&scratch)
+}
+
+/// Whether `dest` is the binary the release publishes. A missing file, or a release that
+/// publishes no digest to compare against, is not.
+fn binary_is_published(dest: &Path, digest: Option<&str>) -> Result<bool, String> {
+    let Some(want) = digest else { return Ok(false) };
+    if !dest.is_file() {
+        return Ok(false);
+    }
+    Ok(sha256_of_file(dest)?.eq_ignore_ascii_case(want))
+}
+
+/// Remove `dir` if it exists.
+fn clear_dir(dir: &Path) -> Result<(), String> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|e| format!("Could not remove {}: {e}", dir.display()))?;
     }
     Ok(())
 }
@@ -747,46 +783,45 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
             },
         );
 
-        // Already present at this tag — a re-run after a partial failure, or a
-        // second tool being added to a current install. Nothing to fetch.
-        if dest.is_file() {
-            installed.insert(t.name.to_string(), local);
-            continue;
-        }
-
         let remote = assets.get(&asset).ok_or_else(|| {
             format!("Release {tag} publishes no asset named '{asset}' — the toolset's release matrix may have changed.")
         })?;
 
-        let bytes = net::download(
-            &client,
-            &remote.url,
-            net::DownloadOpts::new(&format!("toolset:{}", t.name), t.label)
-                .with_window(Some(&window)),
-        )
-        .await?;
+        // Already present at this tag — a re-run after a partial failure, or a
+        // second tool being added to a current install. Kept only when it is the
+        // published binary; one that was altered or truncated (antivirus, a disk
+        // error) is downloaded again, which is what makes Repair repair it.
+        if !binary_is_published(&dest, remote.sha256())? {
+            let bytes = net::download(
+                &client,
+                &remote.url,
+                net::DownloadOpts::new(&format!("toolset:{}", t.name), t.label)
+                    .with_window(Some(&window)),
+            )
+            .await?;
 
-        // Staged and renamed into place, so an interrupted download can never be
-        // mistaken for an installed tool — the same guarantee this module always
-        // had, now with the digest check and the size floor that come with it.
-        place(
-            &dest,
-            &bytes,
-            PlaceOpts::default()
-                .executable()
-                .expecting(remote.sha256())
-                .sized(remote.size)
-                .at_least(MIN_TOOL_SIZE)
-                // A version dir only ever holds one release, so there is never an
-                // incumbent to displace and a `.bak` here would be noise.
-                .keeping_no_bak(),
-        )
-        .map_err(|e| format!("Failed to install {}: {e}", t.label))?;
+            // Staged and renamed into place, so an interrupted download can never be
+            // mistaken for an installed tool — the same guarantee this module always
+            // had, now with the digest check and the size floor that come with it.
+            place(
+                &dest,
+                &bytes,
+                PlaceOpts::default()
+                    .executable()
+                    .expecting(remote.sha256())
+                    .sized(remote.size)
+                    .at_least(MIN_TOOL_SIZE)
+                    // A version dir only ever holds one release, so the only incumbent
+                    // is a damaged copy of this same binary, and a `.bak` of it is noise.
+                    .keeping_no_bak(),
+            )
+            .map_err(|e| format!("Failed to install {}: {e}", t.label))?;
+        }
         installed.insert(t.name.to_string(), local);
 
         // The bundle unpacks BESIDE the binary, which is where the tool looks for
-        // it. Fetched after the exe so a failure here cannot leave a recorded
-        // install pointing at a half-made directory.
+        // it. Checked whether or not the binary was fetched, so a bundle that is
+        // missing or partial is repaired.
         if let Some(c) = &t.companion {
             install_companion(&window, &client, &assets, &dir, t, c).await?;
         }
@@ -812,15 +847,20 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
     Ok(status_from(&root, &new_state, Some((&tag, &assets))))
 }
 
-/// Remove one installed tool. The engine-backed apps are the large ones, so
-/// being able to drop them without wiping the whole toolset matters.
-#[tauri::command]
+/// Remove one installed tool, with its companion bundle. The engine-backed apps
+/// are the large ones, so being able to drop them without wiping the whole
+/// toolset matters.
+#[tauri::command(async)]
 pub fn uninstall_tool(name: String) -> Result<ToolsetStatus, String> {
-    let root = toolset_root()?;
-    let mut state = read_state(&root);
+    uninstall_tool_at(&toolset_root()?, &name)
+}
 
-    if let Some(asset) = state.tools.remove(&name) {
-        let path = root.join(&state.tag).join(asset);
+fn uninstall_tool_at(root: &Path, name: &str) -> Result<ToolsetStatus, String> {
+    let mut state = read_state(root);
+
+    if let Some(asset) = state.tools.remove(name) {
+        let version_dir = root.join(&state.tag);
+        let path = version_dir.join(asset);
         // A running binary cannot be deleted on Windows; say so rather than
         // dropping it from the state and leaking the file.
         if path.exists() {
@@ -828,10 +868,13 @@ pub fn uninstall_tool(name: String) -> Result<ToolsetStatus, String> {
                 format!("Could not remove {name}: {e}. Close it first if it is running.")
             })?;
         }
-        write_state(&root, &state)?;
+        if let Some(c) = tool(name).and_then(|t| t.companion.as_ref()) {
+            clear_dir(&version_dir.join(c.dir))?;
+        }
+        write_state(root, &state)?;
     }
 
-    Ok(status_from(&root, &state, None))
+    Ok(status_from(root, &state, None))
 }
 
 // ----------------------------------------------------------------------------
@@ -1255,8 +1298,7 @@ pub fn launch_tool(
     // Its companion data is found relative to the exe, so a missing bundle is a
     // broken launch, not a degraded one — say so before the tool fails obscurely.
     if let Some(c) = &t.companion {
-        let dir = exe.parent().map(|d| d.join(c.dir));
-        if !dir.map(|d| d.is_dir()).unwrap_or(false) {
+        if !exe.parent().is_some_and(|d| companion_complete(d, c)) {
             return Err(format!(
                 "{}'s {} data is missing — reinstall it first.",
                 t.label, c.dir
@@ -1491,6 +1533,41 @@ mod tests {
         }
     }
 
+    /// An installed binary is kept only when it hashes to the published digest.
+    #[test]
+    fn only_the_published_binary_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("qm");
+        let digest = super::super::managed::place::sha256_hex(b"published");
+        assert!(!binary_is_published(&exe, Some(&digest)).unwrap(), "missing");
+        std::fs::write(&exe, b"published").unwrap();
+        assert!(binary_is_published(&exe, Some(&digest)).unwrap());
+        assert!(binary_is_published(&exe, Some(&digest.to_ascii_uppercase())).unwrap());
+        assert!(!binary_is_published(&exe, None).unwrap(), "no digest to check against");
+        std::fs::write(&exe, b"truncat").unwrap();
+        assert!(!binary_is_published(&exe, Some(&digest)).unwrap(), "altered");
+    }
+
+    /// Removing a tool removes its data bundle with it.
+    #[test]
+    fn removing_the_workshop_removes_its_bundle() {
+        let Some(_) = asset_name(tool("mercs2_workshop").unwrap()) else {
+            return; // 32-bit host: the Workshop is correctly unavailable
+        };
+        let root = tempfile::tempdir().unwrap();
+        let version_dir = root.path().join("v1");
+        let local = local_name(tool("mercs2_workshop").unwrap());
+        std::fs::create_dir_all(version_dir.join("workshop_data")).unwrap();
+        std::fs::write(version_dir.join(&local), b"exe").unwrap();
+        let mut tools = BTreeMap::new();
+        tools.insert("mercs2_workshop".into(), local.clone());
+        write_state(root.path(), &InstalledState { tag: "v1".into(), tools }).unwrap();
+
+        uninstall_tool_at(root.path(), "mercs2_workshop").unwrap();
+        assert!(!version_dir.join(&local).exists());
+        assert!(!version_dir.join("workshop_data").exists());
+    }
+
     /// The engine-backed apps are the ones the release matrix builds 64-bit only.
     /// The Workshop is the one tool with reference data it must find beside its
     /// exe; installing the bare binary is a broken install.
@@ -1531,8 +1608,15 @@ mod tests {
         assert!(!ws.companion_ready, "but its data bundle is not");
         assert_eq!(ws.companion_dir.as_deref(), Some("workshop_data"));
 
-        // Unpack it, and the same install now reads as complete.
-        std::fs::create_dir_all(dir.path().join("v0.9.3").join("workshop_data")).unwrap();
+        // A directory left by an unpack that never finished is not ready either.
+        let bundle = dir.path().join("v0.9.3").join("workshop_data");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let s = status_from(dir.path(), &state, None);
+        let ws = s.tools.iter().find(|t| t.name == "mercs2_workshop").unwrap();
+        assert!(!ws.companion_ready, "a bundle directory without the marker is partial");
+
+        // Once marked complete, the same install reads as complete.
+        std::fs::write(bundle.join(COMPANION_MARKER), b"").unwrap();
         let s = status_from(dir.path(), &state, None);
         let ws = s.tools.iter().find(|t| t.name == "mercs2_workshop").unwrap();
         assert!(ws.companion_ready);
