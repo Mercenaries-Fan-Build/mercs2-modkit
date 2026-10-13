@@ -12,13 +12,14 @@
 //! not a constant. [`install_pmc_bb`] is that decision applied — see
 //! [`super::managed::pmc_bb`] for the policy and the trap in the obvious repair.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
 use tauri::Window;
 
-use crate::commands::managed::pmc_bb::{self, ExeKind};
+use crate::commands::managed::pmc_bb;
+use crate::commands::{dxwrapper, launch_plan};
 use crate::commands::managed::{self, place, Component, Ledger, PlaceOpts};
 use crate::commands::net::{self, AssetRule, ReleaseHost};
 use crate::commands::paths::app_data_dir;
@@ -49,44 +50,6 @@ pub struct InstallDllResult {
     pub overridden: bool,
 }
 
-/// Which pmc_bb build this install wants, without downloading anything.
-///
-/// Exposed so the Game Info panel can explain the choice — and flag a mismatch —
-/// before the user commits to an install.
-#[tauri::command]
-pub async fn resolve_pmc_bb(
-    window: Window,
-    game_root: String,
-    variant: Option<String>,
-) -> Result<pmc_bb::Choice, String> {
-    let root = PathBuf::from(&game_root);
-    if !root.is_dir() {
-        return Err(format!("Game folder not found: {game_root}"));
-    }
-    pmc_bb::resolve(exe_kind(&window, &root).await, variant.as_deref())
-}
-
-/// The exe's catalogue identity, as far as the variant choice cares.
-///
-/// Identification hashes a ~20 MB executable and parses the bundled manifest, so
-/// it goes to the blocking pool rather than parking an async runtime worker —
-/// the discipline `commands::mod`'s header lays out, and what `verify_game`
-/// already does for the same work.
-///
-/// A failure to identify is [`ExeKind::Unknown`], which resolves to the build that
-/// changes nothing about how the game starts. That is the right direction to fail
-/// in: the harmful mistake is installing a SecuROM spoof where none is wanted.
-pub(crate) async fn exe_kind(window: &Window, root: &std::path::Path) -> ExeKind {
-    let window = window.clone();
-    let root = root.to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || {
-        let report = crate::commands::verify::identify_main_exe(&window, &root);
-        ExeKind::from_exe_id(report.as_ref().and_then(|r| r.identified_id.as_deref()))
-    })
-    .await
-    .unwrap_or(ExeKind::Unknown)
-}
-
 /// Every build the release publishes, for the advanced picker.
 #[tauri::command(async)]
 pub fn pmc_bb_variants() -> Vec<serde_json::Value> {
@@ -102,26 +65,31 @@ pub fn pmc_bb_variants() -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Download the pmc_bb build this install wants and place it in the game root.
-///
-/// `variant` forces a specific release asset; omit it for the automatic choice.
-/// Whatever is chosen is installed as `pmc_bb.dll` — the name the exe's import
-/// table and dxwrapper's `LoadCustomDllPath` both resolve — and recorded in the
-/// ledger under the asset it actually came from, because after the copy the
-/// filename can no longer tell the six builds apart.
+/// Install the launch plan's wanted pmc_bb build: the pinned one
+/// (`overrides.pmcBb`), else the one the launched exe calls for.
 #[tauri::command]
-pub async fn install_pmc_bb(
-    window: Window,
-    game_root: String,
-    variant: Option<String>,
-) -> Result<InstallDllResult, String> {
+pub async fn install_pmc_bb(window: Window, game_root: String) -> Result<InstallDllResult, String> {
     let root = PathBuf::from(&game_root);
     if !root.is_dir() {
         return Err(format!("Game folder not found: {game_root}"));
     }
+    let plan = {
+        let (window, root) = (window.clone(), root.clone());
+        tauri::async_runtime::spawn_blocking(move || launch_plan::for_root(&window, &root))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    install_pmc_bb_build(&window, &root, &plan.pmc_bb_wanted).await
+}
 
-    let choice = pmc_bb::resolve(exe_kind(&window, &root).await, variant.as_deref())?;
-
+/// Download `choice` and place it as `pmc_bb.dll`, recording the asset in the
+/// ledger (the file name can't tell the builds apart), then flip dxwrapper's
+/// `LoadPlugins` to match the new build's loader.
+pub(crate) async fn install_pmc_bb_build(
+    window: &Window,
+    root: &Path,
+    choice: &pmc_bb::Choice,
+) -> Result<InstallDllResult, String> {
     let client = net::client()?;
     let release = net::latest_release(&client, ReleaseHost::GitHub, pmc_bb::REPO).await?;
     let asset = release.require(
@@ -132,7 +100,7 @@ pub async fn install_pmc_bb(
     let bytes = net::download(
         &client,
         &asset.url,
-        net::DownloadOpts::new("pmc_bb", &choice.asset).with_window(Some(&window)),
+        net::DownloadOpts::new(pmc_bb::LEDGER_KEY, &choice.asset).with_window(Some(window)),
     )
     .await?;
 
@@ -146,8 +114,9 @@ pub async fn install_pmc_bb(
             .at_least(pmc_bb::MIN_SIZE),
     )?;
 
-    Ledger::app()?.record(Component {
-        key: "pmc_bb".to_string(),
+    let ledger = Ledger::app()?;
+    ledger.record(Component {
+        key: pmc_bb::LEDGER_KEY.to_string(),
         tag: release.tag.clone(),
         asset: choice.asset.clone(),
         features: choice.features.names(),
@@ -155,13 +124,14 @@ pub async fn install_pmc_bb(
         installed_at: managed::ledger::now_unix(),
         files: vec![placed.clone().into()],
     })?;
+    dxwrapper::sync_load_plugins(root, &ledger, !choice.features.asi, PlaceOpts::default())?;
 
     Ok(InstallDllResult {
         path: placed.abs_path,
         version: release.tag,
-        asset: choice.asset,
+        asset: choice.asset.clone(),
         features: choice.features,
-        reason: choice.reason,
+        reason: choice.reason.clone(),
         overridden: choice.overridden,
     })
 }
