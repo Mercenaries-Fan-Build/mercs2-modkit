@@ -322,27 +322,33 @@ fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog
     o.push_str("\n== Game ==\n");
     if let Some(game) = meta.get("game").filter(|g| !g.is_null()) {
         line(&mut o, "Root", s_or(game, "root", "?"));
-        let size = game.get("exe_size").and_then(Value::as_u64).unwrap_or(0);
-        line(&mut o, "Executable", &format!("{} ({} bytes)", s_or(game, "exe_path", "?"), size));
-        if let Some(cracked) = game.get("cracked_exe").filter(|c| !c.is_null()) {
+        for exe in game.get("exes").and_then(Value::as_array).into_iter().flatten() {
             line(
                 &mut o,
-                "Cracked exe",
+                "Exe",
                 &format!(
-                    "{} ({} bytes, {} {})",
-                    s_or(cracked, "path", "?"),
-                    cracked.get("size").and_then(Value::as_u64).unwrap_or(0),
-                    s_or(cracked, "version", "unknown"),
-                    s_or(cracked, "variant", "unknown"),
+                    "{} ({} bytes, {}, sha256 {})",
+                    s_or(exe, "path", "?"),
+                    exe.get("size").and_then(Value::as_u64).unwrap_or(0),
+                    s_or(exe, "id", "unrecognised"),
+                    s_or(exe, "sha256", "?"),
                 ),
             );
         }
-        line(&mut o, "Launches", s_or(game, "launch_exe_path", "?"));
-        line(
-            &mut o,
-            "Version",
-            &format!("{} {}", s_or(game, "version", "unknown"), s_or(game, "variant", "")),
-        );
+        match game.get("launch").filter(|l| !l.is_null()) {
+            Some(plan) => {
+                let exe = plan.get("exe").unwrap_or(&Value::Null);
+                line(
+                    &mut o,
+                    "Launches",
+                    &format!("{} ({})", s_or(exe, "path", "?"), s_or(plan, "selection", "?")),
+                );
+                for p in plan.get("problems").and_then(Value::as_array).into_iter().flatten() {
+                    line(&mut o, "Problem", p.as_str().unwrap_or("?"));
+                }
+            }
+            None => line(&mut o, "Launches", &format!("nothing: {}", s_or(game, "launch_error", "?"))),
+        }
         line(&mut o, "pmc_bb.dll", if game.get("has_pmc_bb").and_then(Value::as_bool).unwrap_or(false) { "present" } else { "absent" });
         line(&mut o, "ASI loader", s_or(game, "asi_loader_proxy", "none"));
         line(&mut o, "Data dir", s_or(game, "data_dir", "?"));
@@ -354,11 +360,11 @@ fn render_report(meta: &Value, verify: Option<&VerifyReport>, logs: &[BundledLog
     // --- Versions ---
     o.push_str("\n== Versions ==\n");
     line(&mut o, "Modkit", s_or(meta, "modkitVersion", "unknown"));
-    if let Some(game) = meta.get("game").filter(|g| !g.is_null()) {
+    if let Some(exe) = meta.pointer("/game/launch/exe").filter(|e| !e.is_null()) {
         line(
             &mut o,
             "Game",
-            &format!("{} / {}", s_or(game, "version", "unknown"), s_or(game, "variant", "unknown")),
+            &format!("{} / {}", s_or(exe, "version", "unknown"), s_or(exe, "variant", "unknown")),
         );
     }
     line(&mut o, "pmc_bb.dll (ASI loader)", s_or(meta, "pmcBbVersion", "unknown"));
@@ -701,10 +707,21 @@ mod tests {
             "modkitVersion": "0.5.1",
             "game": {
                 "root": "/games/Mercs2",
-                "exe_path": "/games/Mercs2/Mercenaries2.exe",
-                "exe_size": 53_482_288u64,
-                "version": "v1.1",
-                "variant": "cracked",
+                "exes": [{
+                    "path": "/games/Mercs2/Mercenaries2.exe",
+                    "size": 53_482_288u64,
+                    "id": "v11-cracked-pmcbb",
+                    "sha256": "958eb227"
+                }],
+                "launch": {
+                    "exe": {
+                        "path": "/games/Mercs2/Mercenaries2.exe",
+                        "version": "v1.1",
+                        "variant": "cracked"
+                    },
+                    "selection": "auto",
+                    "problems": ["pmc_bb.dll is not installed."]
+                },
                 "has_pmc_bb": true,
                 "asi_loader_proxy": "pmc_bb.dll",
                 "data_dir": "/games/Mercs2/data",
@@ -746,8 +763,10 @@ mod tests {
         assert!(r.contains("Generated: 2026-06-30T12:00:00.000Z"));
         assert!(r.contains("Modkit version: 0.5.1"));
         // Game + versions
-        assert!(r.contains("/games/Mercs2/Mercenaries2.exe"));
-        assert!(r.contains("v1.1 cracked"));
+        assert!(r.contains("v11-cracked-pmcbb, sha256 958eb227"));
+        assert!(r.contains("Launches: /games/Mercs2/Mercenaries2.exe (auto)"));
+        assert!(r.contains("Problem: pmc_bb.dll is not installed."));
+        assert!(r.contains("Game: v1.1 / cracked"));
         assert!(r.contains("pmc_bb.dll (ASI loader): v0.3.0"));
         assert!(r.contains("apply_crack (SecuROM bypass): v1.2.0"));
         // VC++ missing surfaces the detail
