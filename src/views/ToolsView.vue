@@ -331,7 +331,7 @@ function unavailableReason(name: string): string {
               class="mt-1 text-xs text-amber-400"
             >
               Its <code class="text-amber-300">{{ t.companion_dir }}</code> data
-              is missing — reinstall to finish the job.
+              is missing or incomplete — Repair downloads it again.
             </p>
             <p
               v-else-if="!t.path && t.companion_dir"
@@ -394,9 +394,10 @@ function unavailableReason(name: string): string {
               Repair
             </button>
             <!-- Removing a running tool cannot work on Windows (its file is
-                 locked) and is a surprise everywhere else. Stop it first. -->
+                 locked) and is a surprise everywhere else. Stop it first. Shown
+                 beside Repair too, so a repair that fails still has a way out. -->
             <button
-              v-else-if="t.path"
+              v-if="t.path"
               class="rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40 disabled:hover:bg-transparent"
               :disabled="busy || isRunning(t.name)"
               :title="isRunning(t.name) ? `Stop ${t.label} before removing it` : ''"
@@ -405,7 +406,7 @@ function unavailableReason(name: string): string {
               Remove
             </button>
             <button
-              v-else
+              v-if="!t.path"
               class="btn-plate"
               :disabled="!t.available || busy"
               @click="install(t.name)"
