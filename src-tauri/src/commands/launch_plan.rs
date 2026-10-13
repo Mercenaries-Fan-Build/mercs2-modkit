@@ -39,10 +39,10 @@ use super::runtime_settings::{self, Overrides};
 pub const AUTO_ORDER: &[&str] = &[
     "v11-patched-drmfree",
     "v11-cracked-pmcbb",
-    "v11-cracked-cruise",
+    "archived-1-cracked-cruise",
     "v11-patched-securom",
     "v10-ea-signed",
-    "v10-unsigned",
+    "archived-2-disk-dump",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
