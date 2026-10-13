@@ -25,6 +25,7 @@ import type {
   LaunchPlan,
   GameInfo,
   IncompatibilityCheck,
+  ComponentRemoval,
   InstallDllResult,
   InstallResult,
   LoadedMod,
@@ -2380,6 +2381,25 @@ export const useProjectStore = defineStore("project", {
         this.error = String(e);
         throw e;
       } finally {
+        this.busy = false;
+      }
+    },
+
+    /**
+     * Take pmc_bb or dxwrapper back out of the game folder: the files Modkit recorded go to the
+     * trash unless they were changed since, and the record is dropped. Nothing is put back.
+     */
+    async removeManagedComponent(key: "pmc_bb" | "dxwrapper"): Promise<ComponentRemoval> {
+      this.busy = true;
+      this.error = null;
+      try {
+        return await invoke<ComponentRemoval>("remove_managed_component", { key });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        await this.refreshGame().catch(() => {});
+        await this.refreshManaged();
         this.busy = false;
       }
     },
