@@ -42,7 +42,7 @@ async function runUpdate() {
           backed up to <span class="font-mono text-xs">BACKUP/</span>.
         </p>
       </div>
-      <span v-if="gameInfo?.version === 'v1.1'" class="stamp shrink-0 text-emerald-300">
+      <span v-if="gameInfo?.base_exe?.version === 'v1.1'" class="stamp shrink-0 text-emerald-300">
         Already v1.1 ✓
       </span>
       <button
