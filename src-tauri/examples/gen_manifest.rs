@@ -16,10 +16,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mercs2_modkit_lib::commands::verify::{build_manifest, ExeSpec};
 
 /// Exe byte size → (version, variant); mirrors `classify()` in game.rs.
+///
+/// Size → version is a legacy heuristic from before sha256-keyed identification; it holds
+/// coincidentally for the current builds but is NOT a reliable classifier (the DRM-free rebuild
+/// collides with cracked at 53,482,288 — see `ExeMeta::classified`; the EA-signed compact v1.1
+/// shell collides with the historical v1.0-signed assumption at 17,122,568 — see
+/// `/Volumes/Projects/mercenaries-game/docs/reverse_engineer/pc_exe_build_fingerprints.md`).
+/// Only used when `meta_for(name).classified` is `None`.
 fn classify(size: u64) -> (&'static str, &'static str) {
     match size {
         16_846_848 => ("v1.0", "unsigned"),
-        17_122_568 => ("v1.0", "ea-signed"),
+        // 17,122,568 is the EA-signed compact shell wrapping v1.1 game code; proven by byte-match
+        // at the three Ghidra-identified v1.0-vs-v1.1 divergent VAs (0x5c37f0 / 0x683ce0 /
+        // 0x6a5970) and on-disk 22 unique imports (matches v1.1 patched). The stable catalogue id
+        // `v10-ea-signed` is a historical misnomer — don't try to "fix" it by renaming; file every
+        // record under the pinned id. The user-facing label is corrected via `meta_for`.
+        17_122_568 => ("v1.1", "ea-signed-compact"),
         53_944_080 => ("v1.1", "patched"),
         53_482_288 => ("v1.1", "cracked"),
         _ => ("unknown", "unknown"),
@@ -64,10 +76,15 @@ fn meta_for(name: &str) -> ExeMeta {
             Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
         ),
         "Mercenaries2 (v1.0 signed).exe" => (
+            // The storage filename and catalogue id say "v10"; the file actually wraps v1.1 game
+            // code in an EA-signed SecuROM 7.38 compact shell. Both the filename and id are
+            // stable keys retained for backward compatibility; the user-facing label here is the
+            // one that reflects reality. See mercenaries-game's
+            // docs/reverse_engineer/pc_exe_build_fingerprints.md.
             "v10-ea-signed",
-            "retail EA-signed",
+            "retail v1.1 (EA-signed compact shell)",
             None,
-            Some("Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding."),
+            Some("Stock SecuROM exe wrapping v1.1 game code — not de-DRM'd; crack it in Setup before modding. The 'v10' in the catalogue id is a historical misnomer; the engine code inside is v1.1."),
         ),
         "Mercenaries2(v1.1).exe" => (
             "v11-patched-securom",
