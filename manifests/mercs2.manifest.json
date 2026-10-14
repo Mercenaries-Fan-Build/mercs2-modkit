@@ -11257,11 +11257,11 @@
   "exes": [
     {
       "id": "v10-ea-signed",
-      "version": "v1.0",
-      "variant": "ea-signed",
-      "label": "retail EA-signed",
+      "version": "v1.1",
+      "variant": "ea-signed-compact",
+      "label": "retail v1.1 (EA-signed compact shell)",
       "requires": null,
-      "note": "Stock SecuROM exe — not de-DRM'd; crack it in Setup before modding.",
+      "note": "Stock SecuROM exe wrapping v1.1 game code — not de-DRM'd; crack it in Setup before modding. The 'v10' in the catalogue id is a historical misnomer; the engine code inside is v1.1.",
       "size": 17122568,
       "hash": "a1532b4c7652fe9feee1191f5bd04aa073cd0f036e49831c754e7d895241dfa8"
     },
