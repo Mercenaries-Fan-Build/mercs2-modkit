@@ -16,7 +16,9 @@
 //!   the two were indistinguishable after the fact — and now that pmc-blackbox
 //!   publishes six feature variants under one install name, the on-disk filename
 //!   cannot answer it either.
-//! * `apply_crack` had no record at all, so it was re-downloaded on every crack.
+//!
+//! `apply_crack` is not in here: it is fetched and thrown away on every crack
+//! (`setup::fetch_apply_crack`), so there is nothing installed to record.
 //!
 //! The toolset already did this correctly, in `installed.json` beside its binaries.
 //! This generalizes that sidecar to every managed artifact, and adds the per-file
@@ -61,7 +63,7 @@ impl From<Placed> for InstalledFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Component {
-    /// Stable key: `pmc_bb`, `dxwrapper`, `apply_crack`, `toolset`.
+    /// Stable key: `pmc_bb`, `dxwrapper`, `toolset`.
     pub key: String,
     /// Release tag this came from.
     pub tag: String,

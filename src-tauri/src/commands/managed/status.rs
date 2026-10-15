@@ -3,9 +3,11 @@
 //! Three components each answered this differently, and two of them answered it
 //! from the browser. `checkComponentUpdates` made one GitHub call per component
 //! and compared each release tag against a `localStorage` string; the toolset made
-//! its own call and compared with `!=`; `apply_crack` was special-cased out of the
-//! UI entirely because, being re-downloaded on every use, "up to date" was not a
-//! state it could be in.
+//! its own call and compared with `!=`.
+//!
+//! What this reports is what the user installed **into the game folder** and can
+//! be asked to update. A binary modkit downloads for its own use is not that,
+//! however faithfully the ledger records it — see [`MANAGED`].
 
 use serde::Serialize;
 
@@ -19,13 +21,20 @@ pub struct Managed {
     pub repo: &'static str,
 }
 
-/// Everything under the ledger's care.
+/// What modkit installs into the game folder and keeps current.
 ///
 /// The Workshop toolset is deliberately absent: it is one release of eleven
 /// binaries with its own version-directory layout, reported by `toolset_status`.
 /// Folding it in here would mean either flattening eleven rows into one or
 /// teaching this table about per-tool assets, and neither buys anything the Tools
 /// page does not already show.
+///
+/// `apply_crack` is absent for a different reason: it is a tool modkit runs, not
+/// a file it leaves in the game folder. `setup::ensure_apply_crack` resolves the
+/// latest release at crack time, so the build that runs is always current and
+/// there is no update to offer. Its ledger entry stays — that is what lets the
+/// cached copy be reused instead of re-downloaded — but a row here would put an
+/// update chip in the sidebar for a one-time action the user never repeats.
 pub const MANAGED: &[Managed] = &[
     Managed {
         key: "pmc_bb",
@@ -36,11 +45,6 @@ pub const MANAGED: &[Managed] = &[
         key: "dxwrapper",
         label: "dxwrapper",
         repo: "elishacloud/dxwrapper",
-    },
-    Managed {
-        key: "apply_crack",
-        label: "apply_crack (SecuROM bypass)",
-        repo: "Mercenaries-Fan-Build/mercs2-securom-bypass",
     },
 ];
 
@@ -239,13 +243,13 @@ mod tests {
         }
     }
 
-    /// apply_crack used to be excluded from the update UI because nothing recorded
-    /// a version for it, so "up to date" was not a state it could be in.
+    /// apply_crack is run, not installed: it is fetched current on every crack,
+    /// so there is never an update to tell anyone about.
     #[test]
-    fn apply_crack_is_an_ordinary_component_now() {
+    fn apply_crack_is_not_reported_as_a_component() {
         assert!(
-            MANAGED.iter().any(|m| m.key == "apply_crack"),
-            "apply_crack must be reportable like anything else"
+            !MANAGED.iter().any(|m| m.key == "apply_crack"),
+            "apply_crack must not raise an update chip"
         );
     }
 

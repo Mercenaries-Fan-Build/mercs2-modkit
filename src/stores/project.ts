@@ -477,10 +477,6 @@ export const useProjectStore = defineStore("project", {
       return this.managedComponent("pmc_bb")?.modified ?? false;
     },
 
-    crackVersion(): string | null {
-      return this.managedComponent("apply_crack")?.installedTag ?? null;
-    },
-
     dxwrapperVersion(): string | null {
       return this.managedComponent("dxwrapper")?.installedTag ?? null;
     },

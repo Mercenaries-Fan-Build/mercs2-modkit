@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { ref } from "vue";
 import { storeToRefs } from "pinia";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
@@ -15,9 +15,7 @@ withDefaults(defineProps<{ title?: string }>(), {
 });
 
 const store = useProjectStore();
-const { gameInfo, busy, crackVersion, componentUpdates } = storeToRefs(store);
-
-const crackUpdate = computed(() => componentUpdates.value["apply_crack"]);
+const { gameInfo, busy } = storeToRefs(store);
 
 const outputPath = ref<string | null>(null);
 const stage = ref("");
@@ -70,22 +68,7 @@ async function runCrack() {
           {{ store.crackedBuild?.path ?? "None found" }}
         </dd>
       </div>
-      <div class="flex items-center gap-3">
-        <dt class="w-32 shrink-0 text-zinc-500">apply_crack</dt>
-        <dd class="text-zinc-300">
-          {{ crackVersion ?? "not downloaded yet" }}
-          <span class="text-zinc-500">· latest {{ crackUpdate?.latest || "—" }}</span>
-        </dd>
-      </div>
     </dl>
-
-    <p
-      v-if="crackUpdate?.available"
-      class="mt-3 flex items-center gap-1.5 text-sm font-medium text-amber-300"
-    >
-      <span class="h-1.5 w-1.5 rounded-full bg-amber-400" />
-      New apply_crack release → {{ crackUpdate.latest }} — the next crack uses it.
-    </p>
 
     <p v-if="store.crackedBuild" class="mt-3 text-sm text-emerald-300/80">
       Already cracked ✓ — nothing more to do here.

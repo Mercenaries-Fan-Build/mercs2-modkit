@@ -22,13 +22,13 @@ use crate::commands::managed::pmc_bb;
 use crate::commands::{dxwrapper, launch_plan};
 use crate::commands::managed::{self, place, Component, Ledger, PlaceOpts};
 use crate::commands::net::{self, AssetRule, ReleaseHost};
-use crate::commands::paths::app_data_dir;
+use crate::commands::paths::downloading_dir;
 use crate::commands::proc::NoWindow;
 
 /// Repo publishing the `apply_crack` SecuROM-bypass / updater tool.
 const CRACK_REPO: &str = "Mercenaries-Fan-Build/mercs2-securom-bypass";
 
-/// Ledger key for the cached `apply_crack` build.
+/// Download-progress key for the `apply_crack` fetch.
 const CRACK_KEY: &str = "apply_crack";
 
 /// An `apply_crack` build smaller than this is not a binary.
@@ -147,25 +147,52 @@ pub struct CrackResult {
     pub tool_version: String,
 }
 
-/// Path to a current `apply_crack` for this host, downloading it only when the
-/// cached copy is missing, altered, or out of date.
-///
-/// It used to be re-downloaded on every single crack, which is why the update
-/// check had to special-case it as never-actionable: with nothing recording a
-/// version, "up to date" was not a state it could be in. Now it is an ordinary
-/// ledger component like any other.
-async fn ensure_apply_crack(window: &Window) -> Result<(String, PathBuf), String> {
+/// Clear out the cache a previous version kept: an `apply_crack` ledger row and
+/// the binary under `bin/` it points at. Nothing reads either any more, and a
+/// recorded install of a tool modkit no longer installs misreports the ledger.
+/// A no-op on every run after the first.
+fn discard_cached_apply_crack() -> Result<(), String> {
     let ledger = Ledger::app()?;
-    let client = net::client()?;
-    let release = net::latest_release(&client, ReleaseHost::GitHub, CRACK_REPO).await?;
-
-    if let Some(existing) = ledger.get(CRACK_KEY) {
-        if existing.tag == release.tag && existing.is_intact() {
-            if let Some(f) = existing.files.first() {
-                return Ok((existing.tag.clone(), PathBuf::from(&f.abs_path)));
-            }
+    let Some(cached) = ledger.get(CRACK_KEY) else {
+        return Ok(());
+    };
+    for file in &cached.files {
+        let path = Path::new(&file.abs_path);
+        if path.is_file() {
+            std::fs::remove_file(path).map_err(|e| {
+                format!("Could not clear the cached apply_crack at {}: {e}", path.display())
+            })?;
         }
     }
+    ledger.forget(CRACK_KEY)?;
+    Ok(())
+}
+
+/// A freshly fetched `apply_crack`, deleted again when it goes out of scope.
+struct CrackTool {
+    /// Release tag that was fetched, reported as `CrackResult::toolVersion`.
+    tag: String,
+    bin: PathBuf,
+    dir: PathBuf,
+}
+
+impl Drop for CrackTool {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Fetch the current `apply_crack` for this host into a scratch directory.
+///
+/// Nothing is kept. Cracking is a once-per-install action, so there is no copy to
+/// amortise and a stale one is strictly worse: the latest release is resolved and
+/// downloaded on every use, which is what makes the build that runs current by
+/// construction. That is also why `managed::status::MANAGED` omits apply_crack —
+/// with nothing retained there is no version to report and no update to announce.
+async fn fetch_apply_crack(window: &Window) -> Result<CrackTool, String> {
+    discard_cached_apply_crack()?;
+    let client = net::client()?;
+    let release = net::latest_release(&client, ReleaseHost::GitHub, CRACK_REPO).await?;
 
     // Prefer the build matching this host exactly; fall back to any build for this
     // OS so a single-arch or older release still resolves. apply_crack only
@@ -194,29 +221,29 @@ async fn ensure_apply_crack(window: &Window) -> Result<(String, PathBuf), String
     )
     .await?;
 
-    let bindir = app_data_dir()?.join("bin");
-    let bin = bindir.join(&asset.name);
+    // Its own directory, named for the instant it was fetched, so two runs can
+    // never land on one path and so the whole thing goes in a single remove.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("The system clock is before the epoch: {e}"))?
+        .as_nanos();
+    let dir = downloading_dir()?.join(format!("apply_crack-{stamp}"));
     let placed = place(
-        &bin,
+        &dir.join(&asset.name),
         &bytes,
         PlaceOpts::default()
             .executable()
             .expecting(asset.sha256())
             .sized(asset.size)
-            .at_least(CRACK_MIN_SIZE),
+            .at_least(CRACK_MIN_SIZE)
+            .keeping_no_bak(),
     )?;
 
-    ledger.record(Component {
-        key: CRACK_KEY.to_string(),
-        tag: release.tag.clone(),
-        asset: asset.name.clone(),
-        features: Vec::new(),
-        source: CRACK_REPO.to_string(),
-        installed_at: managed::ledger::now_unix(),
-        files: vec![placed.into()],
-    })?;
-
-    Ok((release.tag, bin))
+    Ok(CrackTool {
+        tag: release.tag,
+        bin: PathBuf::from(placed.abs_path),
+        dir,
+    })
 }
 
 /// Download `apply_crack` and run it on the exe to apply the SecuROM bypass,
@@ -234,7 +261,7 @@ pub async fn crack_game(
         return Err(format!("Game exe not found: {exe_path}"));
     }
 
-    let (tag, bin) = ensure_apply_crack(&window).await?;
+    let tool = fetch_apply_crack(&window).await?;
 
     let out = output_path.unwrap_or_else(|| {
         exe.with_file_name("Mercenaries2.cracked.exe")
@@ -242,7 +269,7 @@ pub async fn crack_game(
             .to_string()
     });
 
-    let output = Command::new(&bin)
+    let output = Command::new(&tool.bin)
         .arg(&exe_path)
         .arg("--output")
         .arg(&out)
@@ -255,7 +282,7 @@ pub async fn crack_game(
         output_path: out,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        tool_version: tag,
+        tool_version: tool.tag.clone(),
     })
 }
 
@@ -272,11 +299,11 @@ pub async fn update_game(window: Window, exe_path: String) -> Result<CrackResult
         return Err(format!("Game exe not found: {exe_path}"));
     }
 
-    let (tag, bin) = ensure_apply_crack(&window).await?;
+    let tool = fetch_apply_crack(&window).await?;
 
     // Produce the updated exe beside the original, then swap it in only on success.
     let staged = exe.with_file_name("Mercenaries2.v1.1.staged.exe");
-    let output = Command::new(&bin)
+    let output = Command::new(&tool.bin)
         .arg(&exe_path)
         .arg("--update-only")
         .arg("--output")
@@ -293,7 +320,7 @@ pub async fn update_game(window: Window, exe_path: String) -> Result<CrackResult
             output_path: exe_path,
             stdout,
             stderr,
-            tool_version: tag,
+            tool_version: tool.tag.clone(),
         });
     }
 
@@ -331,6 +358,6 @@ pub async fn update_game(window: Window, exe_path: String) -> Result<CrackResult
         output_path: exe_path,
         stdout,
         stderr,
-        tool_version: tag,
+        tool_version: tool.tag.clone(),
     })
 }
