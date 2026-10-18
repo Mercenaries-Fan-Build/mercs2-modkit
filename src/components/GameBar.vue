@@ -30,22 +30,23 @@ const applyStageLabel = computed(() => {
 });
 
 // Apply the staged load order (build · validate · deploy), then launch. On failure the detail and
-// the fix live on Build & Deploy — the conflict cards, the validation report — so route there
-// rather than trying to explain a failure from a button.
+// the fix live on Build & Deploy — the conflict cards, the validation report, the lost backups, the
+// guard warnings, the error banner — so route there rather than explain it from a button.
 async function applyAndPlay() {
   const res = await store.applyToGame();
   if (res.ok) {
     await play();
     return;
   }
-  router.push(
-    res.reason === "conflict"
-      ? { name: "export" }
-      : {
-          name: "export",
-          query: applyStatus.value?.step === "invalid" ? { show: "validation" } : {},
-        },
-  );
+  const show =
+    applyStatus.value?.step === "invalid"
+      ? "validation"
+      : applyStatus.value?.step === "guard"
+        ? "guard"
+        : undefined;
+  await router.push({ name: "export", query: show ? { show } : {} });
+  // The navigation clears store.error; this failure is what the user is sent there to read.
+  if (applyStatus.value?.step === "error") store.error = applyStatus.value.message;
 }
 
 // In-flight launch/stop, so the button can't be double-fired.

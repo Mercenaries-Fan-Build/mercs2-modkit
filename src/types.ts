@@ -602,6 +602,27 @@ export interface PlacementOutcome {
   backed_up: string[];
   /** Displaced files moved back from `<name>.bak` once modkit's file came out. */
   restored: string[];
+  /** Plugins whose `signature_guard` bytes differ in an exe in the game folder. Absent when none. */
+  guard_warnings?: GuardWarning[];
+}
+
+/** A plugin's declared `signature_guard` bytes that do not match an exe in the game folder. */
+export interface GuardWarning {
+  plugin: string;
+  exe: string;
+  address: string;
+  expected: string;
+  /** Empty when the address could not be read in this exe; `note` says why. */
+  actual: string;
+  note: string;
+}
+
+/** A placement whose displaced file's `<name>.bak` is gone. Deploy and uninstall refuse until it
+ *  is forgotten. */
+export interface LostBackup {
+  relative: string;
+  shipment: string;
+  backup: string;
 }
 
 export interface DeployWadResult {

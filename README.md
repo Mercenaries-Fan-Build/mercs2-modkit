@@ -127,8 +127,9 @@ or finds one on `PATH` (`cargo install wad_simulator`).
 
 Tagged builds (`v*`) publish installers plus a Tauri-updater manifest
 (`latest.json`), which installed copies poll so they can update in-place
-(Windows NSIS installs and Linux AppImages; the portable exe and
-deb/rpm/flatpak link to the release page instead). Update artifacts are
+(Windows NSIS installs and Linux AppImage/deb/rpm installs; deb and rpm ask
+for a root password through `pkexec`; the portable exe and the Flatpak link
+to the release page instead). Update artifacts are
 signed; the app rejects any update whose signature doesn't match the public
 key in `src-tauri/tauri.conf.json`.
 

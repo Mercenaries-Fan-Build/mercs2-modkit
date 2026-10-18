@@ -11,7 +11,8 @@ use commands::conflict_resolver::build_conflict_graph;
 use commands::debug_bundle::build_debug_zip;
 use commands::deploy::{deploy_asi, trash_paths};
 use commands::deploy_wad::{
-    deploy_patch_wad, deployed_wad_record, list_patch_wad_backups, restore_patch_wad,
+    deploy_patch_wad, deployed_wad_record, forget_displaced_backups, list_patch_wad_backups,
+    lost_displaced_backups, restore_patch_wad,
 };
 use commands::dxwrapper::install_dxwrapper;
 use commands::game::detect_game;
@@ -180,6 +181,8 @@ pub fn run() {
             list_patch_wad_backups,
             restore_patch_wad,
             deployed_wad_record,
+            lost_displaced_backups,
+            forget_displaced_backups,
             list_wardrobe_models,
             preview_wardrobe_lua,
             human_skins,

@@ -41,6 +41,10 @@
 //! On the file half, a displaced foreign file is moved to `<name>.bak` beside it and recorded with the placement that displaced it, removal moves modkit's
 //! file to the recoverable trash, and the displaced file is then moved back.
 //!
+//! A `.bak` that is gone cannot be moved back, and every deploy and uninstall would stop on it, so
+//! both refuse up front, before anything moves, while one is listed ([`lost_displaced_backups`]).
+//! The player clears it with [`forget_displaced_backups`], which drops only the displaced record.
+//!
 //! The file half covers everything the staged build names: loose files, `data_wad` language WADs
 //! (whose display name the ledger keeps for the language screen), the merged
 //! `data/<language>-patch.wad` and `data/shell-patch.wad`, and `stream_copy` copies of game data,
@@ -104,6 +108,19 @@ pub struct DisplacedFile {
     /// Absolute path the file had, in its on-disk case.
     pub original: String,
     /// Absolute path of the `<name>.bak` it was moved to.
+    pub backup: String,
+}
+
+/// A placement whose displaced file can no longer be moved back, because its `<name>.bak` is gone.
+/// Every deploy and uninstall undoes the placements first, so one of these stops both until the
+/// player forgets it ([`forget_displaced_backups`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LostBackup {
+    /// The placement's path relative to the game folder.
+    pub relative: String,
+    /// Which Shipment placed it.
+    pub shipment: String,
+    /// Absolute path of the missing `<name>.bak`.
     pub backup: String,
 }
 
@@ -372,21 +389,17 @@ impl PlacementStore {
     }
 
     fn remove_one(&self, file: &PlacedFile, outcome: &mut PlacementOutcome) -> Result<(), String> {
+        if left_alone(file) {
+            outcome.skipped.push(file.relative.clone());
+            return Ok(());
+        }
         let path = Path::new(&file.abs_path);
         if path.is_file() {
-            match sha256_of(path) {
-                Ok(hash) if hash == file.sha256 => {
-                    if self.trash(path).is_err() {
-                        outcome.skipped.push(file.relative.clone());
-                        return Ok(());
-                    }
-                    outcome.removed.push(file.relative.clone());
-                }
-                _ => {
-                    outcome.skipped.push(file.relative.clone());
-                    return Ok(());
-                }
+            if self.trash(path).is_err() {
+                outcome.skipped.push(file.relative.clone());
+                return Ok(());
             }
+            outcome.removed.push(file.relative.clone());
         }
         if let Some(displaced) = &file.displaced {
             restore_displaced(displaced, &file.relative)?;
@@ -394,6 +407,87 @@ impl PlacementStore {
         }
         Ok(())
     }
+
+    /// The recorded placements that [`Self::remove_one`] would try to move a displaced file back
+    /// for, and whose `<name>.bak` is gone.
+    fn lost_backups(&self) -> Vec<LostBackup> {
+        self.read()
+            .iter()
+            .filter(|f| !left_alone(f))
+            .filter_map(|f| {
+                let displaced = f.displaced.as_ref()?;
+                (!Path::new(&displaced.backup).is_file()).then(|| LostBackup {
+                    relative: f.relative.clone(),
+                    shipment: f.shipment.clone(),
+                    backup: displaced.backup.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Drop the displaced-file record of every lost backup, or of `shipment`'s only. The placement
+    /// itself stays recorded, so the next deploy still takes modkit's file out. Each backup is
+    /// re-checked here, so a `.bak` that is back on disk is never forgotten.
+    fn forget_lost_backups(&self, shipment: Option<&str>) -> Result<(), String> {
+        let lost = self.lost_backups();
+        let forget = |f: &PlacedFile| {
+            shipment.is_none_or(|s| s == f.shipment)
+                && lost.iter().any(|l| l.relative == f.relative && l.shipment == f.shipment)
+        };
+        let mut files = self.read();
+        let mut changed = false;
+        for f in files.iter_mut().filter(|f| forget(f)) {
+            f.displaced = None;
+            changed = true;
+        }
+        if changed {
+            self.write(&files)?;
+        }
+        Ok(())
+    }
+}
+
+/// A recorded file whose bytes no longer match what modkit wrote: somebody replaced it, so removal
+/// leaves it, and its displaced file, where they are.
+fn left_alone(file: &PlacedFile) -> bool {
+    let path = Path::new(&file.abs_path);
+    path.is_file() && sha256_of(path).map_or(true, |hash| hash != file.sha256)
+}
+
+/// Refuse a deploy or uninstall that would stop on a lost backup, before anything in the game moves.
+fn refuse_lost_backups(store: &PlacementStore) -> Result<(), String> {
+    let lost = store.lost_backups();
+    if lost.is_empty() {
+        return Ok(());
+    }
+    let list = lost
+        .iter()
+        .map(|l| format!("{} ({}; {})", l.relative, l.shipment, l.backup))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "Nothing was changed. A previous install set aside the file{s} below as .bak, and the \
+         .bak {is} gone, so {it} cannot be put back:\n{list}\nForget {them} on Build & Deploy, \
+         then install again.",
+        s = if lost.len() == 1 { "" } else { "s" },
+        is = if lost.len() == 1 { "is" } else { "are" },
+        it = if lost.len() == 1 { "it" } else { "they" },
+        them = if lost.len() == 1 { "it" } else { "them" },
+    ))
+}
+
+/// The placements a deploy or uninstall would stop on because a displaced file's `.bak` is gone.
+#[tauri::command(async)]
+pub fn lost_displaced_backups() -> Result<Vec<LostBackup>, String> {
+    Ok(PlacementStore::app()?.lost_backups())
+}
+
+/// Forget the lost backups (all, or `shipment`'s), and return the ones still lost.
+#[tauri::command(async)]
+pub fn forget_displaced_backups(shipment: Option<String>) -> Result<Vec<LostBackup>, String> {
+    let store = PlacementStore::app()?;
+    store.forget_lost_backups(shipment.as_deref())?;
+    Ok(store.lost_backups())
 }
 
 /// The file at `dest`'s name in `dest`'s directory, matched case-insensitively, in its on-disk case.
@@ -713,6 +807,7 @@ pub fn deploy_patch_wad(args: DeployWadArgs) -> Result<DeployWadResult, String> 
         if !root.is_dir() {
             return Err(format!("Game folder not found: {}", root.display()));
         }
+        refuse_lost_backups(&PlacementStore::app()?)?;
     }
 
     let guard_warnings = collect_guard_warnings(args.staging_dir.as_deref(), game_root.as_deref())?;
@@ -923,6 +1018,7 @@ pub fn restore_patch_wad(args: RestoreWadArgs) -> Result<DeployWadResult, String
             if !game_root.is_dir() {
                 return Err(format!("Game folder not found: {}", game_root.display()));
             }
+            refuse_lost_backups(&PlacementStore::app()?)?;
             let data_files = data_files::uninstall_data_files(&DataFileStore::app()?, &game_root)?;
             if dest.is_file() {
                 std::fs::remove_file(&dest)
@@ -1428,5 +1524,117 @@ mod tests {
         let err = uninstall_placements(&s).unwrap_err();
         assert!(err.contains("which is gone"), "got: {err}");
         assert_eq!(s.read().len(), 1, "the entry survives for a retry");
+    }
+
+    /// The player deleted both modkit's file and the `.bak`: the check names the placement, and
+    /// the refusal names it too, before anything moves.
+    #[test]
+    fn a_lost_backup_is_listed_and_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("scripts")).unwrap();
+        std::fs::write(game.join("scripts/lua_bridge.asi"), "theirs").unwrap();
+        let s = store(tmp.path());
+        let asi = stage(&build, "scripts/lua_bridge.asi", "ours", "lua-bridge");
+        install_placements(&s, &[asi], &[], &game, "scripts").unwrap();
+        assert!(s.lost_backups().is_empty(), "the .bak is still there");
+
+        std::fs::remove_file(game.join("scripts/lua_bridge.asi")).unwrap();
+        std::fs::remove_file(game.join("scripts/lua_bridge.asi.bak")).unwrap();
+
+        let lost = s.lost_backups();
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].relative, "scripts/lua_bridge.asi");
+        assert_eq!(lost[0].shipment, "lua-bridge");
+        let err = refuse_lost_backups(&s).unwrap_err();
+        assert!(err.starts_with("Nothing was changed."), "got: {err}");
+        assert!(err.contains("scripts/lua_bridge.asi (lua-bridge;"), "got: {err}");
+    }
+
+    /// A placement the player replaced by hand is left alone with its `.bak`, so a missing `.bak`
+    /// there stops nothing and is not listed.
+    #[test]
+    fn a_replaced_placement_with_no_backup_is_not_lost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("scripts")).unwrap();
+        std::fs::write(game.join("scripts/a.asi"), "theirs").unwrap();
+        let s = store(tmp.path());
+        install_placements(&s, &[stage(&build, "scripts/a.asi", "ours", "A")], &[], &game, "scripts")
+            .unwrap();
+        std::fs::write(game.join("scripts/a.asi"), "edited").unwrap();
+        std::fs::remove_file(game.join("scripts/a.asi.bak")).unwrap();
+
+        assert!(s.lost_backups().is_empty());
+        let out = uninstall_placements(&s).unwrap();
+        assert_eq!(out.skipped, vec!["scripts/a.asi"]);
+    }
+
+    /// Forgetting drops only the displaced record: the placement stays, so the next deploy still
+    /// takes modkit's file out, and then goes through.
+    #[test]
+    fn a_forgotten_backup_unblocks_the_next_deploy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("scripts")).unwrap();
+        std::fs::write(game.join("scripts/a.asi"), "theirs").unwrap();
+        let s = store(tmp.path());
+        install_placements(&s, &[stage(&build, "scripts/a.asi", "ours", "A")], &[], &game, "scripts")
+            .unwrap();
+        std::fs::remove_file(game.join("scripts/a.asi.bak")).unwrap();
+        assert_eq!(s.lost_backups().len(), 1);
+
+        s.forget_lost_backups(None).unwrap();
+        assert!(s.lost_backups().is_empty());
+        let kept = s.read();
+        assert_eq!(kept.len(), 1, "the placement is still recorded");
+        assert!(kept[0].displaced.is_none());
+        refuse_lost_backups(&s).unwrap();
+
+        let out = install_placements(&s, &[], &[], &game, "scripts").unwrap();
+        assert_eq!(out.removed, vec!["scripts/a.asi"], "modkit's file still comes out");
+        assert!(out.restored.is_empty());
+        assert!(!game.join("scripts/a.asi").exists());
+    }
+
+    /// Forgetting one Shipment's lost backups leaves the others' listed.
+    #[test]
+    fn forgetting_one_shipment_keeps_the_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("scripts")).unwrap();
+        std::fs::write(game.join("scripts/a.asi"), "theirs a").unwrap();
+        std::fs::write(game.join("scripts/b.asi"), "theirs b").unwrap();
+        let s = store(tmp.path());
+        let staged = [
+            stage(&build, "scripts/a.asi", "ours a", "A"),
+            stage(&build, "scripts/b.asi", "ours b", "B"),
+        ];
+        install_placements(&s, &staged, &[], &game, "scripts").unwrap();
+        std::fs::remove_file(game.join("scripts/a.asi.bak")).unwrap();
+        std::fs::remove_file(game.join("scripts/b.asi.bak")).unwrap();
+
+        s.forget_lost_backups(Some("A")).unwrap();
+        let lost = s.lost_backups();
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].shipment, "B");
+    }
+
+    /// A `.bak` that came back before Forget ran is still moved back, never forgotten.
+    #[test]
+    fn a_backup_that_is_back_is_not_forgotten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("scripts")).unwrap();
+        std::fs::write(game.join("scripts/a.asi"), "theirs").unwrap();
+        let s = store(tmp.path());
+        install_placements(&s, &[stage(&build, "scripts/a.asi", "ours", "A")], &[], &game, "scripts")
+            .unwrap();
+
+        s.forget_lost_backups(None).unwrap();
+        assert!(s.read()[0].displaced.is_some());
+        let out = uninstall_placements(&s).unwrap();
+        assert_eq!(out.restored, vec!["scripts/a.asi"]);
+        assert_eq!(std::fs::read_to_string(game.join("scripts/a.asi")).unwrap(), "theirs");
     }
 }

@@ -80,6 +80,8 @@ import type {
   LanguageStatus,
   SetLanguageResult,
   SetAddedLanguageResult,
+  LostBackup,
+  GuardWarning,
 } from "../types";
 
 const GAME_PATH_KEY = "mercs2-modkit:gamePath";
@@ -217,7 +219,16 @@ let pendingUpdate: Update | null = null;
  */
 export interface ApplyStatus {
   active: boolean;
-  step: "build" | "validate" | "deploy" | "done" | "conflict" | "invalid" | "error";
+  step:
+    | "build"
+    | "validate"
+    | "deploy"
+    | "done"
+    | "conflict"
+    | "invalid"
+    | "lost-backups"
+    | "guard"
+    | "error";
   message: string;
   /** Result of the validate step: true/false once it ran, null if it was skipped or couldn't. */
   validationOk: boolean | null;
@@ -346,6 +357,13 @@ interface ProjectState {
    */
   missingShipmentIds: string[];
   /**
+   * Placements whose displaced file's `.bak` is gone, as of the last {@link refreshLostBackups}.
+   * Deploy and uninstall refuse while one is listed, until {@link forgetLostBackups}.
+   */
+  lostBackups: LostBackup[];
+  /** The `signature_guard` mismatches the last deploy reported. */
+  guardWarnings: GuardWarning[];
+  /**
    * A Shipment removal waiting for the player's confirmation: the full chain it takes.
    * Nothing is removed until {@link confirmShipmentRemoval}; cancelling removes nothing.
    */
@@ -414,6 +432,8 @@ export const useProjectStore = defineStore("project", {
     prebuilt: [],
     shipments: [],
     missingShipmentIds: [],
+    lostBackups: [],
+    guardWarnings: [],
     pendingShipmentRemoval: null,
     pendingDependencies: null,
     refusedShipments: null,
@@ -1086,7 +1106,7 @@ export const useProjectStore = defineStore("project", {
     /**
      * Check for a newer modkit release. Prefers the Tauri updater (signed
      * manifest, in-place install); falls back to the GitHub release lookup for
-     * install forms the updater can't replace (portable exe, deb/rpm/flatpak)
+     * install forms the updater can't replace (portable exe, flatpak)
      * or when no update manifest is published yet.
      */
     async checkModkitUpdate() {
@@ -1943,6 +1963,7 @@ export const useProjectStore = defineStore("project", {
             asi_target: this.asiTarget,
           },
         });
+        this.guardWarnings = res.files.guard_warnings ?? [];
         await this.refreshGame();
         await this.loadWadBackups();
         await this.loadDeployedWad();
@@ -1966,7 +1987,10 @@ export const useProjectStore = defineStore("project", {
      * {@link applyStatus} for the game-bar strip; a partial-overlap conflict is handed back so the
      * caller can route the user to Build & Deploy, which resolves it richly.
      */
-    async applyToGame(): Promise<{ ok: boolean; reason?: "conflict" | "error" }> {
+    async applyToGame(): Promise<{
+      ok: boolean;
+      reason?: "conflict" | "lost-backups" | "guard" | "error";
+    }> {
       if (!this.gameInfo?.data_dir) throw new Error("Set the game folder first");
       this.error = null;
       let validationOk: boolean | null = null;
@@ -1978,6 +2002,18 @@ export const useProjectStore = defineStore("project", {
         conflicts: [],
       };
       try {
+        // A lost backup stops the deploy; find it before building anything.
+        if ((await this.refreshLostBackups()).length) {
+          this.applyStatus = {
+            active: false,
+            step: "lost-backups",
+            message: "A file an earlier install renamed to .bak is gone. Forget it on Build & Deploy.",
+            validationOk: null,
+            conflicts: [],
+          };
+          return { ok: false, reason: "lost-backups" };
+        }
+
         // A partial overlap between two mods can't be auto-merged; send it to Build & Deploy.
         try {
           await this.previewConflicts();
@@ -2039,6 +2075,18 @@ export const useProjectStore = defineStore("project", {
           conflicts: [],
         };
         await this.deployPatchWad(build);
+
+        // Deployed, but a plugin's guarded bytes differ in an exe: show it before launching.
+        if (this.guardWarnings.length) {
+          this.applyStatus = {
+            active: false,
+            step: "guard",
+            message: "Deployed, but a plugin does not match an exe in the game folder.",
+            validationOk,
+            conflicts: [],
+          };
+          return { ok: false, reason: "guard" };
+        }
 
         this.applyStatus = {
           active: false,
@@ -2225,6 +2273,30 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
+    /** Re-read which placements' displaced backups are gone. A failed check is reported and thrown. */
+    async refreshLostBackups(): Promise<LostBackup[]> {
+      try {
+        this.lostBackups = await invoke<LostBackup[]>("lost_displaced_backups");
+        return this.lostBackups;
+      } catch (e) {
+        this.error = `Couldn't check the files earlier installs renamed to .bak: ${e}`;
+        throw e;
+      }
+    },
+
+    /** Forget the lost backups of one Shipment, or of all with `null`. */
+    async forgetLostBackups(shipment: string | null): Promise<void> {
+      this.busy = true;
+      this.error = null;
+      try {
+        this.lostBackups = await invoke<LostBackup[]>("forget_displaced_backups", { shipment });
+      } catch (e) {
+        this.error = String(e);
+      } finally {
+        this.busy = false;
+      }
+    },
+
     /**
      * Download the latest release of a mercs.ink row whose folder is missing, into the same
      * row. Rows whose folders exist are what the resolver reads; another missing row the
@@ -2365,6 +2437,7 @@ export const useProjectStore = defineStore("project", {
         const res = await invoke<DeployWadResult>("restore_patch_wad", {
           args: { file, data_dir: this.gameInfo.data_dir, game_root: this.gameInfo.root },
         });
+        this.guardWarnings = [];
         await this.refreshGame();
         await this.loadWadBackups();
         await this.loadDeployedWad();

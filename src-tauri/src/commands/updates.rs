@@ -25,9 +25,10 @@ pub struct ReleaseInfo {
 }
 
 /// Whether this binary was installed in a form the Tauri updater can replace
-/// in-place. Windows NSIS installs and Linux AppImages qualify; the portable
-/// Windows exe and deb/rpm/flatpak installs update out-of-band, so the UI
-/// should link to the release page instead of offering an in-app install.
+/// in-place. Windows NSIS installs and Linux AppImage/deb/rpm installs qualify
+/// (deb and rpm install through `pkexec`, so the user is asked for a root
+/// password); the portable Windows exe and the Flatpak update out-of-band, so
+/// the UI should link to the release page instead of offering an in-app install.
 #[tauri::command]
 pub fn updater_supported() -> bool {
     #[cfg(target_os = "windows")]
@@ -41,9 +42,15 @@ pub fn updater_supported() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        // AppImage runtimes export APPIMAGE; deb/rpm/flatpak go through the
-        // system package manager.
-        std::env::var_os("APPIMAGE").is_some()
+        use tauri::utils::{config::BundleType, platform::bundle_type};
+        // The bundler stamps the package type into the binary. The Flatpak wraps
+        // the .deb's binary, so it reads as a deb and is excluded here. An
+        // AppImage is replaced at the path its runtime exports as APPIMAGE.
+        match bundle_type() {
+            Some(BundleType::Deb | BundleType::Rpm) => !super::launch::in_flatpak(),
+            Some(BundleType::AppImage) => std::env::var_os("APPIMAGE").is_some(),
+            _ => false,
+        }
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {

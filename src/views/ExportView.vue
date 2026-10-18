@@ -1,25 +1,32 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from "vue";
+import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRoute } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../stores/project";
 import ProgressBar from "../components/ProgressBar.vue";
 import ErrorBanner from "../components/ErrorBanner.vue";
+import LostBackupsBanner from "../components/LostBackupsBanner.vue";
 import type { ClaimConflict, GroupOutcome, PlacementOutcome } from "../types";
 
 const route = useRoute();
-// The validation report, and a transient highlight when arrived at via the game bar's
-// "view validation report" link (`/export?show=validation`).
+// The validation report or the guard warnings, and a transient highlight when arrived at from the
+// game bar (`/export?show=validation`, `/export?show=guard`).
 const validationSection = ref<HTMLElement | null>(null);
 const highlightValidation = ref(false);
-async function focusValidation() {
+const guardSection = ref<HTMLElement | null>(null);
+const highlightGuard = ref(false);
+async function focusSection(el: typeof validationSection, highlight: typeof highlightValidation) {
   await nextTick();
-  const el = validationSection.value;
-  if (!el) return;
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
-  highlightValidation.value = true;
-  setTimeout(() => (highlightValidation.value = false), 2400);
+  if (!el.value) return;
+  el.value.scrollIntoView({ behavior: "smooth", block: "center" });
+  highlight.value = true;
+  setTimeout(() => (highlight.value = false), 2400);
+}
+function focusFromQuery() {
+  if (route.query.show === "validation" && store.validation)
+    void focusSection(validationSection, highlightValidation);
+  if (route.query.show === "guard") void focusSection(guardSection, highlightGuard);
 }
 
 const store = useProjectStore();
@@ -33,6 +40,8 @@ const {
   prebuilt,
   shipments,
   missingShipmentIds,
+  lostBackups,
+  guardWarnings,
   textures,
 } = storeToRefs(store);
 
@@ -65,9 +74,11 @@ const placement = ref<PlacementOutcome | null>(null);
 onMounted(() => {
   void store.loadWadBackups().catch(() => {});
   void store.refreshMissingShipments();
-  // Deep link from the game bar: land on the validation report and flag it.
-  if (route.query.show === "validation" && store.validation) void focusValidation();
+  void store.refreshLostBackups().catch(() => {});
+  focusFromQuery();
 });
+// The game bar routes here while this page may already be open.
+watch(() => route.query.show, focusFromQuery);
 
 /** Build into the managed staging dir, then validate with wad_simulator. */
 async function buildAndValidate() {
@@ -75,6 +86,13 @@ async function buildAndValidate() {
   conflicts.value = [];
   deployed.value = null;
   placement.value = null;
+
+  // Preflight: a lost backup does not stop the build, but it stops the install, so list it now.
+  stage.value = "Checking the game folder…";
+  if (!(await store.refreshLostBackups().catch(() => null))) {
+    stage.value = "";
+    return;
+  }
 
   stage.value = "Resolving load order…";
   try {
@@ -124,6 +142,7 @@ async function buildAndValidate() {
 /** Install the build. The previous WAD is snapshotted first — this is undoable. */
 async function deploy() {
   if (!buildResult.value) return;
+  if ((await store.refreshLostBackups().catch(() => null))?.length !== 0) return;
   const res = await store.deployPatchWad(buildResult.value).catch(() => null);
   if (!res) return;
   deployed.value = res.installed_at;
@@ -131,6 +150,7 @@ async function deploy() {
 }
 
 async function restore(file: string | null) {
+  if (file === null && (await store.refreshLostBackups().catch(() => null))?.length !== 0) return;
   const res = await store.restorePatchWad(file).catch(() => null);
   deployed.value = null;
   placement.value = res?.files ?? null;
@@ -163,6 +183,8 @@ function outcomeText(o: GroupOutcome): string {
       </p>
     </header>
 
+    <LostBackupsBanner />
+
     <div
       v-if="nothingToBuild"
       class="empty-plate mt-10"
@@ -176,6 +198,7 @@ function outcomeText(o: GroupOutcome): string {
         <button class="btn-secondary" @click="addShipment">Add Shipment…</button>
       </div>
     </div>
+    <ErrorBanner v-if="nothingToBuild" />
 
     <template v-else>
       <!-- Wardrobe outfits and texture swaps build into the same WAD as the mods. -->
@@ -516,7 +539,7 @@ function outcomeText(o: GroupOutcome): string {
               ? '!border-red-500 !bg-red-600 hover:!bg-red-500'
               : ''
           "
-          :disabled="busy || !gameInfo?.data_dir"
+          :disabled="busy || !gameInfo?.data_dir || lostBackups.length > 0"
           @click="deploy"
         >
           {{ validation && !validation.ok ? "Install anyway" : "Install into the game" }}
@@ -569,6 +592,26 @@ function outcomeText(o: GroupOutcome): string {
             <span class="font-mono">{{ placement.skipped.join(", ") }}</span>
           </p>
         </div>
+
+        <!-- A plugin's declared bytes differ in an exe: it was installed, but may not work there. -->
+        <div
+          v-if="guardWarnings.length"
+          ref="guardSection"
+          class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 transition-all duration-500"
+          :class="highlightGuard ? 'ring-2 ring-brass-500/70' : ''"
+        >
+          <p>
+            Installed, but {{ guardWarnings.length === 1 ? "a plugin expects" : "plugins expect" }}
+            different bytes in an exe in your game folder. It may not work with that exe. Launch
+            from the game bar if you still want to play.
+          </p>
+          <ul class="mt-2 space-y-1 font-mono">
+            <li v-for="(w, i) in guardWarnings" :key="i">
+              {{ w.plugin }} · {{ w.exe }} @ {{ w.address }}: expected {{ w.expected }},
+              {{ w.actual ? `found ${w.actual}` : w.note }}
+            </li>
+          </ul>
+        </div>
       </section>
 
       <!-- Undo. Every hazard a bad WAD can cause is recoverable from here. -->
@@ -580,7 +623,7 @@ function outcomeText(o: GroupOutcome): string {
         </p>
         <button
           class="btn-outline mt-3 w-full justify-center"
-          :disabled="busy || !gameInfo?.data_dir"
+          :disabled="busy || !gameInfo?.data_dir || lostBackups.length > 0"
           @click="restore(null)"
         >
           Remove the patch (back to stock game)
