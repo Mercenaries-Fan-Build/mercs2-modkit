@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::orchestrator::parse_state_machine;
-use mercs2_formats::texture::{extract_model, parse_mtrl};
+use mercs2_formats::texture::{extract_model, parse_mtrl, MtrlSource};
 use mercs2_mesh::{build_indexed_all, state_tiers};
 
 const NAMES: &str = include_str!("../data/asset_names.txt");
@@ -37,7 +37,8 @@ fn main() {
             continue;
         };
 
-        let mats = parse_mtrl(&c);
+        let mats = parse_mtrl(&c, MtrlSource::Model)
+            .unwrap_or_else(|e| panic!("{model}: MTRL: {e}"));
         let declared: HashSet<u32> = mats
             .iter()
             .flat_map(|m| m.textures.iter().copied())
