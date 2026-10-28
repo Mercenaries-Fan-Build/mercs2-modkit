@@ -69,7 +69,7 @@ loadprobe = "2.3.2"
 # Lua 5.1 compiler emitting the game's exact bytecode dialect (float lua_Number, 32-bit
 # size_t). The wardrobe is pure Lua: modkit recompiles `wifpmcinterior` with each mod's
 # outfits appended. Verified byte-for-byte against the reference luac.exe.
-mercs2_luac = "1.2"
+mercs2_luac = "1.2.1"
 
 # Model container -> indexed triangle geometry, for the 3D texture viewer. Pure decode: it
 # was carved out of `mercs2_engine` precisely so a GUI can use it without linking wgpu/winit.
