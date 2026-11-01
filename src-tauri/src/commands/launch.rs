@@ -179,7 +179,7 @@ fn resolve_runtime(_settings: &RuntimeSettings) -> RuntimeInfo {
 fn build_command(
     game_dir: &Path,
     run_exe: &Path,
-    _settings: &RuntimeSettings,
+    settings: &RuntimeSettings,
     verbose: bool,
 ) -> Result<Command, String> {
     let mut cmd = Command::new(run_exe);
@@ -187,6 +187,7 @@ fn build_command(
     // Gate pmc_blackbox's verbose log hooks; set explicitly so an inherited
     // value can't silently turn it back on.
     cmd.env("PMC_VERBOSE_LOG", if verbose { "1" } else { "0" });
+    cmd.env("PMC_CRASH_MINIDUMP", if settings.crash_minidump { "1" } else { "0" });
     // Every known Mercenaries2 exe — retail, cracked, and apply_crack's output —
     // carries a manifest that declares only a VC80 CRT dependency, with no
     // `requestedExecutionLevel`. That is exactly the eligibility condition for UAC
@@ -242,6 +243,20 @@ mod tests {
         assert_eq!(env_of(&build(true), "PMC_VERBOSE_LOG"), Some(OsStr::new("1")));
     }
 
+    #[test]
+    fn the_crash_minidump_is_off_unless_the_settings_turn_it_on() {
+        assert_eq!(env_of(&build(false), "PMC_CRASH_MINIDUMP"), Some(OsStr::new("0")));
+        let on = RuntimeSettings { crash_minidump: true, ..Default::default() };
+        let cmd = build_command(
+            Path::new("/games/Mercs2"),
+            Path::new("/games/Mercs2/Mercenaries2.cracked.exe"),
+            &on,
+            false,
+        )
+        .expect("direct launch never fails to build");
+        assert_eq!(env_of(&cmd, "PMC_CRASH_MINIDUMP"), Some(OsStr::new("1")));
+    }
+
     /// Regression: without this the game can fail to launch with os error 740 on a
     /// machine that has a RUNASADMIN compat layer or shim entry for the exe.
     #[test]
@@ -259,7 +274,7 @@ mod tests {
 
 /// Variables the macOS launcher sets itself; `env` may not set them.
 #[cfg(target_os = "macos")]
-const MAC_RESERVED: &[&str] = &["WINEPREFIX", "PMC_VERBOSE_LOG"];
+const MAC_RESERVED: &[&str] = &["WINEPREFIX", "PMC_VERBOSE_LOG", "PMC_CRASH_MINIDUMP"];
 
 /// The file registry values are written to inside the prefix before `reg import`.
 #[cfg(target_os = "macos")]
@@ -312,8 +327,15 @@ fn build_command(
         game_dir,
         run_exe,
         &settings.exe_args,
-        verbose,
+        PmcSwitches { verbose, crash_minidump: settings.crash_minidump },
     ))
+}
+
+/// The pmc_bb switches a launch sets in the environment.
+#[cfg(target_os = "macos")]
+struct PmcSwitches {
+    verbose: bool,
+    crash_minidump: bool,
 }
 
 /// The game command itself: `wine64 <exe> <args…>` in the game folder.
@@ -325,7 +347,7 @@ fn wine_command(
     game_dir: &Path,
     run_exe: &Path,
     exe_args: &[String],
-    verbose: bool,
+    pmc: PmcSwitches,
 ) -> Command {
     let mut cmd = Command::new(wine64);
     cmd.arg(run_exe).args(exe_args).current_dir(game_dir);
@@ -335,7 +357,8 @@ fn wine_command(
     }
     // Gate pmc_blackbox's verbose log hooks; Wine forwards the environment into
     // the game process, so the in-game DLL reads this.
-    cmd.env("PMC_VERBOSE_LOG", if verbose { "1" } else { "0" });
+    cmd.env("PMC_VERBOSE_LOG", if pmc.verbose { "1" } else { "0" });
+    cmd.env("PMC_CRASH_MINIDUMP", if pmc.crash_minidump { "1" } else { "0" });
     cmd
 }
 
@@ -416,7 +439,7 @@ mod tests {
             .and_then(|(_, v)| v)
     }
 
-    fn build(verbose: bool, args: &[String]) -> Command {
+    fn build_with(verbose: bool, args: &[String], crash_minidump: bool) -> Command {
         wine_command(
             Path::new("/w/bin/wine64"),
             Path::new("/p/wine-prefix"),
@@ -424,8 +447,12 @@ mod tests {
             Path::new("/Users/me/Downloads/Mercs2"),
             Path::new("/Users/me/Downloads/Mercs2/Mercenaries2.cracked.exe"),
             args,
-            verbose,
+            PmcSwitches { verbose, crash_minidump },
         )
+    }
+
+    fn build(verbose: bool, args: &[String]) -> Command {
+        build_with(verbose, args, false)
     }
 
     #[test]
@@ -453,6 +480,12 @@ mod tests {
         assert_eq!(env_of(&cmd, "WINE_LARGE_ADDRESS_AWARE"), Some(OsStr::new("1")));
         assert_eq!(env_of(&cmd, "PMC_VERBOSE_LOG"), Some(OsStr::new("1")));
         assert_eq!(env_of(&build(false, &[]), "PMC_VERBOSE_LOG"), Some(OsStr::new("0")));
+    }
+
+    #[test]
+    fn the_crash_minidump_is_off_unless_the_settings_turn_it_on() {
+        assert_eq!(env_of(&build(false, &[]), "PMC_CRASH_MINIDUMP"), Some(OsStr::new("0")));
+        assert_eq!(env_of(&build_with(false, &[], true), "PMC_CRASH_MINIDUMP"), Some(OsStr::new("1")));
     }
 
     #[test]
@@ -779,6 +812,7 @@ fn build_command(
         // Gate pmc_blackbox's verbose log hooks. Proton forwards the process
         // environment into the Wine process, so the in-game DLL reads this.
         ("PMC_VERBOSE_LOG".into(), if verbose { "1".into() } else { "0".into() }),
+        ("PMC_CRASH_MINIDUMP".into(), if settings.crash_minidump { "1".into() } else { "0".into() }),
     ];
     let reserved: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
     let user_env = settings.wine_env(&reserved)?;
