@@ -2642,6 +2642,19 @@ export const useProjectStore = defineStore("project", {
       }
     },
 
+    /** Turn pmc_bb's minidump on a fatal crash on or off, from the next launch. */
+    async setCrashMinidump(enabled: boolean) {
+      this.error = null;
+      try {
+        await invoke<RuntimeSettings>("set_crash_minidump", { enabled });
+      } catch (e) {
+        this.error = String(e);
+        throw e;
+      } finally {
+        await this.loadRuntime().catch(() => {});
+      }
+    },
+
     /** macOS: download and install a Wine build (`null` = the latest release). */
     async installWine(tag: string | null) {
       this.error = null;
