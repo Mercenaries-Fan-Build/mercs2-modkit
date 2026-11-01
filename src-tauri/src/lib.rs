@@ -39,7 +39,8 @@ use commands::region::{normalize_region, read_region};
 use commands::registry::{fetch_catalog, get_custom_sources, save_custom_sources};
 use commands::launch_plan::prepare_launch;
 use commands::runtime_settings::{
-    get_runtime_settings, set_exe_override, set_pmc_bb_override, set_runtime_env,
+    get_runtime_settings, set_crash_minidump, set_exe_override, set_pmc_bb_override,
+    set_runtime_env,
 };
 use commands::save_backup::{
     backup_saves, delete_save_backup, list_save_backups, list_saves, restore_save_backup,
@@ -225,6 +226,7 @@ pub fn run() {
             discover_runtime,
             select_proton,
             get_runtime_settings,
+            set_crash_minidump,
             set_runtime_env,
             set_exe_override,
             set_pmc_bb_override,
