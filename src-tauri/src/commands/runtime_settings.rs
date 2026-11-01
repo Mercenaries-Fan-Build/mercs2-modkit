@@ -14,8 +14,9 @@
 //! DLL overrides, registry values written into the prefix, `WINEDEBUG`, extra
 //! game arguments, and `overrides` — the exe to launch and the pmc_bb build, when
 //! the user picks them instead of modkit. The UI exposes the runner selection, the
-//! environment list, and the two overrides; everything else is an "I know what I'm
-//! doing" edit of this file. `overrides` applies on every host, Windows included.
+//! environment list, the two overrides and `crashMinidump`; everything else is an "I
+//! know what I'm doing" edit of this file. `overrides` and `crashMinidump` apply on
+//! every host, Windows included.
 //!
 //! Because the file is hand-edited, it is parsed strictly: an unknown field, a bad
 //! value, or a format from a newer modkit **fails the launch** with the file's path
@@ -25,7 +26,7 @@
 //! # What modkit owns
 //!
 //! A few variables are set by the launcher itself (`WINEPREFIX`, `PMC_VERBOSE_LOG`,
-//! Proton's `STEAM_COMPAT_*`). Setting one of them in `env` is refused rather than
+//! `PMC_CRASH_MINIDUMP`, Proton's `STEAM_COMPAT_*`). Setting one of them in `env` is refused rather than
 //! letting one side silently win; the prefix has its own field. `WINEDLLOVERRIDES`
 //! and `WINEDEBUG` may come from `env` *or* from their structured fields, never
 //! both.
@@ -122,6 +123,10 @@ pub struct RuntimeSettings {
 
     /// The exe and pmc_bb build, when the user picked them by hand.
     pub overrides: Overrides,
+
+    /// Have pmc_bb write a full-memory minidump on a fatal crash. Off by default: each one is about
+    /// 1.5 GB in the game folder. Applies on every host.
+    pub crash_minidump: bool,
 }
 
 impl Default for RuntimeSettings {
@@ -140,6 +145,7 @@ impl Default for RuntimeSettings {
             winedebug: None,
             exe_args: Vec::new(),
             overrides: Overrides::default(),
+            crash_minidump: false,
         }
     }
 }
@@ -409,6 +415,12 @@ pub fn set_exe_override(exe: Option<String>) -> Result<RuntimeSettings, String> 
 #[tauri::command(async)]
 pub fn set_pmc_bb_override(asset: Option<String>) -> Result<RuntimeSettings, String> {
     update(|s| s.overrides.pmc_bb = asset)
+}
+
+/// Turn pmc_bb's minidump on a fatal crash on or off, from the next launch.
+#[tauri::command(async)]
+pub fn set_crash_minidump(enabled: bool) -> Result<RuntimeSettings, String> {
+    update(|s| s.crash_minidump = enabled)
 }
 
 #[cfg(test)]
