@@ -81,11 +81,12 @@ by editing the file by hand:
 | `registry` | Values imported into the prefix before every launch (macOS only). Each one is `{ "key": "HKEY_CURRENT_USER\\…", "name": "…", "value": { "type": "string", "data": "…" } }`; `type` can also be `dword` (a number) or `delete` (no `data`). |
 | `winedebug` | `WINEDEBUG` channels, e.g. `+seh,+loaddll`. |
 | `exeArgs` | Extra arguments passed after the game exe. |
+| `crashMinidump` | `true` has pmc_bb write a full-memory minidump to the game folder on a fatal crash, about 1.5 GB each. Off by default; Game Info has the same switch. Applies on every host. |
 
 The file is read strictly. An unknown field, an invalid value, or the same
 setting given twice (such as `WINEDLLOVERRIDES` in both `env` and
 `dllOverrides`) stops the launch with an error that names the file. You can't
-set `WINEPREFIX` or `PMC_VERBOSE_LOG` in `env`, because Modkit sets them itself;
+set `WINEPREFIX`, `PMC_VERBOSE_LOG` or `PMC_CRASH_MINIDUMP` in `env`, because Modkit sets them itself;
 on Linux the same applies to Proton's `STEAM_COMPAT_*` variables. Deleting a
 `registry` entry from the file doesn't remove the value from the prefix; use
 `"type": "delete"` for that.
