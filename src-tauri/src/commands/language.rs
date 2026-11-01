@@ -393,6 +393,10 @@ fn scan_added_languages(
         if is_reserved_wad_stem(stem) {
             continue;
         }
+        // A level: `add_level` puts `<name>-patch.wad` above `<name>.wad`. No added language has one.
+        if dir.join(format!("{stem}-patch.wad")).is_file() {
+            continue;
+        }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let recorded = placed
             .iter()
@@ -678,6 +682,23 @@ mod tests {
             added,
             vec![("klingon", "klingon", false), ("polski", "Polski (PL)", true)]
         );
+    }
+
+    /// A level's two WADs are not a language, even with a ledger entry that has no display name:
+    /// its `<name>.wad` is a `stream_copy`.
+    #[test]
+    fn a_level_is_not_an_added_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        for name in ["dlc01.wad", "dlc01-patch.wad", "polski.wad"] {
+            std::fs::write(data.join(name), b"FFCS").unwrap();
+        }
+        let placed = [ledger_entry(&data.join("dlc01.wad"), None)];
+
+        let added = scan_added_languages(Some(&data), None, &placed).unwrap();
+        let names: Vec<&str> = added.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["polski"]);
     }
 
     /// A ledger entry for an added language's WAD with no display name is an error.
