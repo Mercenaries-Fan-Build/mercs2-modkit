@@ -153,6 +153,10 @@ async function installPmcBb() {
   }
 }
 
+function onCrashMinidump(event: Event) {
+  store.setCrashMinidump((event.target as HTMLInputElement).checked).catch(() => {});
+}
+
 /** Whether Modkit's ledger records installing `key`, so there is something of its to remove. */
 function recorded(key: "pmc_bb" | "dxwrapper"): boolean {
   return !!store.managedComponent(key)?.installedTag;
@@ -559,6 +563,20 @@ async function normalizeRegion() {
                 </label>
               </div>
             </div>
+
+            <label
+              class="mt-3 flex items-start gap-2 text-xs text-zinc-400 select-none"
+              title="pmc_bb writes the game's whole memory to the game folder when it crashes. Applies from the next launch."
+            >
+              <input
+                type="checkbox"
+                class="mt-0.5 accent-emerald-600"
+                :checked="store.runtimeSettings?.settings.crashMinidump ?? false"
+                :disabled="busy || !store.runtimeSettings"
+                @change="onCrashMinidump"
+              />
+              <span>Write a minidump on a crash (about 1.5 GB each)</span>
+            </label>
 
             <p
               v-if="pmcMsg"

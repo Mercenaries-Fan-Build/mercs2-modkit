@@ -28,6 +28,7 @@
 //! | `data_wad` | `<relative>` (`data/<name>.wad`) | copied to `<game>/<relative>`; the ledger records `display` |
 //! | `language_patch` | `<relative>`, a patch WAD | merged per `language` into `data/<language>-patch.wad` |
 //! | `shell_patch` | `<name>`, a patch WAD | merged into `data/shell-patch.wad` |
+//! | `level_patch` | `<relative>`, a patch WAD | link's merged with every overlay into `<game>/<relative>`; a build's only says the level exists |
 //! | `stream_copy` | none | `<game>/<from>` copied to `<game>/<to>` once its digest matches `sha256` |
 //! | `data_file` | `<relative>` (`data/shader3.bin` or `data/shader3Low.bin`) | link's copy replaces `<game>/<relative>`; see [`super::data_files`] |
 
@@ -64,6 +65,9 @@ pub enum Destination {
     /// A patch WAD named by the entry's `name`, merged with every other Shipment's `shell_patch`
     /// into `data/shell-patch.wad`.
     ShellPatch,
+    /// A level's patch WAD at `relative` (`data/<level>-patch.wad`). The engine mounts no
+    /// `vz-patch.wad` in a level, so link's goes in with every Shipment's overlay under it.
+    LevelPatch { level: String, relative: String, display: String },
     /// A copy of game data inside the install: `<game>/<from>` to `<game>/<to>`. The entry's `bytes`
     /// and `sha256` describe `<game>/<from>` as qm read it at build time.
     StreamCopy { from: String, to: String },
@@ -175,6 +179,15 @@ pub struct LanguagePatch {
     pub path: PathBuf,
 }
 
+/// A level's patch WAD in a qm output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelPatch {
+    /// The level's name, a lowercase token.
+    pub level: String,
+    /// Absolute path to the WAD in the output dir.
+    pub path: PathBuf,
+}
+
 /// Everything one qm output directory produced, validated against the disk.
 #[derive(Debug, Default)]
 pub struct QmOutput {
@@ -186,6 +199,8 @@ pub struct QmOutput {
     pub language_patches: Vec<LanguagePatch>,
     /// The `shell_patch` WAD.
     pub shell_patch: Option<PathBuf>,
+    /// `level_patch` WADs, at most one per level.
+    pub level_patches: Vec<LevelPatch>,
     /// `stream_copy` placements.
     pub stream_copies: Vec<StreamCopy>,
     /// `data_file` placements, at most one per `relative`.
@@ -199,6 +214,7 @@ impl QmOutput {
             && self.files.is_empty()
             && self.language_patches.is_empty()
             && self.shell_patch.is_none()
+            && self.level_patches.is_empty()
             && self.stream_copies.is_empty()
             && self.data_files.is_empty()
     }
@@ -371,6 +387,19 @@ pub fn read_output(dir: &Path, shipment: &str) -> Result<QmOutput, String> {
                 }
                 let name = checked_relative(&entry.name, "shell patch", shipment)?;
                 out.shell_patch = Some(artifact(dir, name, shipment)?);
+            }
+            Destination::LevelPatch { level, relative, display: _ } => {
+                if let Some(why) = refuse_bad_language(level) {
+                    return Err(format!("{shipment}: level {level:?}: {why}"));
+                }
+                let relative = checked_relative(relative, "level patch", shipment)?;
+                if relative != format!("data/{level}-patch.wad") {
+                    return Err(format!("{shipment} records level {level} at {relative}, which the engine does not open"));
+                }
+                if out.level_patches.iter().any(|p| &p.level == level) {
+                    return Err(format!("{shipment} records two patches for level {level}"));
+                }
+                out.level_patches.push(LevelPatch { level: level.clone(), path: artifact(dir, relative, shipment)? });
             }
             Destination::StreamCopy { from, to } => {
                 let from = checked_relative(from, "stream-copy source", shipment)?;
@@ -596,6 +625,27 @@ mod tests {
         assert_eq!(out.files[0].relative, "data/polski.wad");
         assert_eq!(out.files[0].display.as_deref(), Some("Polski (PL)"));
         assert_eq!(out.files[0].language, None);
+    }
+
+    /// A level patch is read into its own list, and only at the path the engine opens.
+    #[test]
+    fn a_level_patch_is_read_at_the_path_the_engine_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "data/dlc01-patch.wad", "wad");
+        write_record(
+            dir.path(),
+            r#"{"name":"dlc01-patch.wad","bytes":3,"sha256":"ab","destination":{"kind":"level_patch","level":"dlc01","relative":"data/dlc01-patch.wad","display":"The DLC"}}"#,
+        );
+        let out = read_output(dir.path(), "s").unwrap();
+        assert!(out.overlay.is_none());
+        assert_eq!(out.level_patches[0].level, "dlc01");
+        assert!(!out.is_empty());
+
+        write_record(
+            dir.path(),
+            r#"{"name":"x.wad","bytes":3,"sha256":"ab","destination":{"kind":"level_patch","level":"other","relative":"data/dlc01-patch.wad","display":"X"}}"#,
+        );
+        assert!(read_output(dir.path(), "s").is_err());
     }
 
     /// `display` is required on a `data_wad`: a missing one is a parse error, an empty one a refusal.

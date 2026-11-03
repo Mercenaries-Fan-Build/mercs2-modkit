@@ -1592,6 +1592,7 @@ export interface RuntimeSettings {
   winedebug: string | null;
   exeArgs: string[];
   overrides: { exe: string | null; pmcBb: string | null };
+  crashMinidump: boolean;
 }
 
 /** Mirrors Rust `RuntimeSettingsView`. */
