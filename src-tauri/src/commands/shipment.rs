@@ -38,6 +38,18 @@
 //! which [`super::wad_builder`] copies into the build output and [`super::deploy_wad`] installs and
 //! records for undo. See [`super::placement`] for the record.
 //!
+//! # Level patch WADs
+//!
+//! The engine mounts `data/<level>-patch.wad` for a level and no `vz-patch.wad`. So that WAD is every
+//! Shipment's overlay with link's level patch last: link compiles the whole level, with the set's
+//! scripts linked against the level's own, so a Shipment's build only tells us the level exists.
+//!
+//! # Block indices
+//!
+//! An ASET row names its LOD rungs by block index in its own WAD, so [`read_overlay`] moves each WAD's
+//! indices clear of the others' before blocks of several WADs meet in one `build_patch_wad_multi`,
+//! whose source-to-patch map would otherwise send a rung into another WAD's block.
+//!
 //! # Language and shell patch WADs
 //!
 //! The engine mounts two more patch WADs by name: `data/<language>-patch.wad` above the current
@@ -537,6 +549,8 @@ pub struct ShipmentBuild {
     pub language_patches: BTreeMap<String, Vec<ClaimGroup>>,
     /// Claim groups for `data/shell-patch.wad`, in load order with the link output's group last.
     pub shell_patch: Vec<ClaimGroup>,
+    /// Claim groups per level, for `data/<level>-patch.wad`: every overlay, link's level patch last.
+    pub level_patches: BTreeMap<String, Vec<ClaimGroup>>,
     /// Copies to make inside the game folder, in load order, one per destination.
     pub stream_copies: Vec<StreamCopy>,
     /// Replacement game data files: link's, one per path the plan's `link_file_paths` lists.
@@ -756,6 +770,8 @@ pub async fn shipment_groups(
     let mut overlays: Vec<Overlay> = Vec::new();
     let mut language_overlays: BTreeMap<String, Vec<Overlay>> = BTreeMap::new();
     let mut shell_overlays: Vec<Overlay> = Vec::new();
+    let mut levels: BTreeSet<String> = BTreeSet::new();
+    let mut next_block = 0u32;
     let mut files: Vec<StagedFile> = Vec::new();
     let mut stream_copies: Vec<StreamCopy> = Vec::new();
     let mut shipment_data_files: Vec<StagedDataFile> = Vec::new();
@@ -784,18 +800,19 @@ pub async fn shipment_groups(
         }
         let owner = (ship.id.as_str(), ship.name.as_str());
         if let Some(wad) = &output.overlay {
-            overlays.push(read_overlay(wad, owner, "overlay")?);
+            overlays.push(read_overlay(wad, owner, "overlay", &mut next_block)?);
         }
         for patch in &output.language_patches {
             let what = format!("{} patch", patch.language);
             language_overlays
                 .entry(patch.language.clone())
                 .or_default()
-                .push(read_overlay(&patch.path, owner, &what)?);
+                .push(read_overlay(&patch.path, owner, &what, &mut next_block)?);
         }
         if let Some(wad) = &output.shell_patch {
-            shell_overlays.push(read_overlay(wad, owner, "shell patch")?);
+            shell_overlays.push(read_overlay(wad, owner, "shell patch", &mut next_block)?);
         }
+        levels.extend(output.level_patches.iter().map(|p| p.level.clone()));
         files.extend(output.files);
         stream_copies.extend(output.stream_copies);
         shipment_data_files.extend(output.data_files);
@@ -828,20 +845,28 @@ pub async fn shipment_groups(
     let link = placement::read_output(&link_out, LINK)?;
     let link_owner = ("qm-link", LINK);
     let link_blocks = match &link.overlay {
-        Some(wad) => read_overlay(wad, link_owner, "overlay")?.2,
+        Some(wad) => read_overlay(wad, link_owner, "overlay", &mut next_block)?.2,
         None => Vec::new(),
     };
+    let mut link_levels: BTreeMap<String, Vec<mercs2_formats::patch_wad::PatchBlock>> = BTreeMap::new();
+    for patch in &link.level_patches {
+        let what = format!("{} patch", patch.level);
+        link_levels.insert(patch.level.clone(), read_overlay(&patch.path, link_owner, &what, &mut next_block)?.2);
+    }
+    if let Some(level) = levels.iter().find(|l| !link_levels.contains_key(*l)) {
+        return Err(format!("qm build placed level {level}, and qm link made no patch for it."));
+    }
     let mut link_language: BTreeMap<String, Vec<mercs2_formats::patch_wad::PatchBlock>> =
         BTreeMap::new();
     for patch in &link.language_patches {
         let what = format!("{} patch", patch.language);
         link_language.insert(
             patch.language.clone(),
-            read_overlay(&patch.path, link_owner, &what)?.2,
+            read_overlay(&patch.path, link_owner, &what, &mut next_block)?.2,
         );
     }
     let link_shell = match &link.shell_patch {
-        Some(wad) => read_overlay(wad, link_owner, "shell patch")?.2,
+        Some(wad) => read_overlay(wad, link_owner, "shell patch", &mut next_block)?.2,
         None => Vec::new(),
     };
     files.extend(link.files);
@@ -858,6 +883,7 @@ pub async fn shipment_groups(
         paths,
         shipments.len(),
     );
+    let level_patches = collapse_levels(&overlays, link_levels, paths, shipments.len());
 
     // Loose-file and stream-copy collisions resolve in the plan's order: both were collected in
     // that order, with link's last.
@@ -868,6 +894,7 @@ pub async fn shipment_groups(
         groups: collapse(overlays, link_blocks, paths, LinkGroup::scripts(shipments.len())),
         language_patches,
         shell_patch,
+        level_patches,
         stream_copies,
         data_files,
         files,
@@ -922,12 +949,64 @@ fn collapse_data_files(
 /// One Shipment's patch WAD for one target: `(mod id, name, blocks)`.
 type Overlay = (String, String, Vec<mercs2_formats::patch_wad::PatchBlock>);
 
-/// Read the patch WAD at `path` into an [`Overlay`] owned by `(id, name)`.
-fn read_overlay(path: &Path, (id, name): (&str, &str), what: &str) -> Result<Overlay, String> {
+/// Read the patch WAD at `path` into an [`Overlay`] owned by `(id, name)`, its block indices moved up
+/// to start at `next_block`, which moves past them.
+fn read_overlay(
+    path: &Path,
+    (id, name): (&str, &str),
+    what: &str,
+    next_block: &mut u32,
+) -> Result<Overlay, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("reading {name}'s {what}: {e}"))?;
-    let contents =
+    let mut contents =
         read_patch_wad(&bytes).map_err(|e| format!("{name}'s {what} is not a patch WAD: {e}"))?;
+    let at = *next_block;
+    rebase_blocks(&mut contents.blocks, at).map_err(|e| format!("{name}'s {what}: {e}"))?;
+    *next_block = at + contents.blocks.len() as u32;
     Ok((id.to_string(), name.to_string(), contents.blocks))
+}
+
+/// Add `base` to every block index in `blocks`, the rungs of their ASET rows and their own source
+/// index, so blocks of another WAD can join them.
+fn rebase_blocks(blocks: &mut [mercs2_formats::patch_wad::PatchBlock], base: u32) -> Result<(), String> {
+    const ABSENT: u32 = 0xFFFF;
+    let moved = |rung: u32| -> Result<u32, String> {
+        if rung == ABSENT {
+            return Ok(ABSENT);
+        }
+        let to = rung + base;
+        if to >= ABSENT {
+            return Err(format!("block index {to} is past the 65,534 an ASET row can name"));
+        }
+        Ok(to)
+    };
+    for block in blocks {
+        block.source_block_index = block.source_block_index.map(|s| s + base);
+        for row in &mut block.aset_entries {
+            row.u32_2 = (row.u32_2 & 0xFFFF_0000) | moved(row.u32_2 & 0xFFFF)?;
+            row.u32_1 = moved(row.u32_1 >> 16)? << 16 | moved(row.u32_1 & 0xFFFF)?;
+        }
+    }
+    Ok(())
+}
+
+/// One level's claim groups for each level link patched: every Shipment's overlay, link's level patch
+/// last. Link-owned blocks drop from the overlays as they do for `vz-patch.wad`: link's level patch
+/// has its own copies, linked against the level.
+fn collapse_levels(
+    overlays: &[Overlay],
+    link_levels: BTreeMap<String, Vec<mercs2_formats::patch_wad::PatchBlock>>,
+    link_block_paths: &[String],
+    shipment_count: usize,
+) -> BTreeMap<String, Vec<ClaimGroup>> {
+    link_levels
+        .into_iter()
+        .map(|(level, blocks)| {
+            let link = LinkGroup::patch(&format!("{level}-patch.wad"), shipment_count);
+            let groups = collapse(overlays.to_vec(), blocks, link_block_paths, link);
+            (level, groups)
+        })
+        .collect()
 }
 
 /// [`collapse`] every language's patch WADs and the shell patch WADs, each target on its own, the
@@ -1316,6 +1395,72 @@ mod tests {
     /// The residency headline: two script-touching Shipments, each with its own standalone
     /// `scripts_vz`, collapse so the FINAL merged WAD carries exactly **one** scripts block — the
     /// linker's reconciled one — and never a partial-override conflict.
+    /// A WAD of two blocks, its asset's chain running from the first into the second.
+    fn chained(path: &str, hash: u32) -> Vec<u8> {
+        let mut coarse = block(&format!(r"blocks\{path}_P000_Q3.block"), hash);
+        coarse.aset_entries[0].u32_2 = 1;
+        coarse.source_block_index = Some(0);
+        let mut fine = block(&format!(r"blocks\{path}_P001_Q2.block"), hash ^ 1);
+        fine.aset_entries.clear();
+        fine.source_block_index = Some(1);
+        mercs2_formats::patch_wad::build_patch_wad_multi(&[coarse, fine], 0, Some(0), &mercs2_formats::patch_wad::FFCS_CERT_BLOB).unwrap()
+    }
+
+    /// Without the rebase both WADs say "block 1", and each chain lands on the same block.
+    #[test]
+    fn a_chain_of_each_wad_stays_in_its_wad_when_they_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut next = 0u32;
+        let mut blocks = Vec::new();
+        for (name, hash) in [("a", 0xA0u32), ("b", 0xB0)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, chained(name, hash)).unwrap();
+            blocks.extend(read_overlay(&path, ("id", "n"), "overlay", &mut next).unwrap().2);
+        }
+        let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&blocks, 0, Some(0), &mercs2_formats::patch_wad::FFCS_CERT_BLOB).unwrap();
+        let read = read_patch_wad(&wad).unwrap();
+        let rung = |hash: u32| {
+            let row = read.blocks.iter().flat_map(|b| &b.aset_entries).find(|e| e.asset_hash == hash).unwrap();
+            read.blocks[(row.u32_2 & 0xFFFF) as usize].path_string.clone()
+        };
+        assert_eq!(rung(0xA0), r"blocks\a_P001_Q2.block");
+        assert_eq!(rung(0xB0), r"blocks\b_P001_Q2.block");
+    }
+
+    #[test]
+    fn a_rung_past_what_a_row_can_name_is_an_error() {
+        let mut blocks = vec![block(r"blocks\a.block", 0xA0)];
+        blocks[0].aset_entries[0].u32_2 = 5;
+        assert!(rebase_blocks(&mut blocks, 0xFFFA).is_err());
+    }
+
+    #[test]
+    fn a_rung_that_is_absent_stays_absent() {
+        let mut blocks = vec![block(r"blocks\a.block", 0xA0)];
+        let (u1, u2) = (blocks[0].aset_entries[0].u32_1, blocks[0].aset_entries[0].u32_2);
+        rebase_blocks(&mut blocks, 40).unwrap();
+        assert_eq!((blocks[0].aset_entries[0].u32_1, blocks[0].aset_entries[0].u32_2 & 0xFFFF), (u1, u2 & 0xFFFF));
+    }
+
+    /// Every overlay reaches the level, minus what link owns, with link's level patch last.
+    #[test]
+    fn a_level_takes_every_overlay_under_links_patch() {
+        let scripts = r"blocks\VZ\scripts_vz_P000_Q3.block";
+        let overlays: Vec<Overlay> = vec![(
+            "shipment:a".into(),
+            "A".into(),
+            vec![block(r"blocks\a\model.block", 0x1111), block(scripts, 0x5C21)],
+        )];
+        let mut link = BTreeMap::new();
+        link.insert("dlc01".to_string(), vec![block(scripts, 0x5C21), block(r"blocks\dlc01\b.block", 0x2222)]);
+        let levels = collapse_levels(&overlays, link, &link_block_paths(), 2);
+        let groups = &levels["dlc01"];
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].blocks.iter().map(|b| b.path_string.as_str()).collect::<Vec<_>>(), [r"blocks\a\model.block"]);
+        assert_eq!(groups[1].mod_id, "qm-link:dlc01-patch.wad");
+        assert_eq!(groups[1].blocks.len(), 2);
+    }
+
     #[test]
     fn collapse_yields_a_single_reconciled_scripts_block() {
         // Reuse one scripts hash across both overlays and the link, as the real blocks do.

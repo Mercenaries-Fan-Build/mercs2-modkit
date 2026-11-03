@@ -287,7 +287,7 @@ pub async fn assemble(options: BuildOptions, qm: Option<&Path>) -> Result<BuildR
         groups.extend(built.groups);
         warnings.extend(built.warnings);
         placed_files = built.files;
-        merged = merge_patches(&built.language_patches, &built.shell_patch)?;
+        merged = merge_patches(&built.language_patches, &built.shell_patch, &built.level_patches)?;
         stream_copies = built.stream_copies;
         data_files = built.data_files;
         incompatibilities = Some(IncompatibilityCheck { list: list.state, notices: built.notices });
@@ -405,13 +405,25 @@ fn merge_target(groups: &[ClaimGroup], target: &str) -> Result<Option<(Vec<u8>, 
     Ok(Some((bytes, shipments.join(", "))))
 }
 
-/// Merge every language's patch groups into `data/<language>-patch.wad` and the shell patch groups
-/// into `data/shell-patch.wad`.
+/// Merge every language's patch groups into `data/<language>-patch.wad`, the shell patch groups into
+/// `data/shell-patch.wad`, and every level's into `data/<level>-patch.wad`.
 fn merge_patches(
     language_patches: &std::collections::BTreeMap<String, Vec<ClaimGroup>>,
     shell_patch: &[ClaimGroup],
+    level_patches: &std::collections::BTreeMap<String, Vec<ClaimGroup>>,
 ) -> Result<Vec<MergedWad>, String> {
     let mut merged = Vec::new();
+    for (level, groups) in level_patches {
+        let relative = format!("data/{level}-patch.wad");
+        if let Some((bytes, shipments)) = merge_target(groups, &relative)? {
+            merged.push(MergedWad {
+                relative,
+                language: None,
+                shipments,
+                bytes,
+            });
+        }
+    }
     for (language, groups) in language_patches {
         let relative = format!("data/{language}-patch.wad");
         if let Some((bytes, shipments)) = merge_target(groups, &relative)? {
@@ -704,6 +716,24 @@ mod tests {
         }
     }
 
+    /// A level's groups become `data/<level>-patch.wad`, an overlay's asset beside link's.
+    #[test]
+    fn a_level_patch_merges_into_its_own_wad() {
+        let mut levels = std::collections::BTreeMap::new();
+        levels.insert(
+            "dlc01".to_string(),
+            vec![
+                group("shipment:a", "A", vec![block(r"blocks\a\m.block", 0xA1, "a model")]),
+                group("qm-link:dlc01-patch.wad", "Quartermaster link", vec![block(r"blocks\dlc01\b.block", 0xB1, "level")]),
+            ],
+        );
+        let merged = merge_patches(&Default::default(), &[], &levels).unwrap();
+        let wad = merged.iter().find(|m| m.relative == "data/dlc01-patch.wad").expect("the level's WAD");
+        assert!(wad.language.is_none());
+        let read = read_patch_wad(&wad.bytes).unwrap();
+        assert_eq!(read.blocks.len(), 2);
+    }
+
     /// Two Shipments' `english` language patches and link's, merged into one
     /// `data/english-patch.wad`: the assets link patches are link's (last wins), the other
     /// Shipment's asset survives, and the shell groups become `data/shell-patch.wad`. Both read back
@@ -743,7 +773,7 @@ mod tests {
         ];
 
         // A's group is fully overridden by link's (both of its assets), so it resolves cleanly.
-        let merged = merge_patches(&languages, &shell).unwrap();
+        let merged = merge_patches(&languages, &shell, &Default::default()).unwrap();
         assert_eq!(
             merged.iter().map(|m| m.relative.as_str()).collect::<Vec<_>>(),
             vec!["data/english-patch.wad", "data/shell-patch.wad"]
@@ -793,7 +823,7 @@ mod tests {
                 group("shipment:b", "B", vec![block(r"blocks\b\x.block", 0x1, "x2")]),
             ],
         );
-        let err = merge_patches(&languages, &[]).unwrap_err();
+        let err = merge_patches(&languages, &[], &Default::default()).unwrap_err();
         assert!(err.contains("data/french-patch.wad cannot be merged"), "got: {err}");
     }
 
