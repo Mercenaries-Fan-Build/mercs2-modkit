@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use mercs2_formats::crc32::crc32_mercs2;
 use mercs2_formats::ffcs::{load_ffcs_archive, FfcsArchive};
 use mercs2_formats::hash::pandemic_hash_m2;
-use mercs2_formats::texture::{extract_model, parse_mtrl};
+use mercs2_formats::texture::{extract_model, parse_mtrl, MtrlSource};
 use mercs2_formats::types::TYPE_ID_MODEL;
 use mercs2_mesh::build_indexed_all;
 use serde::{Deserialize, Serialize};
@@ -108,8 +108,9 @@ fn cache_path() -> Result<PathBuf, String> {
     Ok(app_data_dir()?.join("texture-usage.json"))
 }
 
-/// Build the index by scanning every model's MTRL slots.
-fn build(f: &mut std::fs::File, archive: &FfcsArchive) -> UsageIndex {
+/// Build the index by scanning every model's MTRL slots. A model whose MTRL does not parse is an
+/// error naming it, not a model with no textures.
+fn build(f: &mut std::fs::File, archive: &FfcsArchive) -> Result<UsageIndex, String> {
     // Every distinct model hash, primary AND sub-entry (see module note).
     let models: Vec<u32> = {
         let mut seen = HashSet::new();
@@ -132,7 +133,9 @@ fn build(f: &mut std::fs::File, archive: &FfcsArchive) -> UsageIndex {
 
         // Declared: every texture any material mentions.
         let mut seen = HashSet::new();
-        for mat in parse_mtrl(&container) {
+        let materials = parse_mtrl(&container, MtrlSource::Model)
+            .map_err(|e| format!("model 0x{m:08X}: MTRL: {e}"))?;
+        for mat in materials {
             for tex in mat.textures {
                 if tex != 0 && seen.insert(tex) {
                     declared.entry(tex.to_string()).or_default().push(m);
@@ -158,11 +161,11 @@ fn build(f: &mut std::fs::File, archive: &FfcsArchive) -> UsageIndex {
         }
     }
 
-    UsageIndex {
+    Ok(UsageIndex {
         fingerprint: aset_fingerprint(archive),
         painted,
         declared,
-    }
+    })
 }
 
 /// Load the cached index, or build and cache it.
@@ -183,7 +186,7 @@ pub fn load_or_build(wad: &Path) -> Result<UsageIndex, String> {
         }
     }
 
-    let idx = build(&mut f, &archive);
+    let idx = build(&mut f, &archive)?;
     if let Ok(p) = cache_path() {
         if let Ok(json) = serde_json::to_vec(&idx) {
             let _ = std::fs::write(p, json); // a cache miss is not worth failing the request

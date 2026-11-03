@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::orchestrator::parse_state_machine;
-use mercs2_formats::texture::{extract_model, parse_mtrl};
+use mercs2_formats::texture::{extract_model, parse_mtrl, MtrlSource};
 use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_TEXTURE};
 use mercs2_mesh::{build_indexed_all, build_indexed_state, state_tiers, DrawGroup};
 
@@ -57,7 +57,9 @@ fn main() {
 
         // Every texture the model's MTRLs declare — i.e. exactly what `used_by` is built from.
         let mut declared: HashSet<u32> = HashSet::new();
-        for mat in parse_mtrl(&c) {
+        let mats = parse_mtrl(&c, MtrlSource::Model)
+            .unwrap_or_else(|e| panic!("model 0x{m:08X}: MTRL: {e}"));
+        for mat in mats {
             for t in mat.textures {
                 if t != 0 && textures.contains(&t) {
                     declared.insert(t);

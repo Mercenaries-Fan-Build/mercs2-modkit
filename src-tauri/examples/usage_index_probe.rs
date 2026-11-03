@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;
-use mercs2_formats::texture::{extract_model, parse_mtrl};
+use mercs2_formats::texture::{extract_model, parse_mtrl, MtrlSource};
 use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_TEXTURE};
 
 const NAMES: &str = include_str!("../data/asset_names.txt");
@@ -62,7 +62,8 @@ fn main() {
             failed += 1;
             continue;
         };
-        let mats = parse_mtrl(&container);
+        let mats = parse_mtrl(&container, MtrlSource::Model)
+            .unwrap_or_else(|e| panic!("model 0x{m:08X}: MTRL: {e}"));
         if mats.is_empty() {
             no_mtrl += 1;
             continue;
