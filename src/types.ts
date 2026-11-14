@@ -170,14 +170,15 @@ export interface StreamCopy {
   shipment: string;
 }
 
-/** A game data file Modkit deploys: a closed set, the shader stores. */
-export type DataFileRel = "data/shader3.bin" | "data/shader3Low.bin";
+/** A game data file Modkit deploys: a closed set, the shader stores (qm's `DataFile`,
+ *  `mercs2_formats::load_plan`). */
+export type DataFile = "data/shader3.bin" | "data/shader3Low.bin";
 
 /** A replacement store for a game data file: link's, staged for the deploy step, which places it
  *  over the banked original and records it in `deployed/data-files.json`. */
 export interface StagedDataFile {
   source: string;
-  relative: DataFileRel;
+  relative: DataFile;
   bytes: number;
   sha256: string;
   /** sha256 of the original store qm built it from. Deploy requires it to be the banked original. */
@@ -638,9 +639,9 @@ export interface DeployWadResult {
 /** What a deploy or an uninstall did to the game data files. */
 export interface DataFileOutcome {
   /** Stores placed into the game folder. */
-  deployed: DataFileRel[];
+  deployed: DataFile[];
   /** Stores put back from the bank. */
-  restored: DataFileRel[];
+  restored: DataFile[];
 }
 
 /**
