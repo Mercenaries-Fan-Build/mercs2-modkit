@@ -35,6 +35,7 @@ describe("Shipment removal", () => {
       missing_too: [],
       cascade: [],
       orphans: [ess, bridge],
+      dependents_unknown: null,
     };
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "plan_shipment_removal") return plan;
@@ -106,6 +107,7 @@ describe("Shipments whose folders are missing", () => {
       missing_too: [sdk],
       cascade: [{ shipment: ui, pulled_by: { kind: "shipment", target: "m2-sdk", range: null } }],
       orphans: [],
+      dependents_unknown: null,
     };
     let removedRows: string[] = [];
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
