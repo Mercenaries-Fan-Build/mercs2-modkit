@@ -585,7 +585,7 @@ pub struct IncompatibilityCheck {
 pub(crate) mod tests {
     use super::*;
     use crate::commands::load_plan::tests::{chain_request, CHAIN_PLAN};
-    use crate::commands::load_plan::Producer;
+    use crate::commands::load_plan::{parse_plan, Producer};
     use crate::commands::shipment::InstallReason;
     use crate::models::origin::Origin;
 
@@ -782,7 +782,7 @@ pub(crate) mod tests {
     /// finds the report, and it says so.
     #[test]
     fn the_before_check_uses_recorded_versions_and_the_after_check_uses_the_plan() {
-        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        let plan = parse_plan(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
         let rows = vec![
             registry("ess", "ess-1", "0.6.0"),
             registry("lua-bridge", "lua-bridge-2", "1.0.0"),
@@ -809,7 +809,7 @@ pub(crate) mod tests {
     fn a_non_semver_plan_version_is_an_error() {
         let text = CHAIN_PLAN.replace(r#""version": "0.7.0""#, r#""version": "seven""#);
         assert_ne!(text, CHAIN_PLAN);
-        let plan = LoadPlan::parse(&text, &chain_request(), Producer::Preflight).unwrap();
+        let plan = parse_plan(&text, &chain_request(), Producer::Preflight).unwrap();
         let rows = vec![
             registry("ess", "ess-1", "0.7.0"),
             registry("lua-bridge", "lua-bridge-2", "1.0.0"),
@@ -827,7 +827,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_plan_answering_other_rows_is_an_error() {
-        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        let plan = parse_plan(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
         let rows = vec![registry("ess", "ess-1", "0.7.0")];
         assert!(manifest_versions(&plan, &rows).is_err());
     }
