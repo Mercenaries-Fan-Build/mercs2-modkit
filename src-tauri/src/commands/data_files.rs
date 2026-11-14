@@ -1,6 +1,9 @@
 //! Game data files a Shipment edits in place: the shader stores `data/shader3.bin` and
 //! `data/shader3Low.bin`.
 //!
+//! The closed set is qm's own [`DataFile`] (`mercs2_formats::load_plan`): the plan, `placement.json`
+//! and the ledger below all spell a store by its `relative` path, and any other path fails to parse.
+//!
 //! # What qm emits
 //!
 //! A shader kind lowers to a `data_file` placement: a whole replacement store, built from the
@@ -40,6 +43,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use super::load_plan::DataFile;
 use super::load_plan::nullable;
 use super::managed::place::sha256_of_file;
 use super::managed::trash;
@@ -55,66 +59,6 @@ const BANK_DIR: &str = "data-file-bank";
 /// The ledger's own format number.
 const LEDGER_FORMAT: u32 = 1;
 
-/// A game data file Modkit deploys. A closed set: any other path is a parse error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub enum DataFileRel {
-    /// `data/shader3.bin`.
-    Shader3,
-    /// `data/shader3Low.bin`.
-    Shader3Low,
-}
-
-impl DataFileRel {
-    /// Every member of the set.
-    pub const ALL: [DataFileRel; 2] = [DataFileRel::Shader3, DataFileRel::Shader3Low];
-
-    /// The path under the game folder, forward-slashed, exactly as qm writes it.
-    pub fn relative(self) -> &'static str {
-        match self {
-            DataFileRel::Shader3 => "data/shader3.bin",
-            DataFileRel::Shader3Low => "data/shader3Low.bin",
-        }
-    }
-
-    /// The file name qm reads from `--original-data`.
-    pub fn file_name(self) -> &'static str {
-        match self {
-            DataFileRel::Shader3 => "shader3.bin",
-            DataFileRel::Shader3Low => "shader3Low.bin",
-        }
-    }
-
-    /// Parse a path from a qm record. Anything outside the set is an error.
-    pub fn parse(s: &str) -> Result<Self, String> {
-        Self::ALL.into_iter().find(|r| r.relative() == s).ok_or_else(|| {
-            format!(
-                "{s:?} is not a data file Modkit deploys; the data files are {}",
-                Self::ALL.map(|r| r.relative()).join(" and ")
-            )
-        })
-    }
-}
-
-impl TryFrom<String> for DataFileRel {
-    type Error = String;
-    fn try_from(s: String) -> Result<Self, String> {
-        Self::parse(&s)
-    }
-}
-
-impl From<DataFileRel> for String {
-    fn from(r: DataFileRel) -> String {
-        r.relative().to_string()
-    }
-}
-
-impl std::fmt::Display for DataFileRel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.relative())
-    }
-}
-
 /// Refuse a sha256 that is not 64 lowercase hex digits. `what` names the field for the message.
 pub fn check_sha256(value: &str, what: &str) -> Result<(), String> {
     if value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
@@ -128,7 +72,7 @@ pub fn check_sha256(value: &str, what: &str) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataFileRow {
-    pub relative: DataFileRel,
+    pub relative: DataFile,
     /// sha256 of the store that was in the game folder before Modkit replaced it.
     pub original_sha256: String,
     /// Absolute path of the banked copy of that store.
@@ -192,12 +136,12 @@ impl DataFileStore {
                 return Err(format!(
                     "The data-file ledger at {} has two rows for {}",
                     self.ledger.display(),
-                    row.relative
+                    row.relative.relative()
                 ));
             }
-            check_sha256(&row.original_sha256, &format!("{}'s original_sha256", row.relative))?;
+            check_sha256(&row.original_sha256, &format!("{}'s original_sha256", row.relative.relative()))?;
             if let Some(d) = &row.deployed_sha256 {
-                check_sha256(d, &format!("{}'s deployed_sha256", row.relative))?;
+                check_sha256(d, &format!("{}'s deployed_sha256", row.relative.relative()))?;
             }
         }
         Ok(file.rows)
@@ -214,7 +158,7 @@ impl DataFileStore {
 }
 
 /// `relative` under `game_root`, one path component per `/`-separated part.
-fn game_path(game_root: &Path, rel: DataFileRel) -> PathBuf {
+fn game_path(game_root: &Path, rel: DataFile) -> PathBuf {
     let mut path = game_root.to_path_buf();
     for part in rel.relative().split('/') {
         path.push(part);
@@ -229,7 +173,7 @@ fn game_path(game_root: &Path, rel: DataFileRel) -> PathBuf {
 pub fn bank_originals(
     store: &DataFileStore,
     game_root: &Path,
-    wanted: &BTreeSet<DataFileRel>,
+    wanted: &BTreeSet<DataFile>,
 ) -> Result<Vec<DataFileRow>, String> {
     let mut rows = store.read()?;
     for &rel in wanted {
@@ -240,7 +184,8 @@ pub fn bank_originals(
         if !path.is_file() {
             return Err(format!(
                 "A Shipment in this set edits {rel}, and there is no {} to bank as the original.",
-                path.display()
+                path.display(),
+                rel = rel.relative()
             ));
         }
         let original_sha256 = sha256_of_file(&path)?;
@@ -256,7 +201,8 @@ pub fn bank_originals(
             return Err(format!(
                 "The banked copy of {rel} at {} has sha256 {banked_sha256}; the game's store has \
                  {original_sha256}.",
-                banked.display()
+                banked.display(),
+                rel = rel.relative()
             ));
         }
         rows.push(DataFileRow {
@@ -275,23 +221,25 @@ pub fn bank_originals(
 /// `original_sha256`.
 pub fn stage_original_data(
     store: &DataFileStore,
-    wanted: &BTreeSet<DataFileRel>,
+    wanted: &BTreeSet<DataFile>,
     dir: &Path,
 ) -> Result<PathBuf, String> {
     let rows = store.read()?;
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     for &rel in wanted {
         let row = rows.iter().find(|r| r.relative == rel).ok_or_else(|| {
-            format!("{rel} has no row in the data-file ledger, so its original is not banked.")
+            format!("{} has no row in the data-file ledger, so its original is not banked.", rel.relative())
         })?;
         let dest = dir.join(rel.file_name());
         std::fs::copy(&row.bank_path, &dest)
-            .map_err(|e| format!("copying the banked {rel} from {}: {e}", row.bank_path))?;
+            .map_err(|e| format!("copying the banked {} from {}: {e}", rel.relative(), row.bank_path))?;
         let got = sha256_of_file(&dest)?;
         if got != row.original_sha256 {
             return Err(format!(
                 "The banked original of {rel} at {} has sha256 {got}; the ledger records {}.",
-                row.bank_path, row.original_sha256
+                row.bank_path,
+                row.original_sha256,
+                rel = rel.relative()
             ));
         }
     }
@@ -300,7 +248,7 @@ pub fn stage_original_data(
 
 /// Copy `source` to a temporary sibling of `dest`, check it hashes to `want`, rename it over
 /// `dest`, and check `dest` hashes to `want`.
-fn place_atomically(source: &Path, dest: &Path, want: &str, rel: DataFileRel) -> Result<(), String> {
+fn place_atomically(source: &Path, dest: &Path, want: &str, rel: DataFile) -> Result<(), String> {
     let temp = dest.with_file_name(format!("{}.modkit-incoming", rel.file_name()));
     std::fs::copy(source, &temp)
         .map_err(|e| format!("writing {}: {e} — is the game still running?", temp.display()))?;
@@ -309,7 +257,8 @@ fn place_atomically(source: &Path, dest: &Path, want: &str, rel: DataFileRel) ->
         let _ = std::fs::remove_file(&temp);
         return Err(format!(
             "The copy of {rel} written to {} has sha256 {staged}; it must be {want}.",
-            temp.display()
+            temp.display(),
+            rel = rel.relative()
         ));
     }
     std::fs::rename(&temp, dest)
@@ -325,9 +274,9 @@ fn place_atomically(source: &Path, dest: &Path, want: &str, rel: DataFileRel) ->
 }
 
 /// The sha256 of the store at `path`, which must exist.
-fn on_disk_sha256(path: &Path, rel: DataFileRel) -> Result<String, String> {
+fn on_disk_sha256(path: &Path, rel: DataFile) -> Result<String, String> {
     if !path.is_file() {
-        return Err(format!("{rel} is not in the game folder at {}.", path.display()));
+        return Err(format!("{} is not in the game folder at {}.", rel.relative(), path.display()));
     }
     sha256_of_file(path)
 }
@@ -339,7 +288,7 @@ fn on_disk_sha256(path: &Path, rel: DataFileRel) -> Result<String, String> {
 fn restore_row(
     store: &DataFileStore,
     rows: &mut Vec<DataFileRow>,
-    rel: DataFileRel,
+    rel: DataFile,
     game_root: &Path,
     outcome: &mut DataFileOutcome,
 ) -> Result<(), String> {
@@ -347,7 +296,7 @@ fn restore_row(
         .iter()
         .find(|r| r.relative == rel)
         .cloned()
-        .ok_or_else(|| format!("{rel} has no row in the data-file ledger."))?;
+        .ok_or_else(|| format!("{} has no row in the data-file ledger.", rel.relative()))?;
     let path = game_path(game_root, rel);
     let found = on_disk_sha256(&path, rel)?;
     match &row.deployed_sha256 {
@@ -357,7 +306,8 @@ fn restore_row(
                     "{rel} in the game folder has sha256 {found}, and Modkit deployed {deployed}. \
                      Something else changed it, so Modkit leaves it and its banked original \
                      ({}) where they are.",
-                    row.bank_path
+                    row.bank_path,
+                    rel = rel.relative()
                 ));
             }
             place_atomically(Path::new(&row.bank_path), &path, &row.original_sha256, rel)?;
@@ -368,7 +318,9 @@ fn restore_row(
                 return Err(format!(
                     "{rel} in the game folder has sha256 {found}; Modkit deployed none, and the \
                      banked original ({}) has {}.",
-                    row.bank_path, row.original_sha256
+                    row.bank_path,
+                    row.original_sha256,
+                    rel = rel.relative()
                 ));
             }
         }
@@ -390,17 +342,22 @@ pub fn install_data_files(
     let mut seen = BTreeSet::new();
     for file in staged {
         if !seen.insert(file.relative) {
-            return Err(format!("The staged build deploys {} twice.", file.relative));
+            return Err(format!("The staged build deploys {} twice.", file.relative.relative()));
         }
         let rel = file.relative;
         let row = rows.iter().find(|r| r.relative == rel).ok_or_else(|| {
-            format!("{rel} has no row in the data-file ledger, so there is no banked original to deploy over.")
+            format!(
+                "{} has no row in the data-file ledger, so there is no banked original to deploy over.",
+                rel.relative()
+            )
         })?;
         if file.base_sha256 != row.original_sha256 {
             return Err(format!(
                 "{rel} was built from an original with sha256 {}; the banked original has {}. \
                  Rebuild against this game install.",
-                file.base_sha256, row.original_sha256
+                file.base_sha256,
+                row.original_sha256,
+                rel = rel.relative()
             ));
         }
         let found = on_disk_sha256(&game_path(game_root, rel), rel)?;
@@ -410,13 +367,14 @@ pub fn install_data_files(
                 "{rel} in the game folder has sha256 {found}. It is neither the banked original ({}) \
                  nor the store Modkit deployed ({}), so Modkit does not replace it.",
                 row.original_sha256,
-                row.deployed_sha256.as_deref().unwrap_or("none")
+                row.deployed_sha256.as_deref().unwrap_or("none"),
+                rel = rel.relative()
             ));
         }
     }
 
     let mut outcome = DataFileOutcome::default();
-    let leaving: Vec<DataFileRel> = rows
+    let leaving: Vec<DataFile> = rows
         .iter()
         .map(|r| r.relative)
         .filter(|rel| !seen.contains(rel))
@@ -431,7 +389,7 @@ pub fn install_data_files(
         let row = rows
             .iter_mut()
             .find(|r| r.relative == rel)
-            .ok_or_else(|| format!("{rel} has no row in the data-file ledger."))?;
+            .ok_or_else(|| format!("{} has no row in the data-file ledger.", rel.relative()))?;
         row.deployed_sha256 = Some(file.sha256.clone());
         store.write(&rows)?;
         outcome.deployed.push(rel.relative().to_string());
@@ -443,7 +401,7 @@ pub fn install_data_files(
 pub fn uninstall_data_files(store: &DataFileStore, game_root: &Path) -> Result<DataFileOutcome, String> {
     let mut rows = store.read()?;
     let mut outcome = DataFileOutcome::default();
-    let all: Vec<DataFileRel> = rows.iter().map(|r| r.relative).collect();
+    let all: Vec<DataFile> = rows.iter().map(|r| r.relative).collect();
     for rel in all {
         restore_row(store, &mut rows, rel, game_root, &mut outcome)?;
     }
@@ -481,12 +439,12 @@ mod tests {
         Fixture { store, game, build, _tmp: tmp }
     }
 
-    fn only(rel: DataFileRel) -> BTreeSet<DataFileRel> {
+    fn only(rel: DataFile) -> BTreeSet<DataFile> {
         [rel].into_iter().collect()
     }
 
     /// A staged store built from `base`.
-    fn staged(f: &Fixture, rel: DataFileRel, body: &[u8], base: &str) -> StagedDataFile {
+    fn staged(f: &Fixture, rel: DataFile, body: &[u8], base: &str) -> StagedDataFile {
         let source = f.build.join(format!("{}-{}", sha(body), rel.file_name()));
         std::fs::write(&source, body).unwrap();
         StagedDataFile {
@@ -499,21 +457,22 @@ mod tests {
         }
     }
 
-    fn on_disk(f: &Fixture, rel: DataFileRel) -> Vec<u8> {
+    fn on_disk(f: &Fixture, rel: DataFile) -> Vec<u8> {
         std::fs::read(game_path(&f.game, rel)).unwrap()
     }
 
     #[test]
     fn the_set_is_closed() {
-        assert_eq!(DataFileRel::parse("data/shader3.bin").unwrap(), DataFileRel::Shader3);
-        assert_eq!(DataFileRel::parse("data/shader3Low.bin").unwrap(), DataFileRel::Shader3Low);
+        assert_eq!(DataFile::parse("data/shader3.bin").unwrap(), DataFile::Shader3);
+        assert_eq!(DataFile::parse("data/shader3Low.bin").unwrap(), DataFile::Shader3Low);
         for bad in ["data/shader3low.bin", "data/Shader3.bin", "shader3.bin", "data/vz.wad", "../data/shader3.bin", ""] {
-            let err = DataFileRel::parse(bad).unwrap_err();
-            assert!(err.contains("is not a data file Modkit deploys"), "{bad:?}: {err}");
+            assert_eq!(DataFile::parse(bad), None, "{bad:?}");
+            let err = serde_json::from_str::<DataFile>(&serde_json::to_string(bad).unwrap()).unwrap_err();
+            assert!(err.to_string().contains("unknown variant"), "{bad:?}: {err}");
         }
-        let json = serde_json::to_string(&DataFileRel::Shader3Low).unwrap();
+        let json = serde_json::to_string(&DataFile::Shader3Low).unwrap();
         assert_eq!(json, "\"data/shader3Low.bin\"");
-        assert!(serde_json::from_str::<DataFileRel>("\"data/shader4.bin\"").is_err());
+        assert!(serde_json::from_str::<DataFile>("\"data/shader4.bin\"").is_err());
     }
 
     /// Banking copies the store in the game folder into the bank, leaves the game's store in
@@ -521,14 +480,14 @@ mod tests {
     #[test]
     fn banking_records_the_original_and_leaves_it_in_the_game() {
         let f = fixture();
-        let rows = bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
+        let rows = bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
-        assert_eq!(row.relative, DataFileRel::Shader3);
+        assert_eq!(row.relative, DataFile::Shader3);
         assert_eq!(row.original_sha256, sha(b"retail shader3"));
         assert_eq!(row.deployed_sha256, None);
         assert_eq!(std::fs::read(&row.bank_path).unwrap(), b"retail shader3");
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"retail shader3", "the game keeps its store");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"retail shader3", "the game keeps its store");
         assert_eq!(f.store.read().unwrap(), rows);
 
         let text = std::fs::read_to_string(&f.store.ledger).unwrap();
@@ -542,9 +501,9 @@ mod tests {
     #[test]
     fn banking_twice_keeps_the_first_original() {
         let f = fixture();
-        bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
-        std::fs::write(game_path(&f.game, DataFileRel::Shader3), b"something else").unwrap();
-        let rows = bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
+        bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
+        std::fs::write(game_path(&f.game, DataFile::Shader3), b"something else").unwrap();
+        let rows = bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].original_sha256, sha(b"retail shader3"));
     }
@@ -552,8 +511,8 @@ mod tests {
     #[test]
     fn banking_a_store_the_game_lacks_is_refused() {
         let f = fixture();
-        std::fs::remove_file(game_path(&f.game, DataFileRel::Shader3Low)).unwrap();
-        let err = bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3Low)).unwrap_err();
+        std::fs::remove_file(game_path(&f.game, DataFile::Shader3Low)).unwrap();
+        let err = bank_originals(&f.store, &f.game, &only(DataFile::Shader3Low)).unwrap_err();
         assert!(err.contains("there is no") && err.contains("shader3Low.bin"), "{err}");
         assert!(f.store.read().unwrap().is_empty());
     }
@@ -562,9 +521,9 @@ mod tests {
     #[test]
     fn the_original_data_dir_holds_the_banked_stores_by_name() {
         let f = fixture();
-        let both: BTreeSet<_> = DataFileRel::ALL.into_iter().collect();
+        let both: BTreeSet<_> = DataFile::ALL.into_iter().collect();
         bank_originals(&f.store, &f.game, &both).unwrap();
-        std::fs::write(game_path(&f.game, DataFileRel::Shader3), b"deployed by modkit").unwrap();
+        std::fs::write(game_path(&f.game, DataFile::Shader3), b"deployed by modkit").unwrap();
 
         let dir = f.build.join("original-data");
         let got = stage_original_data(&f.store, &both, &dir).unwrap();
@@ -576,7 +535,7 @@ mod tests {
     #[test]
     fn staging_original_data_without_a_row_is_refused() {
         let f = fixture();
-        let err = stage_original_data(&f.store, &only(DataFileRel::Shader3), &f.build.join("o")).unwrap_err();
+        let err = stage_original_data(&f.store, &only(DataFile::Shader3), &f.build.join("o")).unwrap_err();
         assert!(err.contains("not banked"), "{err}");
     }
 
@@ -586,7 +545,7 @@ mod tests {
         std::fs::create_dir_all(f.store.ledger.parent().unwrap()).unwrap();
         std::fs::write(&f.store.ledger, b"{ not json").unwrap();
         assert!(f.store.read().unwrap_err().contains("unreadable"));
-        assert!(bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).is_err());
+        assert!(bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).is_err());
 
         let row = r#"{"relative":"data/shader3.bin","original_sha256":"00","bank_path":"/b"}"#;
         std::fs::write(&f.store.ledger, format!(r#"{{"format":1,"rows":[{row}]}}"#)).unwrap();
@@ -597,7 +556,8 @@ mod tests {
             "a".repeat(64)
         );
         std::fs::write(&f.store.ledger, format!(r#"{{"format":1,"rows":[{row}]}}"#)).unwrap();
-        assert!(f.store.read().unwrap_err().contains("is not a data file"));
+        let err = f.store.read().unwrap_err();
+        assert!(err.contains("unknown variant `data/shader9.bin`"), "{err}");
 
         std::fs::write(&f.store.ledger, r#"{"format":2,"rows":[]}"#).unwrap();
         assert!(f.store.read().unwrap_err().contains("format 2"));
@@ -608,19 +568,19 @@ mod tests {
     #[test]
     fn deploy_and_redeploy() {
         let f = fixture();
-        let rows = bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
+        let rows = bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
         let base = rows[0].original_sha256.clone();
 
-        let first = staged(&f, DataFileRel::Shader3, b"linked v1", &base);
+        let first = staged(&f, DataFile::Shader3, b"linked v1", &base);
         let out = install_data_files(&f.store, std::slice::from_ref(&first), &f.game).unwrap();
         assert_eq!(out.deployed, vec!["data/shader3.bin".to_string()]);
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"linked v1");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"linked v1");
         assert_eq!(f.store.read().unwrap()[0].deployed_sha256, Some(sha(b"linked v1")));
         assert!(!f.game.join("data/shader3.bin.modkit-incoming").exists());
 
-        let second = staged(&f, DataFileRel::Shader3, b"linked v2", &base);
+        let second = staged(&f, DataFile::Shader3, b"linked v2", &base);
         install_data_files(&f.store, &[second], &f.game).unwrap();
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"linked v2");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"linked v2");
         let row = &f.store.read().unwrap()[0];
         assert_eq!(row.deployed_sha256, Some(sha(b"linked v2")));
         assert_eq!(row.original_sha256, base, "the original is still the retail store");
@@ -630,11 +590,11 @@ mod tests {
     #[test]
     fn a_base_mismatch_is_refused() {
         let f = fixture();
-        bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
-        let file = staged(&f, DataFileRel::Shader3, b"linked", &sha(b"another install's store"));
+        bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
+        let file = staged(&f, DataFile::Shader3, b"linked", &sha(b"another install's store"));
         let err = install_data_files(&f.store, &[file], &f.game).unwrap_err();
         assert!(err.contains("Rebuild against this game install"), "{err}");
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"retail shader3");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"retail shader3");
         assert_eq!(f.store.read().unwrap()[0].deployed_sha256, None);
     }
 
@@ -642,15 +602,15 @@ mod tests {
     #[test]
     fn a_hand_modified_store_fails_deploy() {
         let f = fixture();
-        let rows = bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
+        let rows = bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
         let base = rows[0].original_sha256.clone();
-        install_data_files(&f.store, &[staged(&f, DataFileRel::Shader3, b"linked v1", &base)], &f.game).unwrap();
-        std::fs::write(game_path(&f.game, DataFileRel::Shader3), b"hand edited").unwrap();
+        install_data_files(&f.store, &[staged(&f, DataFile::Shader3, b"linked v1", &base)], &f.game).unwrap();
+        std::fs::write(game_path(&f.game, DataFile::Shader3), b"hand edited").unwrap();
 
-        let err = install_data_files(&f.store, &[staged(&f, DataFileRel::Shader3, b"linked v2", &base)], &f.game)
+        let err = install_data_files(&f.store, &[staged(&f, DataFile::Shader3, b"linked v2", &base)], &f.game)
             .unwrap_err();
         assert!(err.contains("neither the banked original"), "{err}");
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"hand edited");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"hand edited");
         assert_eq!(f.store.read().unwrap()[0].deployed_sha256, Some(sha(b"linked v1")));
     }
 
@@ -658,7 +618,7 @@ mod tests {
     #[test]
     fn a_store_without_a_row_is_refused() {
         let f = fixture();
-        let file = staged(&f, DataFileRel::Shader3, b"linked", &sha(b"retail shader3"));
+        let file = staged(&f, DataFile::Shader3, b"linked", &sha(b"retail shader3"));
         let err = install_data_files(&f.store, &[file], &f.game).unwrap_err();
         assert!(err.contains("no banked original"), "{err}");
     }
@@ -667,18 +627,18 @@ mod tests {
     #[test]
     fn uninstall_restores_the_original_byte_for_byte() {
         let f = fixture();
-        let both: BTreeSet<_> = DataFileRel::ALL.into_iter().collect();
+        let both: BTreeSet<_> = DataFile::ALL.into_iter().collect();
         let rows = bank_originals(&f.store, &f.game, &both).unwrap();
         let files: Vec<_> = rows
             .iter()
-            .map(|r| staged(&f, r.relative, format!("linked {}", r.relative).as_bytes(), &r.original_sha256))
+            .map(|r| staged(&f, r.relative, format!("linked {}", r.relative.relative()).as_bytes(), &r.original_sha256))
             .collect();
         install_data_files(&f.store, &files, &f.game).unwrap();
 
         let out = uninstall_data_files(&f.store, &f.game).unwrap();
         assert_eq!(out.restored, vec!["data/shader3.bin".to_string(), "data/shader3Low.bin".to_string()]);
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"retail shader3");
-        assert_eq!(on_disk(&f, DataFileRel::Shader3Low), b"retail shader3Low");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"retail shader3");
+        assert_eq!(on_disk(&f, DataFile::Shader3Low), b"retail shader3Low");
         assert!(f.store.read().unwrap().is_empty());
         for row in rows {
             assert!(Path::new(&row.bank_path).is_file(), "the bank copy is kept");
@@ -690,14 +650,14 @@ mod tests {
     #[test]
     fn a_hand_modified_store_fails_uninstall() {
         let f = fixture();
-        let rows = bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
-        install_data_files(&f.store, &[staged(&f, DataFileRel::Shader3, b"linked", &rows[0].original_sha256)], &f.game)
+        let rows = bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
+        install_data_files(&f.store, &[staged(&f, DataFile::Shader3, b"linked", &rows[0].original_sha256)], &f.game)
             .unwrap();
-        std::fs::write(game_path(&f.game, DataFileRel::Shader3), b"hand edited").unwrap();
+        std::fs::write(game_path(&f.game, DataFile::Shader3), b"hand edited").unwrap();
 
         let err = uninstall_data_files(&f.store, &f.game).unwrap_err();
         assert!(err.contains("Something else changed it"), "{err}");
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"hand edited");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"hand edited");
         assert_eq!(f.store.read().unwrap().len(), 1);
     }
 
@@ -705,7 +665,7 @@ mod tests {
     #[test]
     fn a_set_without_a_store_restores_it() {
         let f = fixture();
-        let both: BTreeSet<_> = DataFileRel::ALL.into_iter().collect();
+        let both: BTreeSet<_> = DataFile::ALL.into_iter().collect();
         let rows = bank_originals(&f.store, &f.game, &both).unwrap();
         let files: Vec<_> = rows
             .iter()
@@ -716,14 +676,14 @@ mod tests {
         let out = install_data_files(&f.store, &files[..1], &f.game).unwrap();
         assert_eq!(out.restored, vec!["data/shader3Low.bin".to_string()]);
         assert_eq!(out.deployed, vec!["data/shader3.bin".to_string()]);
-        assert_eq!(on_disk(&f, DataFileRel::Shader3Low), b"retail shader3Low");
+        assert_eq!(on_disk(&f, DataFile::Shader3Low), b"retail shader3Low");
         let left = f.store.read().unwrap();
         assert_eq!(left.len(), 1);
-        assert_eq!(left[0].relative, DataFileRel::Shader3);
+        assert_eq!(left[0].relative, DataFile::Shader3);
 
         let out = install_data_files(&f.store, &[], &f.game).unwrap();
         assert_eq!(out.restored, vec!["data/shader3.bin".to_string()]);
-        assert_eq!(on_disk(&f, DataFileRel::Shader3), b"retail shader3");
+        assert_eq!(on_disk(&f, DataFile::Shader3), b"retail shader3");
         assert!(f.store.read().unwrap().is_empty());
     }
 
@@ -732,13 +692,13 @@ mod tests {
     #[test]
     fn an_undeployed_row_is_cleared_only_over_the_original() {
         let f = fixture();
-        bank_originals(&f.store, &f.game, &only(DataFileRel::Shader3)).unwrap();
-        std::fs::write(game_path(&f.game, DataFileRel::Shader3), b"other").unwrap();
+        bank_originals(&f.store, &f.game, &only(DataFile::Shader3)).unwrap();
+        std::fs::write(game_path(&f.game, DataFile::Shader3), b"other").unwrap();
         let err = uninstall_data_files(&f.store, &f.game).unwrap_err();
         assert!(err.contains("Modkit deployed none"), "{err}");
         assert_eq!(f.store.read().unwrap().len(), 1);
 
-        std::fs::write(game_path(&f.game, DataFileRel::Shader3), b"retail shader3").unwrap();
+        std::fs::write(game_path(&f.game, DataFile::Shader3), b"retail shader3").unwrap();
         let out = uninstall_data_files(&f.store, &f.game).unwrap();
         assert!(out.restored.is_empty());
         assert!(f.store.read().unwrap().is_empty());

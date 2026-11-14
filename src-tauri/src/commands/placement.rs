@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::data_files::{check_sha256, DataFileRel};
+use super::data_files::{check_sha256, DataFile};
 
 /// The record `qm build` and `qm link` write into their output directory, and the staged-build
 /// record modkit writes beside `vz-patch.wad`.
@@ -72,10 +72,10 @@ pub enum Destination {
     /// and `sha256` describe `<game>/<from>` as qm read it at build time.
     StreamCopy { from: String, to: String },
     /// A whole replacement for the game data file `relative`, a closed set (see
-    /// [`DataFileRel`]). The file is at `<relative>` in the output dir; the entry's `bytes` and
+    /// [`DataFile`]). The file is at `<relative>` in the output dir; the entry's `bytes` and
     /// `sha256` describe it, and `base_sha256` is the original store qm read from
     /// `--original-data`.
-    DataFile { relative: DataFileRel, base_sha256: String },
+    DataFile { relative: DataFile, base_sha256: String },
 }
 
 /// One artifact in the record.
@@ -159,7 +159,7 @@ pub struct StreamCopy {
 pub struct StagedDataFile {
     /// Absolute path to the store in the qm output (or modkit's build staging) directory.
     pub source: String,
-    pub relative: DataFileRel,
+    pub relative: DataFile,
     /// Size of the store.
     pub bytes: u64,
     /// sha256 of the store.
@@ -416,11 +416,12 @@ pub fn read_output(dir: &Path, shipment: &str) -> Result<QmOutput, String> {
                 if out.data_files.iter().any(|f| f.relative == *relative) {
                     return Err(format!(
                         "{shipment} records more than one data file for {relative}; modkit deploys \
-                         one per qm output and cannot tell which to read"
+                         one per qm output and cannot tell which to read",
+                        relative = relative.relative()
                     ));
                 }
-                check_sha256(base_sha256, &format!("{shipment}'s base_sha256 for {relative}"))?;
-                check_sha256(&entry.sha256, &format!("{shipment}'s sha256 for {relative}"))?;
+                check_sha256(base_sha256, &format!("{shipment}'s base_sha256 for {}", relative.relative()))?;
+                check_sha256(&entry.sha256, &format!("{shipment}'s sha256 for {}", relative.relative()))?;
                 out.data_files.push(StagedDataFile {
                     source: artifact(dir, relative.relative(), shipment)?.to_string_lossy().to_string(),
                     relative: *relative,
@@ -519,8 +520,11 @@ pub fn read_staged(build_dir: &Path) -> Result<StagedBuild, String> {
         }
     }
     for file in &record.build.data_files {
-        check_sha256(&file.sha256, &format!("{}'s sha256 for {}", path.display(), file.relative))?;
-        check_sha256(&file.base_sha256, &format!("{}'s base_sha256 for {}", path.display(), file.relative))?;
+        check_sha256(&file.sha256, &format!("{}'s sha256 for {}", path.display(), file.relative.relative()))?;
+        check_sha256(
+            &file.base_sha256,
+            &format!("{}'s base_sha256 for {}", path.display(), file.relative.relative()),
+        )?;
     }
     Ok(record.build)
 }
@@ -822,7 +826,7 @@ mod tests {
             vec![
                 StagedDataFile {
                     source: dir.path().join("data").join("shader3.bin").to_string_lossy().to_string(),
-                    relative: DataFileRel::Shader3,
+                    relative: DataFile::Shader3,
                     bytes: 4,
                     sha256: "a".repeat(64),
                     base_sha256: "b".repeat(64),
@@ -830,7 +834,7 @@ mod tests {
                 },
                 StagedDataFile {
                     source: dir.path().join("data").join("shader3Low.bin").to_string_lossy().to_string(),
-                    relative: DataFileRel::Shader3Low,
+                    relative: DataFile::Shader3Low,
                     bytes: 4,
                     sha256: "c".repeat(64),
                     base_sha256: "d".repeat(64),
@@ -849,7 +853,7 @@ mod tests {
             write_record(dir.path(), &data_file_entry(bad, &"a".repeat(64), &"b".repeat(64)));
             let err = read_output(dir.path(), "s").unwrap_err();
             assert!(
-                err.contains("not a placement record") && err.contains("is not a data file Modkit deploys"),
+                err.contains("not a placement record") && err.contains(&format!("unknown variant `{bad}`")),
                 "{bad}: {err}"
             );
         }
@@ -941,7 +945,7 @@ mod tests {
             }],
             data_files: vec![StagedDataFile {
                 source: "/b/files/data/shader3.bin".into(),
-                relative: DataFileRel::Shader3,
+                relative: DataFile::Shader3,
                 bytes: 5,
                 sha256: "e".repeat(64),
                 base_sha256: "f".repeat(64),

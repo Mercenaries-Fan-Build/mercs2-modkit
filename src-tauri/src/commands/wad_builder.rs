@@ -497,7 +497,7 @@ fn stage_placements(
         claim(&copy.to, format!("“{}”'s copy of {}", copy.shipment, copy.from))?;
     }
     for file in &data_files {
-        claim(file.relative.relative(), format!("“{}”'s {}", file.shipment, file.relative))?;
+        claim(file.relative.relative(), format!("“{}”'s {}", file.shipment, file.relative.relative()))?;
     }
 
     std::fs::create_dir_all(&stage_root)
@@ -541,14 +541,15 @@ fn stage_placements(
         let dest = stage_root.join(file.relative.relative());
         make_parent(&dest)?;
         std::fs::copy(&file.source, &dest)
-            .map_err(|e| format!("Failed to stage {}: {e}", file.relative))?;
+            .map_err(|e| format!("Failed to stage {}: {e}", file.relative.relative()))?;
         let got = loadprobe::sha256::sha256_hex(
             &std::fs::read(&dest).map_err(|e| format!("reading {}: {e}", dest.display()))?,
         );
         if got != file.sha256 {
             return Err(format!(
                 "The staged {} has sha256 {got}; qm recorded {}.",
-                file.relative, file.sha256
+                file.relative.relative(),
+                file.sha256
             ));
         }
         staged_data_files.push(StagedDataFile {
@@ -895,7 +896,7 @@ mod tests {
     /// digest, and claims its destination.
     #[test]
     fn a_data_file_is_staged_and_recorded() {
-        use crate::commands::data_files::DataFileRel;
+        use crate::commands::data_files::DataFile;
         let tmp = tempfile::tempdir().unwrap();
         let build = tmp.path().join("build");
         std::fs::create_dir_all(&build).unwrap();
@@ -903,7 +904,7 @@ mod tests {
         std::fs::write(&src, b"linked store").unwrap();
         let file = StagedDataFile {
             source: src.to_string_lossy().to_string(),
-            relative: DataFileRel::Shader3,
+            relative: DataFile::Shader3,
             bytes: 12,
             sha256: loadprobe::sha256::sha256_hex(b"linked store"),
             base_sha256: "b".repeat(64),

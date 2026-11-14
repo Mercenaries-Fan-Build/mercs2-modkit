@@ -1,0 +1,229 @@
+{
+  "format": 3,
+  "producer": "link",
+  "quartermaster": "6.0.0",
+  "ok": true,
+  "order": [
+    "shipment:m2-sdk",
+    "shipment:lua-bridge",
+    "shipment:ess",
+    "shipment:mercs2-language"
+  ],
+  "items": [
+    {
+      "id": "shipment:ess",
+      "requested": 0,
+      "resolved": 2,
+      "held_back_by": 0,
+      "name": "ess",
+      "version": "0.8.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [],
+      "runtime_dlls": [],
+      "placed_files": [],
+      "data_files": []
+    },
+    {
+      "id": "shipment:lua-bridge",
+      "requested": 1,
+      "resolved": 1,
+      "held_back_by": 1,
+      "name": "lua-bridge",
+      "version": "1.2.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [
+        {
+          "contribution": 0,
+          "file_name": "lua_bridge.asi",
+          "source": "lua_bridge.asi",
+          "relative": "scripts/lua_bridge.asi",
+          "sha256": "37c07129b5f9ba978661908148bfd54f232b40e6b6118d325729a6ee74f45142"
+        }
+      ],
+      "runtime_dlls": [],
+      "placed_files": [],
+      "data_files": []
+    },
+    {
+      "id": "shipment:m2-sdk",
+      "requested": 2,
+      "resolved": 0,
+      "held_back_by": null,
+      "name": "m2-sdk",
+      "version": "0.6.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [
+        "shader-registry"
+      ],
+      "plugins": [],
+      "runtime_dlls": [
+        {
+          "contribution": 0,
+          "file_name": "m2-sdk.dll",
+          "source": "m2-sdk.dll",
+          "relative": "m2-sdk.dll",
+          "sha256": "724c862405a981d16c6e2320f904a40cd0b433394fec9c58ac942b6903905ed3"
+        }
+      ],
+      "placed_files": [],
+      "data_files": []
+    },
+    {
+      "id": "shipment:mercs2-language",
+      "requested": 3,
+      "resolved": 3,
+      "held_back_by": null,
+      "name": "mercs2-language",
+      "version": "0.2.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [
+        {
+          "contribution": 0,
+          "file_name": "mercs2_language.asi",
+          "source": "mercs2_language.asi",
+          "relative": "scripts/mercs2_language.asi",
+          "sha256": "8bc69a4e24d446914d3ca613bcf4990625f8ec839636102d85fac6c5e807a902",
+          "touches": [
+            "0x004BFE20"
+          ]
+        }
+      ],
+      "runtime_dlls": [],
+      "placed_files": [
+        {
+          "contribution": 1,
+          "file_name": "mercs2_language.ini",
+          "source": "mercs2_language.ini",
+          "destination": "game_folder",
+          "dest": "scripts",
+          "relative": "scripts/mercs2_language.ini"
+        },
+        {
+          "contribution": 2,
+          "file_name": "polski.wad",
+          "source": null,
+          "destination": "data_wad",
+          "dest": null,
+          "relative": "data/polski.wad"
+        }
+      ],
+      "data_files": []
+    }
+  ],
+  "edges": [
+    {
+      "first": "shipment:lua-bridge",
+      "then": "shipment:ess",
+      "source": "requires",
+      "requirement": 0
+    },
+    {
+      "first": "shipment:m2-sdk",
+      "then": "shipment:lua-bridge",
+      "source": "requires",
+      "requirement": 1
+    },
+    {
+      "first": "shipment:m2-sdk",
+      "then": "shipment:mercs2-language",
+      "source": "requires",
+      "requirement": 2
+    }
+  ],
+  "requirements": [
+    {
+      "consumer": "shipment:ess",
+      "index": 0,
+      "kind": "shipment",
+      "target": "lua-bridge",
+      "range": "^1.2.0",
+      "providers": [
+        "shipment:lua-bridge"
+      ],
+      "resolved_version": "1.2.0",
+      "status": "satisfied"
+    },
+    {
+      "consumer": "shipment:lua-bridge",
+      "index": 0,
+      "kind": "shipment",
+      "target": "m2-sdk",
+      "range": ">=0.6.0",
+      "providers": [
+        "shipment:m2-sdk"
+      ],
+      "resolved_version": "0.6.0",
+      "status": "satisfied"
+    },
+    {
+      "consumer": "shipment:mercs2-language",
+      "index": 0,
+      "kind": "shipment",
+      "target": "m2-sdk",
+      "range": ">=0.6.0",
+      "providers": [
+        "shipment:m2-sdk"
+      ],
+      "resolved_version": "0.6.0",
+      "status": "satisfied"
+    }
+  ],
+  "capabilities": [],
+  "conflicts": [],
+  "supersedes": [
+    {
+      "declared_by": "shipment:ess",
+      "index": 0,
+      "dest": "on_load",
+      "file": "1_Ess.lua",
+      "relative": "scripts/OnLoad/1_Ess.lua",
+      "present": false
+    },
+    {
+      "declared_by": "shipment:ess",
+      "index": 1,
+      "dest": "on_load",
+      "file": "2_EssNames.lua",
+      "relative": "scripts/OnLoad/2_EssNames.lua",
+      "present": false
+    },
+    {
+      "declared_by": "shipment:lua-bridge",
+      "index": 0,
+      "dest": "scripts",
+      "file": "lua_bridge_DEV.asi",
+      "relative": "scripts/lua_bridge_DEV.asi",
+      "present": false
+    }
+  ],
+  "link_block_paths": [
+    "blocks\\VZ\\scripts_vz_P000_Q3.block",
+    "blocks\\VZ\\resident_P000_Q3.block",
+    "blocks\\Shell\\resident_P000_Q3.block"
+  ],
+  "link_file_paths": [],
+  "libraries": [
+    {
+      "module": "ess",
+      "item": "shipment:ess",
+      "session": "gameplay",
+      "when": "world.begin",
+      "settles": false
+    },
+    {
+      "module": "ess_names",
+      "item": "shipment:ess",
+      "session": "gameplay",
+      "when": "world.begin",
+      "settles": false
+    }
+  ],
+  "findings": []
+}

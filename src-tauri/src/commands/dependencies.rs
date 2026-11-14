@@ -42,7 +42,7 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
-use super::load_plan::{LoadPlan, Requirement, RequirementKind, RequirementStatus};
+use super::load_plan::{LoadPlan, PlanExt, RequirementKind, RequirementRow, RequirementStatus};
 use super::managed::trash;
 use super::paths::staging_dir;
 use super::shipment::{missing_rows, preflight_rows, InstallReason, ShipmentRef};
@@ -487,7 +487,7 @@ impl RemovalPlan {
     }
 }
 
-fn pulled_by(r: &Requirement) -> PulledBy {
+fn pulled_by(r: &RequirementRow) -> PulledBy {
     PulledBy {
         kind: match r.kind {
             RequirementKind::Shipment => "shipment".into(),
@@ -709,7 +709,7 @@ pub fn remove_shipments(rows: Vec<ShipmentRef>) -> Result<RemovalOutcome, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::load_plan::{LoadPlan, PlanItem, Producer, Requirement, RequirementStatus};
+    use crate::commands::load_plan::{LoadPlan, PlanItem, Producer, RequirementRow, RequirementStatus, PLAN_FORMAT};
     use crate::models::origin::Origin;
 
     fn need(target: &str, range: Option<&str>) -> ShipmentNeed {
@@ -946,8 +946,8 @@ mod tests {
         }
     }
 
-    fn req(consumer: &str, kind: RequirementKind, target: &str, providers: &[&str]) -> Requirement {
-        Requirement {
+    fn req(consumer: &str, kind: RequirementKind, target: &str, providers: &[&str]) -> RequirementRow {
+        RequirementRow {
             consumer: format!("shipment:{consumer}"),
             index: 0,
             kind,
@@ -959,11 +959,11 @@ mod tests {
         }
     }
 
-    fn plan(rows: &[ShipmentRef], requirements: Vec<Requirement>) -> LoadPlan {
+    fn plan(rows: &[ShipmentRef], requirements: Vec<RequirementRow>) -> LoadPlan {
         LoadPlan {
-            format: 2,
+            format: PLAN_FORMAT,
             producer: Producer::Preflight,
-            quartermaster: "3.0.0".into(),
+            quartermaster: "6.0.0".into(),
             ok: true,
             order: Some(rows.iter().map(|r| r.id.clone()).collect()),
             items: rows.iter().enumerate().map(|(i, r)| item(&r.name, i)).collect(),
@@ -974,6 +974,7 @@ mod tests {
             supersedes: vec![],
             link_block_paths: vec![],
             link_file_paths: vec![],
+            libraries: None,
             findings: vec![],
         }
     }

@@ -79,9 +79,9 @@ use mercs2_formats::patch_wad::read_patch_wad;
 use serde::{Deserialize, Serialize};
 use tauri::Window;
 
-use super::data_files::{self, DataFileRel, DataFileStore};
+use super::data_files::{self, DataFile, DataFileStore};
 use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
-use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, REQUEST_FILE};
+use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, PlanExt, REQUEST_FILE};
 use super::placement::{self, StagedDataFile, StagedFile, StreamCopy};
 use super::proc::NoWindow;
 use super::toolchain::{ensure_tool, installed_tool_path};
@@ -920,13 +920,14 @@ fn game_root_of(vz_wad: &std::ffi::OsStr) -> Result<PathBuf, String> {
 fn collapse_data_files(
     shipments: Vec<StagedDataFile>,
     link: Vec<StagedDataFile>,
-    link_file_paths: &[DataFileRel],
+    link_file_paths: &[DataFile],
 ) -> Result<Vec<StagedDataFile>, String> {
     for file in &shipments {
         if !link_file_paths.contains(&file.relative) {
             return Err(format!(
                 "qm build for \"{}\" placed {}, which the plan's link_file_paths does not list.",
-                file.shipment, file.relative
+                file.shipment,
+                file.relative.relative()
             ));
         }
     }
@@ -934,13 +935,16 @@ fn collapse_data_files(
         if !link_file_paths.contains(&file.relative) {
             return Err(format!(
                 "qm link placed {}, which the plan's link_file_paths does not list.",
-                file.relative
+                file.relative.relative()
             ));
         }
     }
     for rel in link_file_paths {
         if !link.iter().any(|f| f.relative == *rel) {
-            return Err(format!("The plan's link_file_paths lists {rel}, and qm link placed none."));
+            return Err(format!(
+                "The plan's link_file_paths lists {}, and qm link placed none.",
+                rel.relative()
+            ));
         }
     }
     Ok(link)
@@ -1947,7 +1951,7 @@ mod tests {
         assert_eq!(files[2].relative, "scripts/OnBoot/b.lua");
     }
 
-    fn data_file(shipment: &str, rel: DataFileRel, sha: char) -> StagedDataFile {
+    fn data_file(shipment: &str, rel: DataFile, sha: char) -> StagedDataFile {
         StagedDataFile {
             source: format!("/out/{shipment}/{}", rel.relative()),
             relative: rel,
@@ -1962,16 +1966,16 @@ mod tests {
     #[test]
     fn link_owned_data_files_are_dropped_for_links() {
         let shipments = vec![
-            data_file("A", DataFileRel::Shader3, 'a'),
-            data_file("B", DataFileRel::Shader3, 'c'),
-            data_file("B", DataFileRel::Shader3Low, 'd'),
+            data_file("A", DataFile::Shader3, 'a'),
+            data_file("B", DataFile::Shader3, 'c'),
+            data_file("B", DataFile::Shader3Low, 'd'),
         ];
         let link = vec![
-            data_file("Quartermaster link", DataFileRel::Shader3, 'e'),
-            data_file("Quartermaster link", DataFileRel::Shader3Low, 'f'),
+            data_file("Quartermaster link", DataFile::Shader3, 'e'),
+            data_file("Quartermaster link", DataFile::Shader3Low, 'f'),
         ];
         let kept =
-            collapse_data_files(shipments, link.clone(), &[DataFileRel::Shader3, DataFileRel::Shader3Low]).unwrap();
+            collapse_data_files(shipments, link.clone(), &[DataFile::Shader3, DataFile::Shader3Low]).unwrap();
         assert_eq!(kept, link);
     }
 
@@ -1979,18 +1983,18 @@ mod tests {
     #[test]
     fn a_data_file_outside_link_file_paths_is_refused() {
         let err = collapse_data_files(
-            vec![data_file("A", DataFileRel::Shader3Low, 'a')],
-            vec![data_file("Quartermaster link", DataFileRel::Shader3, 'e')],
-            &[DataFileRel::Shader3],
+            vec![data_file("A", DataFile::Shader3Low, 'a')],
+            vec![data_file("Quartermaster link", DataFile::Shader3, 'e')],
+            &[DataFile::Shader3],
         )
         .unwrap_err();
         assert!(err.contains("\"A\" placed data/shader3Low.bin") && err.contains("does not list"), "{err}");
 
-        let err = collapse_data_files(Vec::new(), vec![data_file("Quartermaster link", DataFileRel::Shader3Low, 'e')], &[])
+        let err = collapse_data_files(Vec::new(), vec![data_file("Quartermaster link", DataFile::Shader3Low, 'e')], &[])
             .unwrap_err();
         assert!(err.contains("qm link placed data/shader3Low.bin"), "{err}");
 
-        let err = collapse_data_files(Vec::new(), Vec::new(), &[DataFileRel::Shader3]).unwrap_err();
+        let err = collapse_data_files(Vec::new(), Vec::new(), &[DataFile::Shader3]).unwrap_err();
         assert!(err.contains("qm link placed none"), "{err}");
     }
 

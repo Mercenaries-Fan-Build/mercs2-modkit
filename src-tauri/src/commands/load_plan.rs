@@ -1,17 +1,21 @@
 //! `qm preflight`: the request Modkit writes and the `load-plan.json` qm writes back.
 //!
-//! Quartermaster owns both formats. This module is their serde mirror and nothing more: every
-//! shape here follows what qm writes and reads, and where the two ever disagree qm wins and
-//! this file is wrong.
+//! Quartermaster owns both formats. The plan's types are qm's own, from
+//! [`mercs2_formats::load_plan`], the one definition qm writes with; this module re-exports them.
+//! The request (`load-request.json`) has no shared definition, so [`LoadRequest`] mirrors qm's,
+//! and where the two ever disagree qm wins and this file is wrong.
 //!
 //! # Refuse, never guess
 //!
-//! * Every key is always present in a plan. Keys that don't apply are `null`, not missing. So
-//!   every struct is `deny_unknown_fields` and no field has a serde default. `Option` fields go
-//!   through [`nullable`], because serde would otherwise read a *missing* `Option` as `None`.
-//! * Every closed set is an enum, so an unknown value fails to parse.
-//! * `format` is each file's own version: `2` for `load-plan.json`, `1` for `load-request.json`.
-//!   The manifest format is a different number.
+//! * Every key is always present in a plan. Keys that don't apply are `null`, not missing. The
+//!   shared types deny unknown fields and read a missing nullable key as an error.
+//! * Every closed set is an enum, so an unknown value fails to parse. The shared finding types
+//!   also serve qm's lint and range reports, so they admit severities (`info`, `hang`) and
+//!   sections (`contributions`, `ranges`) a plan never carries; [`parse_plan`] refuses those.
+//! * `format` is each file's own version: [`PLAN_FORMAT`] (3) for `load-plan.json`,
+//!   [`REQUEST_FORMAT`] (1) for `load-request.json`. The manifest format is a different number.
+//!   A plan of another format is refused before it is parsed, naming the remedy: the installed
+//!   Workshop toolset's qm is older or newer than this Modkit reads.
 //!
 //! # What Modkit does with it
 //!
@@ -20,20 +24,20 @@
 //! than parsing any manifest's `load` table themselves: Modkit never parses `load` itself, and
 //! `required_by` is derived from the latest plan each time, so it can't drift.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::data_files::DataFileRel;
+pub use mercs2_formats::load_plan::{
+    ConflictRow, DataFile, Finding, FindingSeverity, LoadPlan, PlanItem, PluginEntry, Producer,
+    RequirementKind, RequirementRow, RequirementStatus, Section, PLAN_FILE, PLAN_FORMAT,
+};
+
 use super::proc::NoWindow;
 use super::shipment::ShipmentRef;
-
-/// The `format` of `load-request.json` and `load-plan.json`. It is not the
-/// manifest format.
-pub const PLAN_FORMAT: u32 = 2;
 
 /// The `format` of `load-request.json`.
 pub const REQUEST_FORMAT: u32 = 1;
@@ -41,9 +45,6 @@ pub const REQUEST_FORMAT: u32 = 1;
 /// The request file's name inside a work dir. `qm link --request` is given the same file
 /// preflight was given.
 pub const REQUEST_FILE: &str = "load-request.json";
-
-/// The plan file's name inside `--out`.
-pub const PLAN_FILE: &str = "load-plan.json";
 
 /// A key that is always present but may be `null`. serde reads a *missing* `Option` field as
 /// `None` unless a `deserialize_with` is set; setting one makes a missing key an error.
@@ -88,377 +89,156 @@ impl LoadRequest {
 // load-plan.json
 // ---------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Producer {
-    Preflight,
-    Link,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LoadPlan {
-    pub format: u32,
-    pub producer: Producer,
-    pub quartermaster: String,
-    pub ok: bool,
-    #[serde(deserialize_with = "nullable")]
-    pub order: Option<Vec<String>>,
-    pub items: Vec<PlanItem>,
-    pub edges: Vec<Edge>,
-    pub requirements: Vec<Requirement>,
-    pub capabilities: Vec<CapabilityRow>,
-    pub conflicts: Vec<ConflictRow>,
-    pub supersedes: Vec<SupersedeRow>,
-    /// Every block `qm link` re-emits: the script blocks plus the merged string-table blocks
-    /// (renamed from `script_block_paths`, which no longer fit once string tables joined the
-    /// list).
-    pub link_block_paths: Vec<String>,
-    /// Every data file `qm link` emits for the set. A Shipment's own copy of one of these is
-    /// dropped for link's; a Shipment's data file outside this list is refused.
-    pub link_file_paths: Vec<DataFileRel>,
-    pub findings: Vec<Finding>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlanItem {
-    pub id: String,
-    pub requested: usize,
-    #[serde(deserialize_with = "nullable")]
-    pub resolved: Option<usize>,
-    #[serde(deserialize_with = "nullable")]
-    pub held_back_by: Option<usize>,
-    pub name: String,
-    pub version: String,
-    pub manifest_format: u32,
-    #[serde(deserialize_with = "nullable")]
-    pub quartermaster_range: Option<String>,
-    pub provides: Vec<String>,
-    pub plugins: Vec<PluginEntry>,
-    pub runtime_dlls: Vec<RuntimeDllEntry>,
-    pub placed_files: Vec<PlacedFileEntry>,
-    /// The game data files this Shipment's shader kinds edit. Read before the first build, so
-    /// the originals are banked before qm reads them.
-    pub data_files: Vec<DataFileRel>,
-}
-
-impl LoadPlan {
-    /// Every data file any item in the set edits.
-    pub fn data_files(&self) -> std::collections::BTreeSet<DataFileRel> {
-        self.items.iter().flat_map(|i| i.data_files.iter().copied()).collect()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginEntry {
-    pub contribution: usize,
-    pub file_name: String,
-    pub source: String,
-    pub relative: String,
-    pub sha256: String,
-    #[serde(default)]
-    pub touches: Vec<String>,
-    #[serde(default)]
-    pub signature_guard: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeDllEntry {
-    pub contribution: usize,
-    pub file_name: String,
-    pub source: String,
-    pub relative: String,
-    pub sha256: String,
-    #[serde(default)]
-    pub touches: Vec<String>,
-    #[serde(default)]
-    pub signature_guard: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Destination {
-    GameFolder,
-    DataWad,
-}
-
-/// qm's `PlaceIn`, snake_case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlaceIn {
-    GameRoot,
-    Scripts,
-    Plugins,
-    Update,
-    OnBoot,
-    OnLoad,
-    OnKey,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlacedFileEntry {
-    pub contribution: usize,
-    pub file_name: String,
-    #[serde(deserialize_with = "nullable")]
-    pub source: Option<String>,
-    pub destination: Destination,
-    #[serde(deserialize_with = "nullable")]
-    pub dest: Option<PlaceIn>,
-    pub relative: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeSource {
-    Requires,
-    Capability,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Edge {
-    pub first: String,
-    pub then: String,
-    pub source: EdgeSource,
-    pub requirement: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequirementKind {
-    Shipment,
-    Capability,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequirementStatus {
-    Satisfied,
-    Missing,
-    VersionUnsatisfied,
-    Ambiguous,
-}
-
-/// One row per declared `load.requires` entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Requirement {
-    pub consumer: String,
-    pub index: usize,
-    pub kind: RequirementKind,
-    pub target: String,
-    #[serde(deserialize_with = "nullable")]
-    pub range: Option<String>,
-    pub providers: Vec<String>,
-    #[serde(deserialize_with = "nullable")]
-    pub resolved_version: Option<String>,
-    pub status: RequirementStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CapabilityRow {
-    pub capability: String,
-    pub consumers: Vec<String>,
-    pub providers: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeclaredStatus {
-    Conflict,
-    OutsideRange,
-    NotInstalled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimClass {
-    Exclusive,
-    KeyedSet,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Claimant {
-    pub item: String,
-    pub contribution: usize,
-    pub kind: String,
-}
-
-/// A `conflicts[]` row. Its two shapes are told apart by `source`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ConflictRow {
-    Declared {
-        declarer: String,
-        index: usize,
-        named: String,
-        #[serde(deserialize_with = "nullable")]
-        range: Option<String>,
-        installed: Vec<String>,
-        status: DeclaredStatus,
-    },
-    Claims {
-        claim: String,
-        class: ClaimClass,
-        claimants: Vec<Claimant>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SupersedeRow {
-    pub declared_by: String,
-    pub index: usize,
-    pub dest: PlaceIn,
-    pub file: String,
-    pub relative: String,
-    pub present: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    Error,
-    Warning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RefSection {
-    Items,
-    Edges,
-    Requirements,
-    Conflicts,
-    Supersedes,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FindingRef {
-    pub section: RefSection,
-    pub index: usize,
-}
-
-/// The one findings element.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Finding {
-    pub code: String,
-    pub severity: Severity,
-    pub message: String,
-    pub items: Vec<String>,
-    pub refs: Vec<FindingRef>,
-    #[serde(deserialize_with = "nullable")]
-    pub fix: Option<String>,
-}
-
 /// The cycle code: `order` is `null` exactly when a finding carries it.
 const CYCLE_CODE: &str = "M0174";
 
-impl LoadPlan {
-    /// Parse a plan and check it against the request it answers.
-    pub fn parse(text: &str, request: &LoadRequest, producer: Producer) -> Result<Self, String> {
-        let plan: LoadPlan = serde_json::from_str(text)
-            .map_err(|e| format!("qm wrote a load-plan.json Modkit cannot read: {e}"))?;
-        plan.validate(request, producer)?;
-        Ok(plan)
+/// Parse a plan and check it against the request it answers.
+///
+/// The `format` is read first, on its own, so a plan of another format is refused by number and
+/// with the remedy, rather than by whichever key the formats happen to differ in.
+pub fn parse_plan(text: &str, request: &LoadRequest, producer: Producer) -> Result<LoadPlan, String> {
+    #[derive(Deserialize)]
+    struct Head {
+        format: u32,
     }
-
-    /// The invariants of the plan format that Modkit relies on. Any breach is a hard error: a plan
-    /// that doesn't answer the request it was given can't be mapped back to rows.
-    fn validate(&self, request: &LoadRequest, producer: Producer) -> Result<(), String> {
-        if self.format != PLAN_FORMAT {
-            return Err(format!(
-                "load-plan.json has format {}; Modkit reads only format {PLAN_FORMAT}",
-                self.format
-            ));
-        }
-        if self.producer != producer {
-            return Err(format!(
-                "load-plan.json was written by {:?}, expected {producer:?}",
-                self.producer
-            ));
-        }
-        if self.items.len() != request.items.len() {
-            return Err(format!(
-                "load-plan.json has {} items for a request of {}",
-                self.items.len(),
-                request.items.len()
-            ));
-        }
-        for (i, (item, want)) in self.items.iter().zip(&request.items).enumerate() {
-            if item.id != want.id || item.requested != i {
-                return Err(format!(
-                    "load-plan.json item {i} is {} (requested {}), but the request's item {i} is {}",
-                    item.id, item.requested, want.id
-                ));
-            }
-            if item.manifest_format != 2 {
-                return Err(format!(
-                    "load-plan.json reports manifest format {} for {}; format 2 is the only one",
-                    item.manifest_format, item.id
-                ));
-            }
-        }
-        let has_cycle = self.findings.iter().any(|f| f.code == CYCLE_CODE);
-        match &self.order {
-            Some(order) => {
-                if has_cycle {
-                    return Err(format!(
-                        "load-plan.json has an order and an {CYCLE_CODE} cycle finding; the schema allows only one"
-                    ));
-                }
-                map_order(order, request)?;
-            }
-            None if !has_cycle => {
-                return Err(format!(
-                    "load-plan.json has no order but no {CYCLE_CODE} cycle finding"
-                ))
-            }
-            None => {}
-        }
-        let has_error = self.findings.iter().any(|f| f.severity == Severity::Error);
-        if self.ok == has_error {
-            return Err(format!(
-                "load-plan.json says ok = {} but {} an error finding",
-                self.ok,
-                if has_error { "carries" } else { "carries no" }
-            ));
-        }
-        for r in &self.requirements {
-            let allowed = match r.kind {
-                RequirementKind::Shipment => true,
-                RequirementKind::Capability => matches!(
-                    r.status,
-                    RequirementStatus::Satisfied | RequirementStatus::Missing
-                ),
-            };
-            if !allowed {
-                return Err(format!(
-                    "load-plan.json gives capability requirement {} of {} the status {:?}, which only shipment requirements may have",
-                    r.target, r.consumer, r.status
-                ));
-            }
-        }
-        Ok(())
+    let head: Head = serde_json::from_str(text)
+        .map_err(|e| format!("qm wrote a load-plan.json Modkit cannot read: {e}"))?;
+    if head.format != PLAN_FORMAT {
+        return Err(format!(
+            "load-plan.json has format {}; Modkit reads only format {PLAN_FORMAT}, which the \
+             Workshop toolset v1.19.0 (qm 6.0.0) writes. Update the Workshop toolset in Modkit.",
+            head.format
+        ));
     }
+    let plan: LoadPlan = serde_json::from_str(text)
+        .map_err(|e| format!("qm wrote a load-plan.json Modkit cannot read: {e}"))?;
+    validate(&plan, request, producer)?;
+    Ok(plan)
+}
 
+/// The invariants of the plan format that Modkit relies on. Any breach is a hard error: a plan
+/// that doesn't answer the request it was given can't be mapped back to rows.
+fn validate(plan: &LoadPlan, request: &LoadRequest, producer: Producer) -> Result<(), String> {
+    plan.check().map_err(|e| format!("load-plan.json: {e}"))?;
+    if plan.producer != producer {
+        return Err(format!(
+            "load-plan.json was written by {:?}, expected {producer:?}",
+            plan.producer
+        ));
+    }
+    if plan.items.len() != request.items.len() {
+        return Err(format!(
+            "load-plan.json has {} items for a request of {}",
+            plan.items.len(),
+            request.items.len()
+        ));
+    }
+    // The shared finding types also carry lint's and the range report's; a plan holds only
+    // warnings and errors, pointing into its own five sections.
+    for f in &plan.findings {
+        if !matches!(f.severity, FindingSeverity::Warning | FindingSeverity::Error) {
+            return Err(format!(
+                "load-plan.json finding {} has severity {}, which a load plan never carries",
+                f.code,
+                f.severity.as_str()
+            ));
+        }
+        if let Some(r) = f.refs.iter().find(|r| {
+            !matches!(
+                r.section,
+                Section::Items
+                    | Section::Edges
+                    | Section::Requirements
+                    | Section::Conflicts
+                    | Section::Supersedes
+            )
+        }) {
+            return Err(format!(
+                "load-plan.json finding {} points into {:?}, which is not a load plan section",
+                f.code, r.section
+            ));
+        }
+    }
+    for (i, (item, want)) in plan.items.iter().zip(&request.items).enumerate() {
+        if item.id != want.id || item.requested != i {
+            return Err(format!(
+                "load-plan.json item {i} is {} (requested {}), but the request's item {i} is {}",
+                item.id, item.requested, want.id
+            ));
+        }
+        if item.manifest_format != 2 {
+            return Err(format!(
+                "load-plan.json reports manifest format {} for {}; format 2 is the only one",
+                item.manifest_format, item.id
+            ));
+        }
+    }
+    let has_cycle = plan.findings.iter().any(|f| f.code == CYCLE_CODE);
+    match &plan.order {
+        Some(order) => {
+            if has_cycle {
+                return Err(format!(
+                    "load-plan.json has an order and an {CYCLE_CODE} cycle finding; the schema allows only one"
+                ));
+            }
+            map_order(order, request)?;
+        }
+        None if !has_cycle => {
+            return Err(format!(
+                "load-plan.json has no order but no {CYCLE_CODE} cycle finding"
+            ))
+        }
+        None => {}
+    }
+    let has_error = plan.findings.iter().any(|f| f.severity == FindingSeverity::Error);
+    if plan.ok == has_error {
+        return Err(format!(
+            "load-plan.json says ok = {} but {} an error finding",
+            plan.ok,
+            if has_error { "carries" } else { "carries no" }
+        ));
+    }
+    for r in &plan.requirements {
+        let allowed = match r.kind {
+            RequirementKind::Shipment => true,
+            RequirementKind::Capability => matches!(
+                r.status,
+                RequirementStatus::Satisfied | RequirementStatus::Missing
+            ),
+        };
+        if !allowed {
+            return Err(format!(
+                "load-plan.json gives capability requirement {} of {} the status {:?}, which only shipment requirements may have",
+                r.target, r.consumer, r.status
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What Modkit reads out of a parsed plan.
+pub trait PlanExt {
+    /// Every data file any item in the set edits.
+    fn data_files(&self) -> BTreeSet<DataFile>;
     /// The plan's findings as text, with each request id replaced by its row's name. Used for
     /// the refusal message, which the player reads.
-    pub fn describe_findings(&self, names: &HashMap<String, String>) -> String {
+    fn describe_findings(&self, names: &HashMap<String, String>) -> String;
+    /// Refuse when `ok` is false.
+    fn refuse_unless_ok(&self, rows: &[ShipmentRef]) -> Result<(), String>;
+    /// Every `shipment`-kind and `capability`-kind requirement, grouped by consumer id.
+    fn requirements_by_consumer(&self) -> BTreeMap<&str, Vec<&RequirementRow>>;
+}
+
+impl PlanExt for LoadPlan {
+    fn data_files(&self) -> BTreeSet<DataFile> {
+        self.items.iter().flat_map(|i| i.data_files.iter().copied()).collect()
+    }
+
+    fn describe_findings(&self, names: &HashMap<String, String>) -> String {
         self.findings
             .iter()
             .map(|f| {
-                let sev = match f.severity {
-                    Severity::Error => "error",
-                    Severity::Warning => "warning",
-                };
+                let sev = f.severity.as_str();
                 let rows: Vec<&str> = f
                     .items
                     .iter()
@@ -474,8 +254,7 @@ impl LoadPlan {
             .join("\n")
     }
 
-    /// Refuse when `ok` is false.
-    pub fn refuse_unless_ok(&self, rows: &[ShipmentRef]) -> Result<(), String> {
+    fn refuse_unless_ok(&self, rows: &[ShipmentRef]) -> Result<(), String> {
         if self.ok {
             return Ok(());
         }
@@ -487,9 +266,8 @@ impl LoadPlan {
         ))
     }
 
-    /// Every `shipment`-kind and `capability`-kind requirement, grouped by consumer id.
-    pub fn requirements_by_consumer(&self) -> BTreeMap<&str, Vec<&Requirement>> {
-        let mut out: BTreeMap<&str, Vec<&Requirement>> = BTreeMap::new();
+    fn requirements_by_consumer(&self) -> BTreeMap<&str, Vec<&RequirementRow>> {
+        let mut out: BTreeMap<&str, Vec<&RequirementRow>> = BTreeMap::new();
         for r in &self.requirements {
             out.entry(r.consumer.as_str()).or_default().push(r);
         }
@@ -536,7 +314,7 @@ pub fn map_order(order: &[String], request: &LoadRequest) -> Result<Vec<usize>, 
 /// Exit 0 and 1 both write a plan, which is read and checked here; exit 0 must carry `ok: true`
 /// and exit 1 `ok: false`. Exit 2 means qm could not run, and its stderr is the error. Any other
 /// exit, or a plan missing after exit 0 or 1, is an error too. The caller decides what `ok:
-/// false` means for it: a build refuses (see [`LoadPlan::refuse_unless_ok`]), while the resolver
+/// false` means for it: a build refuses (see [`PlanExt::refuse_unless_ok`]), while the resolver
 /// and the removal cascade still read the requirement data.
 pub fn run_preflight(
     qm: &Path,
@@ -591,7 +369,7 @@ pub fn run_preflight(
             plan_path.display()
         )
     })?;
-    let plan = LoadPlan::parse(&text, &request, Producer::Preflight)?;
+    let plan = parse_plan(&text, &request, Producer::Preflight)?;
     if plan.ok != expect_ok {
         return Err(format!(
             "qm preflight exited {} but its plan says ok = {}",
@@ -612,7 +390,7 @@ pub fn read_link_plan(out: &Path, request: &LoadRequest) -> Result<LoadPlan, Str
             path.display()
         )
     })?;
-    LoadPlan::parse(&text, request, Producer::Link)
+    parse_plan(&text, request, Producer::Link)
 }
 
 /// Refuse when link's plan disagrees with preflight's about `order` or `edges`.
@@ -651,7 +429,7 @@ pub(crate) mod tests {
     /// row: Ess requires only lua-bridge, and Modkit does not add m2-sdk to a build. The player
     /// listed ess before lua-bridge, so ess is held back.
     pub(crate) const CHAIN_PLAN: &str = r#"{
-      "format": 2, "producer": "preflight", "quartermaster": "3.0.0", "ok": true,
+      "format": 3, "producer": "preflight", "quartermaster": "6.0.0", "ok": true,
       "order": ["shipment:lua-bridge", "shipment:ess", "shipment:my-mod"],
       "items": [
         { "id": "shipment:ess", "requested": 0, "resolved": 1, "held_back_by": 0,
@@ -694,6 +472,7 @@ pub(crate) mod tests {
       ],
       "link_block_paths": ["blocks\\VZ\\scripts_vz_P000_Q3.block", "blocks\\VZ\\resident_P000_Q3.block"],
       "link_file_paths": ["data/shader3.bin"],
+      "libraries": null,
       "findings": []
     }"#;
 
@@ -701,16 +480,35 @@ pub(crate) mod tests {
         request(&["shipment:ess", "shipment:lua-bridge", "shipment:my-mod"])
     }
 
+    /// What `qm preflight` and `qm link` (qm 6.0.0, the Workshop Tools v1.19.0 release) wrote for
+    /// m2-sdk, lua-bridge, Ess and mercs2-language, requested in the order below.
+    const QM_PREFLIGHT_PLAN: &str = include_str!("../../fixtures/qm-6.0.0/preflight-load-plan.json");
+    const QM_LINK_PLAN: &str = include_str!("../../fixtures/qm-6.0.0/link-load-plan.json");
+
+    fn qm_request() -> LoadRequest {
+        request(&["shipment:ess", "shipment:lua-bridge", "shipment:m2-sdk", "shipment:mercs2-language"])
+    }
+
+    /// The plans the released qm writes parse, map back to the request, and agree with each other.
+    #[test]
+    fn the_plans_released_qm_writes_parse_and_agree() {
+        let pre = parse_plan(QM_PREFLIGHT_PLAN, &qm_request(), Producer::Preflight).unwrap();
+        let link = parse_plan(QM_LINK_PLAN, &qm_request(), Producer::Link).unwrap();
+        assert!(pre.ok && link.ok);
+        assert_eq!(map_order(pre.order.as_ref().unwrap(), &qm_request()).unwrap(), vec![2, 1, 0, 3]);
+        assert_same_plan(&pre, &link).unwrap();
+    }
+
     #[test]
     fn a_complete_plan_parses_and_maps_back_to_rows() {
-        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        let plan = parse_plan(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
         assert!(plan.ok);
         assert_eq!(
             map_order(plan.order.as_ref().unwrap(), &chain_request()).unwrap(),
             vec![1, 0, 2]
         );
         assert_eq!(plan.requirements.len(), 2);
-        assert!(matches!(plan.conflicts[1], ConflictRow::Claims { .. }));
+        assert!(matches!(plan.conflicts[1], ConflictRow::Claims(_)));
     }
 
     /// Every key is always present. A `null`-able key that is missing is as much
@@ -719,17 +517,17 @@ pub(crate) mod tests {
     fn a_plan_missing_any_key_is_refused() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v.as_object_mut().unwrap().remove("order");
-        let err = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
         assert!(err.contains("order"), "{err}");
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["items"][0].as_object_mut().unwrap().remove("quartermaster_range");
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["findings"] = serde_json::json!([{ "code": "M0204", "severity": "warning",
             "message": "m", "items": [], "refs": [] }]);
-        let err = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
         assert!(err.contains("fix"), "{err}");
     }
 
@@ -737,15 +535,15 @@ pub(crate) mod tests {
     fn an_extra_key_or_an_unknown_value_is_refused() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["items"][0]["kind"] = serde_json::json!("shipment");
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["conflicts"][0]["extra"] = serde_json::json!(1);
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["requirements"][0]["status"] = serde_json::json!("probably_fine");
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
     }
 
     #[test]
@@ -756,43 +554,51 @@ pub(crate) mod tests {
             "0x004B1180": "8B 44 24 04 85 C0",
         });
         let plan =
-            LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
+            parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
         let plugin = &plan.items[1].plugins[0];
         assert_eq!(plugin.touches, vec!["0x004B1180", "0x0063DA1F"]);
         assert_eq!(plugin.signature_guard.get("0x004B1180").map(String::as_str),
                    Some("8B 44 24 04 85 C0"));
 
-        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        let plan = parse_plan(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
         assert!(plan.items[1].plugins[0].touches.is_empty());
         assert!(plan.items[1].plugins[0].signature_guard.is_empty());
     }
 
+    /// qm's runtime DLL entry has never carried `touches` or `signature_guard` (only a plugin entry
+    /// does), so a runtime DLL entry with either is not a plan qm wrote, and is refused.
     #[test]
-    fn a_runtime_dll_entry_with_touches_and_signature_guard_parses() {
-        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
-        v["items"][1]["runtime_dlls"] = serde_json::json!([{
+    fn a_runtime_dll_entry_parses_and_one_with_touches_or_signature_guard_is_refused() {
+        let dll = serde_json::json!({
             "contribution": 2, "file_name": "x.dll", "source": "x.dll",
             "relative": "x.dll", "sha256": "00",
-            "touches": ["0x004B1180"],
-            "signature_guard": { "0x004B1180": "8B 44 24 04" },
-        }]);
-        let plan =
-            LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
-        let dll = &plan.items[1].runtime_dlls[0];
-        assert_eq!(dll.touches, vec!["0x004B1180"]);
-        assert_eq!(dll.signature_guard.get("0x004B1180").map(String::as_str),
-                   Some("8B 44 24 04"));
+        });
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["items"][1]["runtime_dlls"] = serde_json::json!([dll.clone()]);
+        let plan = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
+        assert_eq!(plan.items[1].runtime_dlls[0].file_name, "x.dll");
+
+        for (key, value) in [
+            ("touches", serde_json::json!(["0x004B1180"])),
+            ("signature_guard", serde_json::json!({ "0x004B1180": "8B 44 24 04" })),
+        ] {
+            let mut entry = dll.clone();
+            entry[key] = value;
+            v["items"][1]["runtime_dlls"] = serde_json::json!([entry]);
+            let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+            assert!(err.contains(key), "{key}: {err}");
+        }
     }
 
     /// Each item's `data_files` and the plan's `link_file_paths` read as the closed data-file
     /// set; the union says, before any build, which stores the set edits.
     #[test]
     fn data_files_and_link_file_paths_parse() {
-        let plan = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
-        assert_eq!(plan.link_file_paths, vec![DataFileRel::Shader3]);
-        assert_eq!(plan.items[2].data_files, vec![DataFileRel::Shader3]);
+        let plan = parse_plan(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        assert_eq!(plan.link_file_paths, vec![DataFile::Shader3]);
+        assert_eq!(plan.items[2].data_files, vec![DataFile::Shader3]);
         assert!(plan.items[0].data_files.is_empty());
-        assert_eq!(plan.data_files().into_iter().collect::<Vec<_>>(), vec![DataFileRel::Shader3]);
+        assert_eq!(plan.data_files().into_iter().collect::<Vec<_>>(), vec![DataFile::Shader3]);
     }
 
     /// A path outside the closed set, or a plan without either key, is refused.
@@ -800,27 +606,27 @@ pub(crate) mod tests {
     fn a_data_file_outside_the_set_or_a_missing_key_is_refused() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["items"][2]["data_files"] = serde_json::json!(["data/shader4.bin"]);
-        let err = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
-        assert!(err.contains("is not a data file Modkit deploys"), "{err}");
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        assert!(err.contains("unknown variant `data/shader4.bin`"), "{err}");
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["link_file_paths"] = serde_json::json!(["data/Shader3Low.bin"]);
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v.as_object_mut().unwrap().remove("link_file_paths");
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
 
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["items"][1].as_object_mut().unwrap().remove("data_files");
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
     }
 
     /// The field was renamed; a plan still carrying the old name is refused, not read.
     #[test]
     fn the_old_script_block_paths_name_is_refused() {
         let text = CHAIN_PLAN.replace("link_block_paths", "script_block_paths");
-        let err = LoadPlan::parse(&text, &chain_request(), Producer::Preflight).unwrap_err();
+        let err = parse_plan(&text, &chain_request(), Producer::Preflight).unwrap_err();
         assert!(err.contains("script_block_paths") || err.contains("link_block_paths"), "{err}");
     }
 
@@ -828,15 +634,71 @@ pub(crate) mod tests {
     fn a_plan_of_another_format_is_refused() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["format"] = serde_json::json!(1);
-        let err = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
         assert!(err.contains("format 1"), "{err}");
+    }
+
+    /// The plan an older toolset's qm writes (format 2, no `libraries`) is refused by its format,
+    /// naming the remedy, not by the key it lacks.
+    #[test]
+    fn a_format_2_plan_is_refused_naming_the_toolset_update() {
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["format"] = serde_json::json!(2);
+        v.as_object_mut().unwrap().remove("libraries");
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        assert!(err.contains("format 2"), "{err}");
+        assert!(err.contains("Update the Workshop toolset"), "{err}");
+    }
+
+    /// `libraries` is always present: `null` from preflight, a list from link.
+    #[test]
+    fn libraries_is_null_from_preflight_listed_from_link_and_never_missing() {
+        let pre = parse_plan(QM_PREFLIGHT_PLAN, &qm_request(), Producer::Preflight).unwrap();
+        assert_eq!(pre.libraries, None);
+        let link = parse_plan(QM_LINK_PLAN, &qm_request(), Producer::Link).unwrap();
+        let modules: Vec<&str> = link.libraries.as_ref().unwrap().iter().map(|l| l.module.as_str()).collect();
+        assert_eq!(modules, vec!["ess", "ess_names"]);
+
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v.as_object_mut().unwrap().remove("libraries");
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        assert!(err.contains("libraries"), "{err}");
+    }
+
+    /// The shared finding types also serve lint and the range report. A plan carries only warning
+    /// and error findings, pointing into its own five sections; anything else is refused.
+    #[test]
+    fn a_finding_a_plan_never_carries_is_refused() {
+        for severity in ["info", "hang"] {
+            let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+            v["findings"] = serde_json::json!([{ "code": "M0204", "severity": severity,
+                "message": "m", "items": [], "refs": [], "fix": null }]);
+            let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+            assert!(err.contains(&format!("severity {severity}")), "{err}");
+        }
+        for section in ["contributions", "ranges"] {
+            let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+            v["findings"] = serde_json::json!([{ "code": "M0204", "severity": "warning",
+                "message": "m", "items": [], "refs": [{ "section": section, "index": 0 }], "fix": null }]);
+            let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+            assert!(err.contains("not a load plan section"), "{section}: {err}");
+        }
+    }
+
+    /// A conflict row whose `source` names the other shape is refused.
+    #[test]
+    fn a_conflict_row_whose_source_names_the_other_shape_is_refused() {
+        let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
+        v["conflicts"][0]["source"] = serde_json::json!("claims");
+        let err = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap_err();
+        assert!(err.contains("conflicts[0]"), "{err}");
     }
 
     #[test]
     fn a_plan_that_answers_a_different_request_is_refused() {
         let other = request(&["shipment:lua-bridge", "shipment:ess", "shipment:my-mod"]);
-        assert!(LoadPlan::parse(CHAIN_PLAN, &other, Producer::Preflight).is_err());
-        assert!(LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Link).is_err());
+        assert!(parse_plan(CHAIN_PLAN, &other, Producer::Preflight).is_err());
+        assert!(parse_plan(CHAIN_PLAN, &chain_request(), Producer::Link).is_err());
     }
 
     #[test]
@@ -856,7 +718,7 @@ pub(crate) mod tests {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["findings"] = serde_json::json!([{ "code": "M0204", "severity": "error",
             "message": "m", "items": [], "refs": [], "fix": null }]);
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
     }
 
     /// The build gate: a plan with `ok: false` is refused even though `order` is present
@@ -870,7 +732,7 @@ pub(crate) mod tests {
             "message": "my-mod requires ess >=0.7, <1; the installed ess is 0.6.1",
             "items": ["shipment:my-mod", "shipment:ess"],
             "refs": [{ "section": "requirements", "index": 1 }], "fix": null }]);
-        let plan = LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
+        let plan = parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).unwrap();
         assert!(plan.order.is_some(), "order is still present when ok is false");
 
         let row = |id: &str, name: &str| ShipmentRef {
@@ -892,9 +754,9 @@ pub(crate) mod tests {
 
     #[test]
     fn link_must_agree_with_preflight_on_order_and_edges() {
-        let pre = LoadPlan::parse(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
+        let pre = parse_plan(CHAIN_PLAN, &chain_request(), Producer::Preflight).unwrap();
         let link_text = CHAIN_PLAN.replace(r#""producer": "preflight""#, r#""producer": "link""#);
-        let link = LoadPlan::parse(&link_text, &chain_request(), Producer::Link).unwrap();
+        let link = parse_plan(&link_text, &chain_request(), Producer::Link).unwrap();
         assert!(assert_same_plan(&pre, &link).is_ok());
 
         let mut other = link.clone();
@@ -913,7 +775,7 @@ pub(crate) mod tests {
         let mut warned = link;
         warned.findings.push(Finding {
             code: "M0209".into(),
-            severity: Severity::Warning,
+            severity: FindingSeverity::Warning,
             message: "import(\"x\") does not resolve".into(),
             items: vec![],
             refs: vec![],
@@ -933,12 +795,12 @@ pub(crate) mod tests {
     fn a_missing_order_needs_a_cycle_finding_and_vice_versa() {
         let mut v: serde_json::Value = serde_json::from_str(CHAIN_PLAN).unwrap();
         v["order"] = serde_json::Value::Null;
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_err());
 
         v["ok"] = serde_json::json!(false);
         v["findings"] = serde_json::json!([{ "code": "M0174", "severity": "error",
             "message": "cycle", "items": [], "refs": [], "fix": null }]);
-        assert!(LoadPlan::parse(&v.to_string(), &chain_request(), Producer::Preflight).is_ok());
+        assert!(parse_plan(&v.to_string(), &chain_request(), Producer::Preflight).is_ok());
     }
 
     #[test]

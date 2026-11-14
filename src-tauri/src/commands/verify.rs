@@ -1273,7 +1273,7 @@ mod tests {
     /// original's sha; once it is not Modkit's bytes it is verified like any other file.
     #[test]
     fn a_ledger_listed_store_is_reported_as_deployed_by_modkit() {
-        use crate::commands::data_files::DataFileRel;
+        use crate::commands::data_files::DataFile;
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("data")).unwrap();
         std::fs::write(dir.path().join("data/shader3.bin"), b"linked").unwrap();
@@ -1291,7 +1291,7 @@ mod tests {
             wads: BTreeMap::new(),
         };
         let rows = vec![DataFileRow {
-            relative: DataFileRel::Shader3,
+            relative: DataFile::Shader3,
             original_sha256: sha(b"retail"),
             bank_path: "/bank/shader3.bin".into(),
             deployed_sha256: Some(sha(b"linked")),
