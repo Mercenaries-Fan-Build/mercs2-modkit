@@ -474,9 +474,24 @@ pub struct RemovalPlan {
     pub cascade: Vec<Cascaded>,
     /// The dependencies the orphan pass then removes.
     pub orphans: Vec<ShipmentRef>,
+    /// Why what else needs `removed` could not be worked out, when it could not. Removal is never
+    /// refused for that: the plan then removes exactly the Shipment the player chose (no cascade,
+    /// no orphans), and this says what was not checked, so the player decides with that in view.
+    pub dependents_unknown: Option<String>,
 }
 
 impl RemovalPlan {
+    /// Remove exactly `removed`, saying why nothing else was worked out.
+    fn only(removed: ShipmentRef, why: String) -> Self {
+        RemovalPlan {
+            removed,
+            missing_too: Vec::new(),
+            cascade: Vec::new(),
+            orphans: Vec::new(),
+            dependents_unknown: Some(why),
+        }
+    }
+
     /// Every row the plan removes, in the order it was computed.
     pub fn all(&self) -> Vec<&ShipmentRef> {
         std::iter::once(&self.removed)
@@ -512,7 +527,9 @@ fn pulled_by(r: &RequirementRow) -> PulledBy {
 /// Rows whose folders are missing are the rows of `rows` that `plan` does not name: preflight
 /// cannot read them, so their requirements are unknown. Every one of them is removed together
 /// (`missing_too`), because the orphan pass is exact only when every remaining row is in the
-/// plan; removing a row whose folder exists while any is missing is refused. A row requires a
+/// plan. Removing a row whose folder exists while any is missing removes that row alone, with
+/// [`RemovalPlan::dependents_unknown`] saying which missing rows kept the rest from being worked
+/// out: removal is never refused. A row requires a
 /// missing one when it has a `shipment` requirement with no provider whose target is that row's
 /// `slug`. What a missing row provided is unknown, so a capability requirement never pulls a row in
 /// through one; preflight reports a capability left unmet at the next build.
@@ -535,13 +552,14 @@ pub fn plan_removal(
     let planned: HashSet<&str> = plan.items.iter().map(|i| i.id.as_str()).collect();
     let missing: Vec<&ShipmentRef> = rows.iter().filter(|r| !planned.contains(r.id.as_str())).collect();
     if !missing.is_empty() && planned.contains(removed.id.as_str()) {
-        return Err(format!(
-            "{} can't be removed yet: Modkit can't tell what else depends on it while the files of \
-             {} are missing. Reinstall or remove {} first.",
+        let why = format!(
+            "Modkit can't tell what else needs {} while the files of {} are missing, so only {} is \
+             removed. A Shipment that requires it stays, and its next build says so.",
             removed.name,
             missing.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", "),
-            if missing.len() == 1 { "it" } else { "them" }
-        ));
+            removed.name
+        );
+        return Ok(RemovalPlan::only(removed, why));
     }
     let missing_too: Vec<ShipmentRef> =
         missing.iter().filter(|r| r.id != removed.id).map(|r| (*r).clone()).collect();
@@ -608,7 +626,7 @@ pub fn plan_removal(
         }
     }
 
-    Ok(RemovalPlan { removed, missing_too, cascade, orphans })
+    Ok(RemovalPlan { removed, missing_too, cascade, orphans, dependents_unknown: None })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -677,6 +695,10 @@ pub fn remove_rows(rows: &[ShipmentRef], staging: &Path, trash_into: Option<&Pat
 /// Compute, without removing anything, what removing `id` takes with it, for the player to
 /// confirm. Runs `qm preflight` over every row whose folder exists first; when none does, there
 /// is nothing left to cascade to or orphan.
+///
+/// Removal never depends on `qm`. When preflight cannot run (no qm, a qm too old for a manifest,
+/// a manifest it refuses), the plan removes exactly the chosen Shipment and says why nothing else
+/// was worked out: the player can always remove what they could delete by hand.
 #[tauri::command]
 pub async fn plan_shipment_removal(
     window: Window,
@@ -684,20 +706,38 @@ pub async fn plan_shipment_removal(
     rows: Vec<ShipmentRef>,
     game_path: String,
 ) -> Result<RemovalPlan, String> {
+    let removed = rows
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("{id} is not in the library"))?
+        .clone();
     let missing: HashSet<&str> = missing_rows(&rows).into_iter().map(|r| r.id.as_str()).collect();
     let present: Vec<ShipmentRef> =
         rows.iter().filter(|r| !missing.contains(r.id.as_str())).cloned().collect();
     if present.is_empty() {
-        let removed = rows
-            .iter()
-            .find(|r| r.id == id)
-            .ok_or_else(|| format!("{id} is not in the library"))?
-            .clone();
         let missing_too = rows.iter().filter(|r| r.id != id).cloned().collect();
-        return Ok(RemovalPlan { removed, missing_too, cascade: Vec::new(), orphans: Vec::new() });
+        return Ok(RemovalPlan {
+            removed,
+            missing_too,
+            cascade: Vec::new(),
+            orphans: Vec::new(),
+            dependents_unknown: None,
+        });
     }
-    let plan = preflight_rows(window, &present, &game_path).await?;
-    plan_removal(&id, &rows, &plan)
+    match preflight_rows(window, &present, &game_path).await {
+        Ok(plan) => plan_removal(&id, &rows, &plan),
+        Err(e) => Ok(preflight_failed(removed, &e)),
+    }
+}
+
+/// The plan when `qm preflight` could not run: `removed` alone, with the reason.
+fn preflight_failed(removed: ShipmentRef, error: &str) -> RemovalPlan {
+    let why = format!(
+        "Modkit could not check what else needs {}, because qm preflight did not run:\n{error}\n\
+         Only {} is removed. A Shipment that requires it stays, and its next build says so.",
+        removed.name, removed.name
+    );
+    RemovalPlan::only(removed, why)
 }
 
 /// Remove exactly the rows the player confirmed, in order.
@@ -1226,15 +1266,43 @@ mod tests {
         assert_eq!(all, vec!["patch", "m2-sdk", "ui", "dep"], "other and fork stay");
     }
 
-    /// While any row is missing, removing a row whose folder exists is refused, naming the
-    /// missing rows.
+    /// While any row is missing, removing a row whose folder exists is never refused: that row is
+    /// removed alone, and the plan names the missing rows that kept the rest from being worked out.
     #[test]
-    fn removing_a_present_row_while_one_is_missing_is_refused() {
+    fn removing_a_present_row_while_one_is_missing_removes_it_alone_and_says_why() {
         use InstallReason::*;
-        let rows = vec![row("gone", User), row("here", User)];
-        let p = plan(&rows[1..], vec![]);
-        let e = plan_removal("shipment:here", &rows, &p).unwrap_err();
-        assert!(e.contains("gone"), "{e}");
+        let rows = vec![row("gone", User), row("here", User), row("needs-here", User)];
+        let p = plan(&rows[1..], vec![req("needs-here", RequirementKind::Shipment, "here", &["here"])]);
+        let r = plan_removal("shipment:here", &rows, &p).unwrap();
+        let all: Vec<&str> = r.all().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(all, vec!["here"], "exactly the chosen row");
+        let why = r.dependents_unknown.expect("the reason is given");
+        assert!(why.contains("gone"), "{why}");
+    }
+
+    /// A plan worked out in full carries no reason.
+    #[test]
+    fn a_full_plan_has_no_dependents_unknown() {
+        use InstallReason::*;
+        let rows = vec![row("a", User), row("b", User)];
+        let p = plan(&rows, vec![req("b", RequirementKind::Shipment, "a", &["a"])]);
+        let r = plan_removal("shipment:a", &rows, &p).unwrap();
+        assert_eq!(r.dependents_unknown, None);
+        assert_eq!(ids(&r.cascade.iter().map(|c| c.shipment.clone()).collect::<Vec<_>>()), vec!["b"]);
+    }
+
+    /// When qm preflight cannot run, removal is not refused: the chosen row alone, with qm's error.
+    #[test]
+    fn a_preflight_that_cannot_run_removes_the_chosen_row_alone() {
+        use InstallReason::*;
+        let chosen = row("blow-it-up-again", User);
+        let err = "qm preflight could not run (exit 2):\nerror: unknown field `templates`";
+        let r = preflight_failed(chosen, err);
+        let all: Vec<&str> = r.all().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(all, vec!["blow-it-up-again"]);
+        let why = r.dependents_unknown.expect("the reason is given");
+        assert!(why.contains("unknown field `templates`"), "{why}");
+        assert!(why.contains("Only blow-it-up-again is removed"), "{why}");
     }
 
     /// What a missing row provided is unknown, so an unprovided capability pulls nothing in.
