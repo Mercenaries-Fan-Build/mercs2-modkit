@@ -28,7 +28,7 @@ pub struct DeployResult {
     pub target_dir: String,
     /// File names deployed (basename at the target).
     pub deployed: Vec<String>,
-    /// Existing files that were backed up to `<name>.bak` first.
+    /// Existing files that were backed up to `<name>.bak` first (an older `.bak` goes to the trash).
     pub backed_up: Vec<String>,
 }
 
@@ -40,6 +40,11 @@ fn basename(rel: &str) -> &str {
 /// backing up any file already present at the destination.
 #[tauri::command(async)]
 pub fn deploy_asi(args: DeployAsiArgs) -> Result<DeployResult, String> {
+    deploy_asi_with_trash(args, None)
+}
+
+/// [`deploy_asi`], with the trash an old `<name>.asi.bak` is moved to (`None` = the app's trash).
+fn deploy_asi_with_trash(args: DeployAsiArgs, trash: Option<&Path>) -> Result<DeployResult, String> {
     if !VALID_TARGETS.contains(&args.target.as_str()) {
         return Err(format!(
             "Invalid ASI target '{}': expected one of {:?}",
@@ -72,9 +77,15 @@ pub fn deploy_asi(args: DeployAsiArgs) -> Result<DeployResult, String> {
         let name = basename(rel);
         let dest = target_dir.join(name);
 
-        // Back up an existing file before overwriting it.
+        // Back up an existing file before overwriting it. An older backup in the way goes to the
+        // recoverable trash first, so it is kept and never stops the deploy.
         if dest.exists() {
             let backup = dest.with_extension("asi.bak");
+            if backup.exists() {
+                crate::commands::managed::trash::discard(&backup, trash).map_err(|e| {
+                    format!("Failed to move the old {} to the trash: {e}", backup.display())
+                })?;
+            }
             std::fs::rename(&dest, &backup)
                 .map_err(|e| format!("Failed to back up {}: {e}", dest.display()))?;
             backed_up.push(name.to_string());
@@ -150,4 +161,59 @@ pub fn trash_paths(paths: Vec<String>, permanent: bool) -> Result<TrashResult, S
         missing,
         trash_dir: dir.map(|d| dir_string(&d)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn files_in(dir: &Path) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                (name, std::fs::read_to_string(&p).unwrap())
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn an_old_asi_backup_in_the_way_is_trashed_and_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path().join("game");
+        let scripts = game.join("scripts");
+        let staged = tmp.path().join("staged");
+        let trash = tmp.path().join("trash");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("hook.asi"), "ours").unwrap();
+        std::fs::write(scripts.join("hook.asi"), "foreign v2").unwrap();
+        std::fs::write(scripts.join("hook.asi.bak"), "foreign v1").unwrap();
+
+        let result = deploy_asi_with_trash(
+            DeployAsiArgs {
+                mod_root: staged.to_string_lossy().to_string(),
+                asi_files: vec!["hook.asi".into()],
+                game_root: game.to_string_lossy().to_string(),
+                target: "scripts".into(),
+            },
+            Some(&trash),
+        )
+        .unwrap();
+
+        assert_eq!(result.deployed, vec!["hook.asi".to_string()]);
+        assert_eq!(result.backed_up, vec!["hook.asi".to_string()]);
+        assert_eq!(
+            files_in(&scripts),
+            vec![
+                ("hook.asi".to_string(), "ours".to_string()),
+                ("hook.asi.bak".to_string(), "foreign v2".to_string()),
+            ]
+        );
+        let trashed: Vec<String> = files_in(&trash).into_iter().map(|(_, body)| body).collect();
+        assert_eq!(trashed, vec!["foreign v1".to_string()]);
+    }
 }
