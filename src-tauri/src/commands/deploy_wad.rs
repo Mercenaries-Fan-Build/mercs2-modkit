@@ -39,7 +39,8 @@
 //! the other way.
 //!
 //! On the file half, a displaced foreign file is moved to `<name>.bak` beside it and recorded with the placement that displaced it, removal moves modkit's
-//! file to the recoverable trash, and the displaced file is then moved back.
+//! file to the recoverable trash, and the displaced file is then moved back. A `<name>.bak` already
+//! in the way is moved to the recoverable trash first, so it never stops a deploy.
 //!
 //! A `.bak` that is gone cannot be moved back, and every deploy and uninstall would stop on it, so
 //! both refuse up front, before anything moves, while one is listed ([`lost_displaced_backups`]).
@@ -510,22 +511,18 @@ fn existing_at(dest: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// Move a pre-existing file to `<name>.bak` beside it. An existing `.bak` is somebody's backup, so
-/// finding one is an error and it is left as it is.
-fn displace(existing: &Path) -> Result<DisplacedFile, String> {
+/// Move a pre-existing file to `<name>.bak` beside it. A `.bak` already there is replaced: it is
+/// moved to the recoverable trash at `trash` first, so its bytes are kept and the deploy goes on.
+fn displace(existing: &Path, trash: &Path) -> Result<DisplacedFile, String> {
     let name = existing
         .file_name()
         .ok_or_else(|| format!("{} has no file name", existing.display()))?
         .to_string_lossy()
         .to_string();
     let backup = existing.with_file_name(format!("{name}.bak"));
-    if existing_at(&backup)?.is_some() {
-        return Err(format!(
-            "{} is in the way and {} already exists, so it cannot be backed up. Move one of them \
-             out of the game folder and deploy again.",
-            existing.display(),
-            backup.display()
-        ));
+    if let Some(old) = existing_at(&backup)? {
+        crate::commands::managed::trash::discard(&old, Some(trash))
+            .map_err(|e| format!("moving the old {} to the trash: {e}", old.display()))?;
     }
     std::fs::rename(existing, &backup)
         .map_err(|e| format!("backing up {}: {e}", existing.display()))?;
@@ -611,6 +608,7 @@ fn place(
     dest: &Path,
     relative: &str,
     sha256: &str,
+    trash: &Path,
     outcome: &mut PlacementOutcome,
 ) -> Result<(String, Option<DisplacedFile>), String> {
     if let Some(parent) = dest.parent() {
@@ -621,7 +619,7 @@ fn place(
     // `<name>.bak`, the way `deploy_asi` treats a foreign plugin, so its bytes are kept.
     let displaced = match existing_at(dest)? {
         Some(existing) => {
-            let displaced = displace(&existing)?;
+            let displaced = displace(&existing, trash)?;
             outcome.backed_up.push(relative.to_string());
             Some(displaced)
         }
@@ -667,6 +665,7 @@ fn install_placements(
             &dest,
             &relative,
             &file.sha256,
+            &store.trash,
             &mut outcome,
         )?;
         outcome.placed.push(PlacedFile {
@@ -697,7 +696,8 @@ fn install_placements(
             ));
         }
         let dest = game_path(game_root, &copy.to);
-        let (sha256, displaced) = place(&source, &dest, &copy.to, &copy.sha256, &mut outcome)?;
+        let (sha256, displaced) =
+            place(&source, &dest, &copy.to, &copy.sha256, &store.trash, &mut outcome)?;
         outcome.placed.push(PlacedFile {
             abs_path: dest.to_string_lossy().to_string(),
             relative: copy.to.clone(),
@@ -1332,6 +1332,41 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(game.join("scripts/hook.asi")).unwrap(),
             "ours"
+        );
+    }
+
+    /// A `.bak` already beside the foreign file never stops the deploy: it goes to the trash, the
+    /// foreign file becomes the new `.bak`, and uninstall moves that one back.
+    #[test]
+    fn an_old_backup_in_the_way_is_trashed_and_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (build, game) = (tmp.path().join("build"), tmp.path().join("game"));
+        std::fs::create_dir_all(game.join("scripts")).unwrap();
+        std::fs::write(game.join("scripts/hook.asi"), "foreign v2").unwrap();
+        std::fs::write(game.join("scripts/Hook.asi.BAK"), "foreign v1").unwrap();
+
+        let s = store(tmp.path());
+        let staged = [stage(&build, "scripts/hook.asi", "ours", "S")];
+        let out = install_placements(&s, &staged, &[], &game, "scripts").unwrap();
+
+        assert_eq!(out.backed_up, vec!["scripts/hook.asi".to_string()]);
+        assert_eq!(names_in(&game.join("scripts")), vec!["hook.asi", "hook.asi.bak"]);
+        assert_eq!(
+            std::fs::read_to_string(game.join("scripts/hook.asi.bak")).unwrap(),
+            "foreign v2"
+        );
+        assert_eq!(std::fs::read_to_string(game.join("scripts/hook.asi")).unwrap(), "ours");
+        let trashed: Vec<String> = std::fs::read_dir(&s.trash)
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(trashed, vec!["foreign v1".to_string()]);
+
+        uninstall_placements(&s).unwrap();
+        assert_eq!(names_in(&game.join("scripts")), vec!["hook.asi"]);
+        assert_eq!(
+            std::fs::read_to_string(game.join("scripts/hook.asi")).unwrap(),
+            "foreign v2"
         );
     }
 
