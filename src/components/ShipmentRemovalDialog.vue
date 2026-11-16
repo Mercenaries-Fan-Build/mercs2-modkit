@@ -4,6 +4,9 @@
  * player chose, every Shipment the cascade takes with the requirement that pulls it in, and the
  * dependencies nothing will require any more. Rows whose folders are missing are all removed
  * together. One confirmation removes exactly that list; Cancel removes nothing.
+ *
+ * Removal is never refused: when the chain can't be worked out, the plan removes the chosen
+ * Shipment alone and `dependents_unknown` says why, shown here before the player confirms.
  */
 import { computed } from "vue";
 import { storeToRefs } from "pinia";
@@ -48,6 +51,12 @@ function requirement(p: PulledBy): string {
         <strong class="text-zinc-200">{{ plan.removed.name }}</strong>
         will be removed from the Library. Its staged files go to Modkit's trash.
       </p>
+      <div
+        v-if="plan.dependents_unknown"
+        class="mt-3 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-amber-200"
+      >
+        <p class="whitespace-pre-line">{{ plan.dependents_unknown }}</p>
+      </div>
       <div
         v-if="plan.missing_too.length"
         class="mt-3 rounded-lg border border-red-600/30 bg-red-500/10 px-3 py-2 text-red-200"

@@ -940,6 +940,11 @@ export interface ShipmentRemovalPlan {
   cascade: CascadedShipment[];
   /** Dependencies nothing will require any more. */
   orphans: ShipmentRef[];
+  /**
+   * Why what else needs `removed` could not be worked out (qm preflight could not run, or other
+   * rows' files are missing). Removal is never refused for it: the plan then removes `removed` alone.
+   */
+  dependents_unknown: string | null;
 }
 
 /**
