@@ -66,12 +66,20 @@ async function removeSource(repository: string) {
   }
 }
 
-onMounted(() => {
-  if (store.catalog.length === 0) store.fetchCatalog();
-  if (store.registryMods.length === 0) store.fetchRegistry();
-  // One handed over before this view opened. After the fetches, which clear store.error as
-  // they start.
-  takeMarketLink(store, install);
+// The lists this view loads on opening have finished loading. Until then a handed-over deep
+// link waits: the loads share `store.busy` with an install, and the first to finish would clear it
+// mid-install.
+const loaded = ref(false);
+
+onMounted(async () => {
+  const loads: Promise<void>[] = [];
+  if (store.catalog.length === 0) loads.push(store.fetchCatalog());
+  if (store.registryMods.length === 0) loads.push(store.fetchRegistry());
+  await Promise.all(loads);
+  loaded.value = true;
+  // One handed over before the loads finished. After them, so their clearing of store.error at
+  // the start, and their `busy`, are behind it.
+  takeMarketLink(store, install, working.value !== null);
 });
 
 /**
@@ -98,10 +106,12 @@ async function install(slug: string, version?: string) {
 
 // A deep link handed over by the shell: an `install` link (mercs.ink's "Install with Modkit")
 // runs through the same path as the Install button; a refused URL is reported here. This takes a
-// link handed over while the view is open; onMounted takes one handed over before it opened.
+// link handed over once the view has loaded; onMounted takes one handed over before that.
 watch(
   () => store.pendingMarketLink,
-  () => takeMarketLink(store, install),
+  () => {
+    if (loaded.value) takeMarketLink(store, install, working.value !== null);
+  },
 );
 
 function keyOf(item: CatalogMod): string {
