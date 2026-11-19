@@ -34,14 +34,26 @@ export async function handleDeepLink(link: DeepLink, store: Store, push: Push): 
  * The Mod Market's side: take the link handed over in `store.pendingMarketLink`, if any. An
  * `install` link goes to `install` (the Install button's own path; `version` absent is the
  * latest); a refused URL becomes `store.error`, naming it and what was wrong.
+ *
+ * An `install` link that arrives while the view is `installing`, or while `store.busy` (which
+ * disables the Install button), is refused with a `store.error` naming it, not run alongside.
  */
 export function takeMarketLink(
   store: Store,
   install: (slug: string, version?: string) => unknown,
+  installing: boolean,
 ): void {
   const link: MarketLink | null = store.pendingMarketLink;
   if (!link) return;
   store.pendingMarketLink = null;
-  if (link.kind === "install") install(link.slug, link.version ?? undefined);
-  else store.error = `Modkit can't open ${link.url}: ${link.reason}.`;
+  if (link.kind === "invalid") {
+    store.error = `Modkit can't open ${link.url}: ${link.reason}.`;
+  } else if (installing || store.busy) {
+    const release = link.version ? `${link.slug} ${link.version}` : link.slug;
+    store.error =
+      `Modkit didn't install ${release}: it is still busy with another install or task. ` +
+      "Open the link again when that finishes.";
+  } else {
+    install(link.slug, link.version ?? undefined);
+  }
 }
