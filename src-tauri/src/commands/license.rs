@@ -179,9 +179,12 @@ fn find_signals(reg: &impl RegistryView) -> Signals {
     // and, for a 32-bit-written key, the WOW6432Node view.
     let rel = pointer.trim_start_matches('\\');
     let mut ergc_candidates = vec![format!(r"HKLM\{rel}")];
+    // Registry paths are case-insensitive, so `software\…` counts too.
+    const SOFTWARE: &str = "Software\\";
     if let Some(sub) = rel
-        .strip_prefix("Software\\")
-        .or_else(|| rel.strip_prefix("SOFTWARE\\"))
+        .get(..SOFTWARE.len())
+        .filter(|head| head.eq_ignore_ascii_case(SOFTWARE))
+        .map(|_| &rel[SOFTWARE.len()..])
     {
         ergc_candidates.push(format!(r"HKLM\SOFTWARE\WOW6432Node\{sub}"));
     }
@@ -557,17 +560,17 @@ fn parse_hex_bytes(s: &str) -> Result<bool, String> {
 /// Decode a Wine-escaped string up to the unescaped `end`, returning it and the
 /// text after `end`. Wine's escapes (`server/unicode.c`, `dump_strW` /
 /// `parse_strW`): `\a \b \e \f \n \r \t \v`, `\x` + 1–4 hex digits (a UTF-16 code
-/// unit, so pairs encode surrogates), `\` + 1–3 octal digits, and `\` before any
-/// other character stands for that character (`\\`, `\"`, `\]`).
+/// unit, so pairs encode surrogates), `\` + 1–3 octal digits, and `\\`, `\"`,
+/// `\[`, `\]` for the backslash and the delimiters. Any other escape is an error.
+/// Registry strings are UTF-16 and may hold unpaired surrogates; those decode to
+/// U+FFFD, which no key or value name the licence rule looks for contains.
 #[cfg(any(not(target_os = "windows"), test))]
 fn unescape(s: &str, end: char) -> Result<(String, &str), String> {
     let mut units: Vec<u16> = Vec::new();
     let mut chars = s.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         if c == end {
-            let text = String::from_utf16(&units)
-                .map_err(|_| format!("an escaped string that is not valid UTF-16: {s}"))?;
-            return Ok((text, &s[i + c.len_utf8()..]));
+            return Ok((String::from_utf16_lossy(&units), &s[i + c.len_utf8()..]));
         }
         if c != '\\' {
             let mut buf = [0u16; 2];
@@ -617,11 +620,8 @@ fn unescape(s: &str, end: char) -> Result<(String, &str), String> {
                 }
                 v
             }
-            other => {
-                let mut buf = [0u16; 2];
-                units.extend_from_slice(other.encode_utf16(&mut buf));
-                continue;
-            }
+            '\\' | '"' | '[' | ']' => e as u16,
+            other => return Err(format!("unknown escape `\\{other}`: {s}")),
         };
         units.push(unit);
     }
@@ -692,12 +692,10 @@ fn detect_license_in_prefix(prefix: &Path, layout: PrefixLayout) -> Result<Licen
     };
     match std::fs::metadata(&dir) {
         Ok(m) if m.is_dir() => {}
-        Ok(_) => return Err(format!("{} is not a folder, so it is not a {kind}.", dir.display())),
+        Ok(_) => return Err(format!("{} is not a folder.", dir.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(not_found(format!(
-                "The {kind} Modkit launches the game in has not been created yet ({} does not \
-                 exist), so there is no registry to check for an EA CD-Key or SecuROM \
-                 activation, and the crack path applies.",
+                "No {kind} yet ({}), so no licence to check.",
                 dir.display()
             )))
         }
@@ -712,43 +710,22 @@ fn detect_license_in_prefix(prefix: &Path, layout: PrefixLayout) -> Result<Licen
     };
     if registry.system.is_none() && registry.user.is_none() {
         return Ok(not_found(format!(
-            "The {kind} Modkit launches the game in ({}) has no registry files yet ({} and {} do \
-             not exist), so there is no registry to check for an EA CD-Key or SecuROM \
-             activation, and the crack path applies.",
-            dir.display(),
-            system_path.display(),
-            user_path.display()
+            "The {kind} ({}) has no registry files yet, so no licence to check.",
+            dir.display()
         )));
     }
 
     let signals = find_signals(&registry);
-    let place = format!(
-        "in the registry of the {kind} Modkit launches the game in ({})",
-        dir.display()
-    );
+    let place = format!("the {kind} ({})", dir.display());
     let mut detail = match (signals.cd_key_present, signals.securom_activated()) {
-        (true, true) => format!(
-            "Registered (EA CD-Key present) and SecuROM-activated {place} — licensed. Setup \
-             uses the dxwrapper path and leaves your exe untouched."
-        ),
-        (true, false) => format!(
-            "Registered (EA CD-Key present) {place} — treated as licensed. The stock exe may \
-             still need SecuROM activation to run, but Setup won't crack it; use the dxwrapper \
-             path."
-        ),
-        (false, true) => format!(
-            "SecuROM activation present {place} — licensed. Setup uses the dxwrapper path and \
-             leaves your exe untouched."
-        ),
-        (false, false) => format!(
-            "No EA CD-Key and no SecuROM activation found {place}, so the crack path applies. \
-             (A DRM-free build never needs either; you can still choose the dxwrapper path \
-             manually.)"
-        ),
+        (true, true) => format!("Licensed: EA CD-Key and SecuROM activation found in {place}."),
+        (true, false) => format!("Licensed: EA CD-Key found in {place}."),
+        (false, true) => format!("Licensed: SecuROM activation found in {place}."),
+        (false, false) => format!("No EA CD-Key or SecuROM activation in {place}."),
     };
     for (path, hive) in [(&system_path, &registry.system), (&user_path, &registry.user)] {
         if hive.is_none() {
-            detail.push_str(&format!(" {} does not exist, so it was not checked.", path.display()));
+            detail.push_str(&format!(" {} is missing.", path.display()));
         }
     }
 
@@ -831,7 +808,7 @@ mod tests {
             s.keys_found,
             [r"HKLM\SOFTWARE\WOW6432Node\Electronic Arts\EA Games\Mercenaries 2 World in Flames\ergc"]
         );
-        assert!(s.detail.starts_with("Registered (EA CD-Key present) in the registry of the Wine prefix"));
+        assert!(s.detail.starts_with("Licensed: EA CD-Key found in the Wine prefix ("), "{}", s.detail);
     }
 
     #[test]
@@ -877,7 +854,7 @@ mod tests {
         assert!(s.user_data_present && s.licensed);
         assert!(!s.cd_key_present);
         assert_eq!(s.keys_found, [r"HKCU\SOFTWARE\SecuROM\UserData"]);
-        assert!(s.detail.starts_with("SecuROM activation present in the registry of the Wine prefix"));
+        assert!(s.detail.starts_with("Licensed: SecuROM activation found in the Wine prefix ("), "{}", s.detail);
     }
 
     #[test]
@@ -915,7 +892,11 @@ mod tests {
         let user = "[software\\\\securom\\\\userdata] 1700000000\n\"SECUROM_V7_01.DAT\"=hex:01\n\n";
         let s = detect_wine(Some(system), Some(user));
         assert!(s.cd_key_present && s.user_data_present && s.licensed);
-        assert!(s.detail.starts_with("Registered (EA CD-Key present) and SecuROM-activated in the registry"));
+        assert!(
+            s.detail.starts_with("Licensed: EA CD-Key and SecuROM activation found in the Wine prefix ("),
+            "{}",
+            s.detail
+        );
     }
 
     #[test]
@@ -931,13 +912,42 @@ mod tests {
         assert!(s.keys_found.is_empty());
         assert_eq!(
             s.detail,
-            format!(
-                "No EA CD-Key and no SecuROM activation found in the registry of the Wine prefix \
-                 Modkit launches the game in ({}), so the crack path applies. (A DRM-free build \
-                 never needs either; you can still choose the dxwrapper path manually.)",
-                tmp.path().display()
-            )
+            format!("No EA CD-Key or SecuROM activation in the Wine prefix ({}).", tmp.path().display())
         );
+    }
+
+    #[test]
+    fn a_lowercase_registration_pointer_also_resolves_in_wow6432node() {
+        let system = "[Software\\\\Wow6432Node\\\\EA Games\\\\Mercenaries 2 World in Flames] 1700000000\n\
+            \"Registration\"=\"software\\\\Electronic Arts\\\\EA Games\\\\Mercenaries 2 World in Flames\\\\ergc\"\n\n\
+            [Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Games\\\\Mercenaries 2 World in Flames\\\\ergc] 1700000000\n\
+            @=\"ANEEQ-1234\"\n\n";
+        let s = detect_wine(Some(system), Some(""));
+        assert!(s.cd_key_present && s.licensed);
+        assert_eq!(
+            s.keys_found,
+            [r"HKLM\SOFTWARE\WOW6432Node\Electronic Arts\EA Games\Mercenaries 2 World in Flames\ergc"]
+        );
+    }
+
+    #[test]
+    fn a_lone_surrogate_in_an_unrelated_value_still_parses() {
+        let system = "[Software\\\\Fonts\\\\\\xd83c] 1700000000\n\
+            \"\\xdf0e name\"=\"data \\xd800 alone\"\n\n\
+            [Software\\\\SecuROM\\\\UserData] 1700000000\n\"securom_v7_01.dat\"=hex:01\n\n";
+        let s = detect_wine(Some(system), Some(""));
+        assert!(s.user_data_present && s.licensed);
+        let hive = parse_wine_hive(&format!("{HEADER_SYSTEM}{system}")).unwrap();
+        let values = hive.values("software\\fonts\\\u{fffd}").unwrap();
+        assert_eq!(values[0].name, "\u{fffd} name");
+        assert_eq!(values[0].sz.as_deref(), Some("data \u{fffd} alone"));
+    }
+
+    #[test]
+    fn an_unknown_escape_fails() {
+        let text = format!("{HEADER_SYSTEM}[Software\\\\Fonts] 1700000000\n\"a\"=\"\\q\"\n");
+        let err = parse_wine_hive(&text).unwrap_err();
+        assert!(err.starts_with("line 7: unknown escape `\\q`"), "{err}");
     }
 
     #[test]
@@ -947,10 +957,13 @@ mod tests {
         prefix_with(&tmp.path().join("pfx"), Some(""), Some(user));
         let proton = detect_license_in_prefix(tmp.path(), PrefixLayout::Proton).unwrap();
         assert!(proton.user_data_present && proton.licensed);
-        assert!(proton.detail.contains(&format!(
-            "in the registry of the Proton prefix Modkit launches the game in ({})",
-            tmp.path().join("pfx").display()
-        )));
+        assert_eq!(
+            proton.detail,
+            format!(
+                "Licensed: SecuROM activation found in the Proton prefix ({}).",
+                tmp.path().join("pfx").display()
+            )
+        );
         // Read as a plain Wine prefix, the same folder has no registry files at its root.
         let wine = detect_license_in_prefix(tmp.path(), PrefixLayout::Wine).unwrap();
         assert!(!wine.licensed);
@@ -966,7 +979,7 @@ mod tests {
         // Read as Proton, there is no `pfx/` yet.
         let proton = detect_license_in_prefix(tmp.path(), PrefixLayout::Proton).unwrap();
         assert!(!proton.licensed);
-        assert!(proton.detail.contains("has not been created yet"));
+        assert!(proton.detail.starts_with("No Proton prefix yet"), "{}", proton.detail);
     }
 
     #[test]
@@ -977,15 +990,13 @@ mod tests {
         assert!(s.applicable && !s.licensed);
         assert_eq!(
             s.detail,
-            format!(
-                "The Wine prefix Modkit launches the game in has not been created yet ({} does \
-                 not exist), so there is no registry to check for an EA CD-Key or SecuROM \
-                 activation, and the crack path applies.",
-                prefix.display()
-            )
+            format!("No Wine prefix yet ({}), so no licence to check.", prefix.display())
         );
         let s = detect_license_in_prefix(&prefix, PrefixLayout::Proton).unwrap();
-        assert!(s.detail.contains(&format!("({} does not exist)", prefix.join("pfx").display())));
+        assert_eq!(
+            s.detail,
+            format!("No Proton prefix yet ({}), so no licence to check.", prefix.join("pfx").display())
+        );
     }
 
     #[test]
@@ -993,11 +1004,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = detect_license_in_prefix(tmp.path(), PrefixLayout::Wine).unwrap();
         assert!(s.applicable && !s.licensed);
-        assert!(s.detail.contains(&format!(
-            "({} and {} do not exist)",
-            tmp.path().join("system.reg").display(),
-            tmp.path().join("user.reg").display()
-        )));
+        assert_eq!(
+            s.detail,
+            format!(
+                "The Wine prefix ({}) has no registry files yet, so no licence to check.",
+                tmp.path().display()
+            )
+        );
     }
 
     #[test]
@@ -1007,10 +1020,14 @@ mod tests {
         prefix_with(tmp.path(), None, Some(user));
         let s = detect_license_in_prefix(tmp.path(), PrefixLayout::Wine).unwrap();
         assert!(s.user_data_present && s.licensed);
-        assert!(s.detail.ends_with(&format!(
-            " {} does not exist, so it was not checked.",
-            tmp.path().join("system.reg").display()
-        )));
+        assert_eq!(
+            s.detail,
+            format!(
+                "Licensed: SecuROM activation found in the Wine prefix ({}). {} is missing.",
+                tmp.path().display(),
+                tmp.path().join("system.reg").display()
+            )
+        );
     }
 
     #[test]
