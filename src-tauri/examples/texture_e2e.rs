@@ -54,7 +54,7 @@ fn main() {
     assert_eq!(block.aset_entries.len(), 1);
     assert_eq!(block.aset_entries[0].asset_hash, t.asset_hash);
 
-    let wad = build_patch_wad_multi(&[block], 0, Some(0), &FFCS_CERT_BLOB).expect("assemble");
+    let wad = build_patch_wad_multi(&[block], 0, &FFCS_CERT_BLOB).expect("assemble");
     std::fs::write(out, &wad).expect("write");
     println!("\n  wrote {out} ({} bytes)", wad.len());
     println!("\nOK — texture replaced in-place; container structure preserved.");
