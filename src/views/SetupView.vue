@@ -111,14 +111,9 @@ async function runDxwrapper() {
       <div v-else class="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/10 p-4">
         <p class="text-sm font-medium text-amber-200">Crack path</p>
         <p class="mt-1 text-sm text-amber-200/80">
-          <template v-if="licenseError">
-            The licence check failed, so no EA CD-Key or SecuROM activation was confirmed.
-          </template>
-          <template v-else-if="!license">
-            The licence check hasn't finished, so no EA CD-Key or SecuROM activation is
-            confirmed.
-          </template>
-          <template v-else-if="license.licensed">You chose the crack path for this copy.</template>
+          <template v-if="licenseError">Licence check failed.</template>
+          <template v-else-if="!license">Checking for a licence…</template>
+          <template v-else-if="license.licensed">You chose the crack path.</template>
           <template v-else>{{ license.detail }}</template>
           This copy is set up by applying the SecuROM bypass to the exe.
         </p>
