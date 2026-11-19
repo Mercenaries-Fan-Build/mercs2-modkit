@@ -77,13 +77,13 @@ use std::sync::Mutex;
 
 use mercs2_formats::patch_wad::read_patch_wad;
 use serde::{Deserialize, Serialize};
-use tauri::Window;
+use tauri::{Emitter, Window};
 
 use super::data_files::{self, DataFile, DataFileStore};
 use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
 use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, PlanExt, REQUEST_FILE};
 use super::placement::{self, StagedDataFile, StagedFile, StreamCopy};
-use super::proc::NoWindow;
+use super::proc::{run_streaming, NoWindow};
 use super::toolchain::{ensure_tool, installed_tool_path};
 use crate::models::claim::ClaimGroup;
 use crate::models::origin::{Origin, MODKIT_WARDROBE_ID};
@@ -501,14 +501,31 @@ pub(crate) fn work_dir(sub: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The event each line qm prints is emitted as while it runs, so a build that downloads or converts
+/// for minutes shows what it is doing.
+pub(crate) const QM_OUTPUT_EVENT: &str = "qm-output";
+
+/// The payload of [`QM_OUTPUT_EVENT`]: one line qm printed, on stdout or stderr.
+#[derive(Clone, Serialize)]
+struct QmOutputLine<'a> {
+    line: &'a str,
+}
+
+/// Emit one line qm printed as [`QM_OUTPUT_EVENT`].
+pub(crate) fn emit_qm_line(window: &Window, line: &str) {
+    let _ = window.emit(QM_OUTPUT_EVENT, QmOutputLine { line });
+}
+
 /// Run one `qm` subcommand, returning a readable error on any nonzero exit. `qm` prints findings to
 /// stderr and exits 1 (findings) / 2 (could not run); either way we refuse rather than ship a WAD
-/// built from a Shipment qm rejected.
-fn run_qm(qm: &Path, args: &[&std::ffi::OsStr], what: &str) -> Result<(), String> {
-    let output = Command::new(qm)
-        .args(args)
-        .no_window()
-        .output()
+/// built from a Shipment qm rejected. Each line qm prints is handed to `on_line` as it arrives.
+fn run_qm(
+    qm: &Path,
+    args: &[&std::ffi::OsStr],
+    what: &str,
+    on_line: &(dyn Fn(&str) + Sync),
+) -> Result<(), String> {
+    let output = run_streaming(Command::new(qm).args(args).no_window(), &mut |line| on_line(line))
         .map_err(|e| format!("running {what}: {e}"))?;
     if output.status.success() {
         return Ok(());
@@ -709,9 +726,11 @@ pub(crate) async fn preflight_rows(
     game_path: &str,
 ) -> Result<super::load_plan::LoadPlan, String> {
     let game_arg = game_arg_for(game_path)?;
-    let qm = qm_tool(window).await?;
+    let qm = qm_tool(window.clone()).await?;
     let dir = work_dir("preflight")?;
-    super::load_plan::run_preflight(&qm, rows, &game_arg, &dir)
+    super::load_plan::run_preflight(&qm, rows, &game_arg, &dir, &mut |line| {
+        emit_qm_line(&window, line)
+    })
 }
 
 /// Build each staged Shipment with `qm`, link their Lua across the whole set, and return the claim
@@ -725,12 +744,15 @@ pub(crate) async fn preflight_rows(
 /// downloaded. The set is checked against it twice: before preflight at the versions recorded at
 /// install, and after preflight at the versions qm read. Any confirmed report refuses the build,
 /// in one refusal that also carries preflight's findings when preflight refused.
+///
+/// Every line qm prints is handed to `on_qm_line` while it runs.
 pub async fn shipment_groups(
     qm: &Path,
     shipments: &[ShipmentRef],
     game_path: &str,
     corpus_hint: Option<&Path>,
     incompatibilities: Option<&IncompatibilityIndex>,
+    on_qm_line: &(dyn Fn(&str) + Sync),
 ) -> Result<ShipmentBuild, String> {
     if shipments.is_empty() {
         return Ok(ShipmentBuild::default());
@@ -760,7 +782,9 @@ pub async fn shipment_groups(
         None => Vec::new(),
     };
 
-    let plan = super::load_plan::run_preflight(qm, shipments, &game_arg, &preflight_dir)?;
+    let plan = super::load_plan::run_preflight(qm, shipments, &game_arg, &preflight_dir, &mut |line| {
+        on_qm_line(line)
+    })?;
     if let Err(refused) = plan.refuse_unless_ok(shipments) {
         return Err(match incompatibilities {
             Some(index) => incompatibility::with_preflight_refusal(refused, index, shipments, &before),
@@ -835,7 +859,7 @@ pub async fn shipment_groups(
         ];
         args.extend(corpus_args.iter().cloned());
         let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
-        run_qm(qm, &arg_refs, &format!("qm build for \"{}\"", ship.name))?;
+        run_qm(qm, &arg_refs, &format!("qm build for \"{}\"", ship.name), on_qm_line)?;
 
         let output = placement::read_output(&out, &ship.name)?;
         // A Shipment whose only contributions are `native_hook` / `place_file` emits loose files
@@ -881,7 +905,7 @@ pub async fn shipment_groups(
     ];
     link_args.extend(corpus_args.iter().cloned());
     let link_refs: Vec<&std::ffi::OsStr> = link_args.iter().map(|a| a.as_os_str()).collect();
-    run_qm(qm, &link_refs, "qm link")?;
+    run_qm(qm, &link_refs, "qm link", on_qm_line)?;
 
     // Link writes its own plan beside `placement.json`. It must agree with preflight's.
     let link_plan = read_link_plan(&link_out, &request)?;
