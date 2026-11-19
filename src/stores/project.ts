@@ -34,6 +34,7 @@ import type {
   ModelVariant,
   ModkitUpdate,
   MercsInkInstall,
+  MarketLink,
   DependencyInstall,
   DependencyPlan,
   RemovalOutcome,
@@ -271,6 +272,8 @@ interface ProjectState {
   registryStale: boolean;
   /** Why it is stale, in the user's words. Shown as a banner, not an error. */
   registryWarning: string | null;
+  /** A deep link handed to the Mod Market, which installs it or reports why it was refused. */
+  pendingMarketLink: MarketLink | null;
   // User-added custom mod-source repositories (persisted on disk via Rust).
   customSources: RepoSource[];
   // modkit self-update (vs its GitHub releases)
@@ -427,6 +430,7 @@ export const useProjectStore = defineStore("project", {
     registryMods: [],
     registryStale: false,
     registryWarning: null,
+    pendingMarketLink: null,
     wardrobeModels: [],
     wardrobe: [],
     prebuilt: [],
@@ -882,7 +886,7 @@ export const useProjectStore = defineStore("project", {
      * `version` picks a release; omit it for the latest.
      */
     async installFromRegistry(
-      item: RegistryMod,
+      slug: string,
       version?: string,
     ): Promise<MercsInkInstall> {
       this.assertShipmentsWritable();
@@ -892,7 +896,7 @@ export const useProjectStore = defineStore("project", {
         // The resolver reads the installed rows' requirements through `qm preflight`, so it
         // needs the library and the game folder.
         const res = await invoke<MercsInkInstall>("install_mercsink_shipment", {
-          slug: item.slug,
+          slug,
           version: version ?? null,
           installed: this.shipments,
           gamePath: this.gamePath ?? "",
