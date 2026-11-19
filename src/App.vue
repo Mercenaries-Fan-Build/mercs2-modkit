@@ -53,7 +53,10 @@ onMounted(async () => {
 
   // Deep link: drain a cold-start handoff (the link that launched us), then listen for live ones
   // that arrive while the window is already open.
-  const pending = await invoke<DeepLink | null>("take_pending_deep_link").catch(() => null);
+  const pending = await invoke<DeepLink | null>("take_pending_deep_link").catch((e) => {
+    store.error = `Couldn't read the link Modkit was opened with: ${e}`;
+    return null;
+  });
   if (pending) await openDeepLink(pending);
   await listen<DeepLink>("deep-link", (e) => openDeepLink(e.payload));
 });
