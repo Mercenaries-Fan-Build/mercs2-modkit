@@ -9,7 +9,8 @@ import ExeUpdatePanel from "../components/ExeUpdatePanel.vue";
 import ErrorBanner from "../components/ErrorBanner.vue";
 
 const store = useProjectStore();
-const { gameInfo, busy, componentUpdates, pmcBbVersion, license } = storeToRefs(store);
+const { gameInfo, busy, componentUpdates, pmcBbVersion, license, licenseError } =
+  storeToRefs(store);
 
 const pmcBbUpdate = computed(() => componentUpdates.value["pmc_bb"]);
 
@@ -93,7 +94,7 @@ async function runDxwrapper() {
           <template v-if="launchExe?.kind === 'secu_rom'">
             {{
               license?.licensed
-                ? "A SecuROM activation was found on this machine, so your exe already passes DRM."
+                ? license.detail
                 : "Using the non-destructive path: dxwrapper loads mods next to an untouched exe."
             }}
           </template>
@@ -110,8 +111,16 @@ async function runDxwrapper() {
       <div v-else class="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/10 p-4">
         <p class="text-sm font-medium text-amber-200">Crack path</p>
         <p class="mt-1 text-sm text-amber-200/80">
-          No SecuROM activation was detected, so this copy is set up by applying the
-          SecuROM bypass to the exe.
+          <template v-if="licenseError">
+            The licence check failed, so no EA CD-Key or SecuROM activation was confirmed.
+          </template>
+          <template v-else-if="!license">
+            The licence check hasn't finished, so no EA CD-Key or SecuROM activation is
+            confirmed.
+          </template>
+          <template v-else-if="license.licensed">You chose the crack path for this copy.</template>
+          <template v-else>{{ license.detail }}</template>
+          This copy is set up by applying the SecuROM bypass to the exe.
         </p>
         <button
           class="mt-2 text-xs text-zinc-400 underline hover:text-zinc-200"
@@ -119,6 +128,15 @@ async function runDxwrapper() {
         >
           I own this copy (or it's DRM-free) — use dxwrapper instead, leave the exe alone
         </button>
+      </div>
+
+      <div
+        v-if="licenseError"
+        role="alert"
+        class="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+      >
+        <p class="font-medium">Licence check failed</p>
+        <p class="mt-1 whitespace-pre-wrap break-words">{{ licenseError }}</p>
       </div>
 
       <ProgressBar v-if="busy" indeterminate :label="stage" class="mt-4" />
