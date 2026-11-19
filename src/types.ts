@@ -1235,7 +1235,7 @@ export interface CrackResult {
  * Setup offers the non-destructive dxwrapper path instead of cracking the exe.
  */
 export interface LicenseStatus {
-  applicable: boolean; // false on non-Windows (activation lives in the Wine prefix)
+  applicable: boolean; // the check ran (macOS/Linux read the Wine/Proton prefix's registry files)
   licensed: boolean; // legally owned: CD-Key registered OR SecuROM-activated
   cdKeyPresent: boolean; // EA ergc CD-Key present (Mercs2-specific proof of purchase)
   licenseKeyPresent: boolean; // "License information - Do not delete!" present
