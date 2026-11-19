@@ -301,9 +301,12 @@ interface ProjectState {
   vcRedist: VcRedistStatus | null;
   // Matchmaking region registry status (null = not yet checked / N/A).
   region: RegionStatus | null;
-  // SecuROM activation / licensing status (null = not yet checked / N/A). When
+  // SecuROM activation / licensing status (null = not yet checked, or failed). When
   // licensed, Setup uses the dxwrapper path and leaves the exe untouched.
   license: LicenseStatus | null;
+  // Why the last licence check failed (e.g. a prefix registry file that can't be
+  // read); null when it succeeded or hasn't run.
+  licenseError: string | null;
   // The Region the user picked (persisted; null = the community pool default).
   preferredRegion: string | null;
   // Player saves + stored snapshots (Save backups view).
@@ -411,6 +414,7 @@ export const useProjectStore = defineStore("project", {
     vcRedist: null,
     region: null,
     license: null,
+    licenseError: null,
     preferredRegion: null,
     savesInfo: null,
     saveBackups: [],
@@ -1461,8 +1465,12 @@ export const useProjectStore = defineStore("project", {
     async checkLicense() {
       try {
         this.license = await invoke<LicenseStatus>("detect_license");
-      } catch {
-        /* leave any prior result in place */
+        this.licenseError = null;
+      } catch (e) {
+        // A failed check confirms nothing: drop any prior result and keep the
+        // reason for Setup to show.
+        this.license = null;
+        this.licenseError = String(e);
       }
     },
 
