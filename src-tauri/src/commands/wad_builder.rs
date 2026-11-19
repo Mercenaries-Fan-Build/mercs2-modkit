@@ -245,14 +245,18 @@ pub async fn assemble_patch_wad(
     let qm = if options.shipments.is_empty() {
         None
     } else {
-        Some(shipment::qm_tool(window).await?)
+        Some(shipment::qm_tool(window.clone()).await?)
     };
-    assemble(options, qm.as_deref()).await
+    assemble(options, qm.as_deref(), &|line| shipment::emit_qm_line(&window, line)).await
 }
 
 /// [`assemble_patch_wad`] with the qm binary already resolved. `qm` is required exactly when the
-/// build has Shipments.
-pub async fn assemble(options: BuildOptions, qm: Option<&Path>) -> Result<BuildResult, String> {
+/// build has Shipments; every line it prints is handed to `on_qm_line` while it runs.
+pub async fn assemble(
+    options: BuildOptions,
+    qm: Option<&Path>,
+    on_qm_line: &(dyn Fn(&str) + Sync),
+) -> Result<BuildResult, String> {
     let mut warnings: Vec<String> = Vec::new();
 
     // When any Shipment is staged, qm runs — so route the WARDROBE through qm too (as add_outfit
@@ -282,8 +286,15 @@ pub async fn assemble(options: BuildOptions, qm: Option<&Path>) -> Result<BuildR
         }
         let list = mercsink::load_incompatibility_list().await?;
         let qm = qm.ok_or("This build has Shipments and no qm binary was given.")?;
-        let built =
-            shipment::shipment_groups(qm, &ship_refs, game_path, None, list.index.as_ref()).await?;
+        let built = shipment::shipment_groups(
+            qm,
+            &ship_refs,
+            game_path,
+            None,
+            list.index.as_ref(),
+            on_qm_line,
+        )
+        .await?;
         groups.extend(built.groups);
         warnings.extend(built.warnings);
         placed_files = built.files;
