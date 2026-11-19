@@ -62,7 +62,7 @@ fn main() {
     );
 
     println!("\n== assembling the patch WAD ==");
-    let wad = build_patch_wad_multi(&[block], 0, Some(0), &FFCS_CERT_BLOB).expect("assemble");
+    let wad = build_patch_wad_multi(&[block], 0, &FFCS_CERT_BLOB).expect("assemble");
     std::fs::write(out, &wad).expect("write");
     println!("  wrote {} ({} bytes)", out, wad.len());
 

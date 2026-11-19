@@ -65,7 +65,8 @@ toml = "1"
 # engine's decompression buffer at a single 32 KB page), `validate_blocks` (one primary ASET
 # row per hash), `sges::compressed_len`, `scripts_block` (Lua editing), `texture::replace_body`,
 # and `load_plan`: the `load-plan.json` types qm writes, so Modkit parses qm's own definition.
-mercs2_formats = "6.0"
+# 6.0.2+: `build_patch_wad_multi` writes the CSUM meta the engine sizes its block-install ring from.
+mercs2_formats = "6.0.3"
 loadprobe = "2.4.1"
 
 # Lua 5.1 compiler emitting the game's exact bytecode dialect (float lua_Number, 32-bit
