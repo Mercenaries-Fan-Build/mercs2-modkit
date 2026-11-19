@@ -136,7 +136,7 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        build_patch_wad_multi(&blocks, 0, Some(0), &FFCS_CERT_BLOB).unwrap()
+        build_patch_wad_multi(&blocks, 0, &FFCS_CERT_BLOB).unwrap()
     }
 
     /// The headline: two independent community WADs merge into one that the engine can
@@ -158,7 +158,7 @@ mod tests {
 
         // The invariant that makes the engine's choice well-defined.
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
-        build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)
+        build_patch_wad_multi(&resolved.blocks, 0, &FFCS_CERT_BLOB)
             .expect("merged WAD assembles");
     }
 
@@ -203,7 +203,7 @@ mod tests {
         assert!(want_pages > 1);
         std::fs::write(
             &p,
-            build_patch_wad_multi(&[blk], 0, Some(0), &FFCS_CERT_BLOB).unwrap(),
+            build_patch_wad_multi(&[blk], 0, &FFCS_CERT_BLOB).unwrap(),
         )
         .unwrap();
 
@@ -228,7 +228,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             &p,
-            build_patch_wad_multi(&[blk], 0, Some(0), &FFCS_CERT_BLOB).unwrap(),
+            build_patch_wad_multi(&[blk], 0, &FFCS_CERT_BLOB).unwrap(),
         )
         .unwrap();
 
