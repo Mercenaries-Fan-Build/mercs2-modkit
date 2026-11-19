@@ -88,26 +88,74 @@ use super::toolchain::{ensure_tool, installed_tool_path};
 use crate::models::claim::ClaimGroup;
 use crate::models::origin::{Origin, MODKIT_WARDROBE_ID};
 
-/// A deep-link Shipment path that arrived before the frontend was listening (a cold start launched
-/// by the link). The webview drains it once via [`take_pending_shipment`]; live handoffs into an
-/// already-running app come through the `deep-link-shipment` event instead.
+/// A deep link that arrived before the frontend was listening (a cold start launched by the link).
+/// The webview drains it once via [`take_pending_deep_link`]; live handoffs into an
+/// already-running app come through the `deep-link` event instead.
 #[derive(Default)]
-pub struct PendingShipment(pub Mutex<Option<String>>);
+pub struct PendingDeepLink(pub Mutex<Option<DeepLink>>);
 
 /// Drain the buffered cold-start deep link, if any. Called once from the frontend on mount.
 #[tauri::command]
-pub fn take_pending_shipment(pending: tauri::State<'_, PendingShipment>) -> Option<String> {
+pub fn take_pending_deep_link(pending: tauri::State<'_, PendingDeepLink>) -> Option<DeepLink> {
     pending.0.lock().ok().and_then(|mut g| g.take())
 }
 
-/// Parse a `mercs2-modkit://ship?path=<percent-encoded>` deep link into the Shipment path it names.
-/// `None` for any other URL, so the caller can ignore unrelated schemes/paths.
-pub fn parse_ship_url(url: &str) -> Option<String> {
-    let query = url.strip_prefix("mercs2-modkit://ship?")?;
-    query
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("path="))
-        .map(percent_decode)
+/// What a `mercs2-modkit://` URL asks the app to do, as handed to the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeepLink {
+    /// `ship?path=<percent-encoded folder>`: the Workshop's "Send to Modkit" — stage that Shipment.
+    Ship { path: String },
+    /// `install?mod=<slug>&version=<version>`: mercs.ink's "Install with Modkit" — install that
+    /// release (`version` absent: the latest).
+    Install { slug: String, version: Option<String> },
+    /// A URL that is neither form, with what was wrong, so the app can say so.
+    Invalid { url: String, reason: String },
+}
+
+impl DeepLink {
+    /// [`parse_deep_link`], with a refusal carried as [`DeepLink::Invalid`].
+    pub fn from_url(url: &str) -> Self {
+        parse_deep_link(url).unwrap_or_else(|reason| DeepLink::Invalid { url: url.to_string(), reason })
+    }
+}
+
+/// Parse a `mercs2-modkit://ship?path=…` or `mercs2-modkit://install?mod=…&version=…` deep link.
+/// Query values are percent-decoded; keys other than the ones each form reads are ignored. The
+/// error says what is wrong with the URL.
+pub fn parse_deep_link(url: &str) -> Result<DeepLink, String> {
+    let rest = url
+        .strip_prefix("mercs2-modkit://")
+        .ok_or("it is not a mercs2-modkit:// link")?;
+    let (action, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let param = |key: &str| {
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| percent_decode(v))
+    };
+    // A browser may hand the link over with a `/` after the action.
+    match action.strip_suffix('/').unwrap_or(action) {
+        "ship" => match param("path") {
+            Some(path) if !path.is_empty() => Ok(DeepLink::Ship { path }),
+            Some(_) => Err("its path is empty".into()),
+            None => Err("it has no path".into()),
+        },
+        "install" => {
+            let slug = match param("mod") {
+                Some(slug) if !slug.is_empty() => slug,
+                Some(_) => return Err("its mod is empty".into()),
+                None => return Err("it has no mod to install".into()),
+            };
+            let version = match param("version") {
+                Some(v) if v.is_empty() => return Err("its version is empty".into()),
+                v => v,
+            };
+            Ok(DeepLink::Install { slug, version })
+        }
+        other => Err(format!("\"{other}\" is not an action Modkit knows (ship, install)")),
+    }
 }
 
 /// Inverse of the Workshop's tiny percent-encoder: turn `%XX` back into bytes (and, tolerantly, `+`
@@ -1359,12 +1407,98 @@ mod tests {
     fn parses_the_workshop_deep_link() {
         let url = "mercs2-modkit://ship?path=C%3A%5CUsers%5CAda%5CAppData%5CRoaming%5Cmercs2-modkit%5Cshipments%5CMy%20Mod";
         assert_eq!(
-            parse_ship_url(url).unwrap(),
-            r"C:\Users\Ada\AppData\Roaming\mercs2-modkit\shipments\My Mod"
+            parse_deep_link(url).unwrap(),
+            DeepLink::Ship { path: r"C:\Users\Ada\AppData\Roaming\mercs2-modkit\shipments\My Mod".into() }
         );
-        assert_eq!(parse_ship_url("mercs2-modkit://ship?path=/tmp/a"), Some("/tmp/a".into()));
-        assert_eq!(parse_ship_url("mercs2-modkit://other?x=1"), None);
-        assert_eq!(parse_ship_url("https://example.com"), None);
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://ship?path=/tmp/a"),
+            Ok(DeepLink::Ship { path: "/tmp/a".into() })
+        );
+        assert_eq!(parse_deep_link("mercs2-modkit://ship?x=1"), Err("it has no path".into()));
+        assert_eq!(parse_deep_link("mercs2-modkit://ship?path="), Err("its path is empty".into()));
+    }
+
+    /// mercs.ink's "Install with Modkit" link: `install?mod=<slug>&version=<version>`, both values
+    /// `rawurlencode`d.
+    #[test]
+    fn parses_the_mercsink_install_link() {
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://install?mod=vehicle-pack&version=1.2.0"),
+            Ok(DeepLink::Install { slug: "vehicle-pack".into(), version: Some("1.2.0".into()) })
+        );
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://install?mod=vehicle-pack"),
+            Ok(DeepLink::Install { slug: "vehicle-pack".into(), version: None })
+        );
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://install?version=2.0.0-rc.1%2Bbuild.5&mod=my%20mod%2Fpack"),
+            Ok(DeepLink::Install { slug: "my mod/pack".into(), version: Some("2.0.0-rc.1+build.5".into()) })
+        );
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://install/?mod=vehicle-pack"),
+            Ok(DeepLink::Install { slug: "vehicle-pack".into(), version: None })
+        );
+    }
+
+    #[test]
+    fn refuses_a_deep_link_it_cannot_act_on() {
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://install?version=1.0.0"),
+            Err("it has no mod to install".into())
+        );
+        assert_eq!(parse_deep_link("mercs2-modkit://install"), Err("it has no mod to install".into()));
+        assert_eq!(parse_deep_link("mercs2-modkit://install?mod="), Err("its mod is empty".into()));
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://install?mod=a&version="),
+            Err("its version is empty".into())
+        );
+        assert_eq!(
+            parse_deep_link("mercs2-modkit://other?x=1"),
+            Err("\"other\" is not an action Modkit knows (ship, install)".into())
+        );
+        assert_eq!(
+            parse_deep_link("https://example.com"),
+            Err("it is not a mercs2-modkit:// link".into())
+        );
+        assert_eq!(
+            DeepLink::from_url("mercs2-modkit://install?version=1.0.0"),
+            DeepLink::Invalid {
+                url: "mercs2-modkit://install?version=1.0.0".into(),
+                reason: "it has no mod to install".into(),
+            }
+        );
+    }
+
+    /// The deep-link plugin hands over `Url::as_str()`, not the raw string: both forms must come
+    /// through that unchanged.
+    #[test]
+    fn parses_deep_links_in_the_form_the_plugin_delivers() {
+        for (raw, want) in [
+            (
+                "mercs2-modkit://install?mod=vehicle-pack&version=1.2.0",
+                DeepLink::Install { slug: "vehicle-pack".into(), version: Some("1.2.0".into()) },
+            ),
+            (
+                "mercs2-modkit://ship?path=C%3A%5CMy%20Mod",
+                DeepLink::Ship { path: r"C:\My Mod".into() },
+            ),
+        ] {
+            let delivered = tauri::Url::parse(raw).unwrap();
+            assert_eq!(parse_deep_link(delivered.as_str()), Ok(want), "{}", delivered.as_str());
+        }
+    }
+
+    /// The payload the frontend switches on.
+    #[test]
+    fn deep_links_serialize_with_their_kind() {
+        assert_eq!(
+            serde_json::to_value(DeepLink::Install { slug: "a".into(), version: None }).unwrap(),
+            serde_json::json!({ "kind": "install", "slug": "a", "version": null })
+        );
+        assert_eq!(
+            serde_json::to_value(DeepLink::Invalid { url: "u".into(), reason: "r".into() }).unwrap(),
+            serde_json::json!({ "kind": "invalid", "url": "u", "reason": "r" })
+        );
     }
 
     use mercs2_formats::patch_wad::{

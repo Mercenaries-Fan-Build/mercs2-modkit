@@ -6,6 +6,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useProjectStore } from "./stores/project";
+import { handleDeepLink } from "./deepLink";
+import type { DeepLink } from "./types";
 import { useGamepadNavigation } from "./composables/useGamepadNavigation";
 import GameBar from "./components/GameBar.vue";
 import ModkitMark from "./components/ModkitMark.vue";
@@ -19,15 +21,10 @@ const router = useRouter();
 const { mods, asiMods, conflictCount, modkitUpdate, componentUpdates, toolset } =
   storeToRefs(store);
 
-// Receiving end of the Workshop's "Send to Modkit" deep link: stage the handed-off Shipment and
-// jump to the build/export page so it's in front of the user. Errors surface via store.error.
-async function ingestShipment(path: string) {
-  try {
-    await store.importShipment(path);
-    router.push({ name: "export" });
-  } catch {
-    /* store.error is shown in the shell */
-  }
+// Receiving end of `mercs2-modkit://` links: the Workshop's "Send to Modkit" and mercs.ink's
+// "Install with Modkit". See handleDeepLink.
+function openDeepLink(link: DeepLink) {
+  return handleDeepLink(link, store, (to) => router.push(to));
 }
 
 // Core components (pmc_bb, apply_crack) with a newer release than what's installed.
@@ -56,9 +53,12 @@ onMounted(async () => {
 
   // Deep link: drain a cold-start handoff (the link that launched us), then listen for live ones
   // that arrive while the window is already open.
-  const pending = await invoke<string | null>("take_pending_shipment").catch(() => null);
-  if (pending) await ingestShipment(pending);
-  await listen<string>("deep-link-shipment", (e) => ingestShipment(e.payload));
+  const pending = await invoke<DeepLink | null>("take_pending_deep_link").catch((e) => {
+    store.error = `Couldn't read the link Modkit was opened with: ${e}`;
+    return null;
+  });
+  if (pending) await openDeepLink(pending);
+  await listen<DeepLink>("deep-link", (e) => openDeepLink(e.payload));
 });
 </script>
 

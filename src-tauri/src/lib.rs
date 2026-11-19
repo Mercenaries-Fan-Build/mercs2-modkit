@@ -48,8 +48,8 @@ use commands::save_backup::{
 };
 use commands::setup::{crack_game, install_pmc_bb, pmc_bb_variants, update_game};
 use commands::shipment::{
-    inspect_shipment, missing_shipment_folders, restore_saved_shipments, take_pending_shipment,
-    PendingShipment,
+    inspect_shipment, missing_shipment_folders, restore_saved_shipments, take_pending_deep_link,
+    DeepLink, PendingDeepLink,
 };
 use commands::toolchain::{
     install_tools, launch_tool, open_tool_shell, poll_tools, stop_tool, toolset_status,
@@ -66,18 +66,18 @@ use commands::texture_swap::{
 };
 use commands::wardrobe::{list_wardrobe_models, preview_wardrobe_lua};
 
-/// Route a `mercs2-modkit://ship?path=…` URL to the frontend: buffer it (for a cold start whose
-/// webview isn't listening yet) and emit a live event (for an already-open window).
+/// Route a `mercs2-modkit://` URL to the frontend — a `ship` or `install` link, or the reason it is
+/// neither: buffer it (for a cold start whose webview isn't listening yet) and emit a live event
+/// (for an already-open window).
 fn dispatch_deep_link(app: &tauri::AppHandle, url: &str) {
     use tauri::{Emitter, Manager};
-    if let Some(path) = commands::shipment::parse_ship_url(url) {
-        if let Some(state) = app.try_state::<PendingShipment>() {
-            if let Ok(mut slot) = state.0.lock() {
-                *slot = Some(path.clone());
-            }
+    let link = DeepLink::from_url(url);
+    if let Some(state) = app.try_state::<PendingDeepLink>() {
+        if let Ok(mut slot) = state.0.lock() {
+            *slot = Some(link.clone());
         }
-        let _ = app.emit("deep-link-shipment", path);
     }
+    let _ = app.emit("deep-link", link);
 }
 
 /// The configured window has no position, so Windows creates it at `CW_USEDEFAULT`: a cascade
@@ -170,7 +170,7 @@ pub fn run() {
         })
         .manage(GameProcess::default())
         .manage(ToolProcesses::default())
-        .manage(PendingShipment::default())
+        .manage(PendingDeepLink::default())
         .invoke_handler(tauri::generate_handler![
             load_mod,
             validate_manifest,
@@ -260,7 +260,7 @@ pub fn run() {
             inspect_shipment,
             restore_saved_shipments,
             missing_shipment_folders,
-            take_pending_shipment,
+            take_pending_deep_link,
             fetch_mercsink_registry,
             fetch_mercsink_mod,
             fetch_mercsink_releases,

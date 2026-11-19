@@ -18,6 +18,24 @@ Built with **Tauri 2** (Rust) + **Vue 3** + **Tailwind CSS** + **Headless UI**.
 - **Validate** the output with
   [`wad_simulator`](https://crates.io/crates/wad_simulator) before deploying.
 
+## Deep links
+
+Modkit registers the `mercs2-modkit://` URL scheme. A link opens Modkit, or
+the window already open, and does one of two things:
+
+- **`mercs2-modkit://install?mod=<slug>&version=<version>`** is mercs.ink's
+  "Install with Modkit" button. Modkit opens the Mod Market and installs that
+  release, with every Shipment it requires, exactly as the Mod Market's own
+  Install button does, with the same messages. `mod` is required. Without
+  `version`, the latest release is installed.
+- **`mercs2-modkit://ship?path=<folder>`** is the Workshop's "Send to Modkit".
+  Modkit stages the Shipment in that folder and opens Build & Deploy.
+
+Query values are percent-encoded. A `mercs2-modkit://` URL in neither form
+(another action, an `install` link without `mod`, a `ship` link without
+`path`, or an empty value) opens the Mod Market with an error naming the URL
+and what was wrong.
+
 ## Community incompatibility reports
 
 Before building any Shipments, Modkit fetches mercs.ink's community list of
