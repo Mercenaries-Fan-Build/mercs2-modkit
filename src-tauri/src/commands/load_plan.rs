@@ -36,7 +36,7 @@ pub use mercs2_formats::load_plan::{
     RequirementKind, RequirementRow, RequirementStatus, Section, PLAN_FILE, PLAN_FORMAT,
 };
 
-use super::proc::NoWindow;
+use super::proc::{run_streaming, NoWindow};
 use super::shipment::ShipmentRef;
 
 /// The `format` of `load-request.json`.
@@ -316,11 +316,14 @@ pub fn map_order(order: &[String], request: &LoadRequest) -> Result<Vec<usize>, 
 /// exit, or a plan missing after exit 0 or 1, is an error too. The caller decides what `ok:
 /// false` means for it: a build refuses (see [`PlanExt::refuse_unless_ok`]), while the resolver
 /// and the removal cascade still read the requirement data.
+///
+/// Each line qm prints is handed to `on_line` as it arrives.
 pub fn run_preflight(
     qm: &Path,
     rows: &[ShipmentRef],
     game: &OsStr,
     work: &Path,
+    on_line: &mut dyn FnMut(&str),
 ) -> Result<LoadPlan, String> {
     let missing = super::shipment::missing_rows(rows);
     if !missing.is_empty() {
@@ -333,17 +336,19 @@ pub fn run_preflight(
     std::fs::write(&request_path, text)
         .map_err(|e| format!("writing {}: {e}", request_path.display()))?;
 
-    let output = Command::new(qm)
-        .arg("preflight")
-        .arg("--request")
-        .arg(&request_path)
-        .arg("--out")
-        .arg(work)
-        .arg("--game")
-        .arg(game)
-        .no_window()
-        .output()
-        .map_err(|e| format!("running qm preflight: {e}"))?;
+    let output = run_streaming(
+        Command::new(qm)
+            .arg("preflight")
+            .arg("--request")
+            .arg(&request_path)
+            .arg("--out")
+            .arg(work)
+            .arg("--game")
+            .arg(game)
+            .no_window(),
+        on_line,
+    )
+    .map_err(|e| format!("running qm preflight: {e}"))?;
 
     let code = output.status.code();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -842,8 +847,16 @@ pub(crate) mod tests {
         };
         let gone = tmp.path().join("gone");
         let rows = [row("here", &here), row("gone", &gone)];
-        let e = run_preflight(&tmp.path().join("no-qm"), &rows, OsStr::new("vz.wad"), tmp.path())
-            .unwrap_err();
+        let mut printed: Vec<String> = Vec::new();
+        let e = run_preflight(
+            &tmp.path().join("no-qm"),
+            &rows,
+            OsStr::new("vz.wad"),
+            tmp.path(),
+            &mut |l| printed.push(l.to_string()),
+        )
+        .unwrap_err();
+        assert!(printed.is_empty(), "{printed:?}");
         assert!(e.starts_with("The files of 1 Shipment"), "{e}");
         assert!(e.contains(&format!("gone: {}", gone.display())), "{e}");
         assert!(!e.contains("here:"), "{e}");

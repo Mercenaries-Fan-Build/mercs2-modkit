@@ -187,7 +187,7 @@ async fn build_and_deploy(
         "shipments": rows,
     }))
     .map_err(|e| format!("describing the build: {e}"))?;
-    let build = assemble(options, Some(&qm)).await?;
+    let build = assemble(options, Some(&qm), &|line| println!("qm: {line}")).await?;
     println!(
         "built: path={} sha256={} blocks={} bytes={} staging={}",
         build.path, build.sha256, build.block_count, build.byte_size, build.staging_dir

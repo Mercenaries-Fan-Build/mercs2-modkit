@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { validationFailedStatus } from "../statusText";
 import type {
   AsiMod,
   BuildResult,
@@ -348,6 +349,10 @@ interface ProjectState {
   deployedSignature: string | null;
   /** Progress of the guided Build · Validate · Deploy action, or null when idle. */
   applyStatus: ApplyStatus | null;
+  /** A build ({@link assemble}) is running, so the lines qm prints belong to it. */
+  assembling: boolean;
+  /** The latest non-blank line qm printed during the running build, or null. */
+  qmLine: string | null;
   /** Wearable models verified present in THIS install. */
   wardrobeModels: WardrobeModel[];
   /** Outfits the user has queued for the next build. */
@@ -431,6 +436,8 @@ export const useProjectStore = defineStore("project", {
     deployedWad: null,
     deployedSignature: null,
     applyStatus: null,
+    assembling: false,
+    qmLine: null,
     registryMods: [],
     registryStale: false,
     registryWarning: null,
@@ -1798,6 +1805,8 @@ export const useProjectStore = defineStore("project", {
       this.error = null;
       this.buildResult = null;
       this.incompatibilityCheck = null;
+      this.assembling = true;
+      this.qmLine = null;
       try {
         if (this.shipments.length) {
           const deps = await this.checkShipmentDependencies();
@@ -1818,7 +1827,14 @@ export const useProjectStore = defineStore("project", {
         throw e;
       } finally {
         this.busy = false;
+        this.assembling = false;
+        this.qmLine = null;
       }
+    },
+
+    /** A line qm printed (the `qm-output` event): the running build's latest, when it has text. */
+    noteQmLine(line: string) {
+      if (this.assembling && line.trim()) this.qmLine = line;
     },
 
     /** Everything that goes into a build, in load order. Shared by build and preview so
@@ -2071,7 +2087,7 @@ export const useProjectStore = defineStore("project", {
             this.applyStatus = {
               active: false,
               step: "invalid",
-              message: `Patch failed validation (exit ${v.exit_code ?? "?"}).`,
+              message: validationFailedStatus(v),
               validationOk: false,
               conflicts: [],
             };
