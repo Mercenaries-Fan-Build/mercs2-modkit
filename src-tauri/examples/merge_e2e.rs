@@ -60,7 +60,7 @@ fn main() {
     // undefined. The writer enforces it too, but assert it here so the failure is legible.
     validate_blocks(&r.blocks).expect("exactly one primary ASET row per asset hash");
 
-    let wad = build_patch_wad_multi(&r.blocks, 0, Some(0), &FFCS_CERT_BLOB).expect("assemble");
+    let wad = build_patch_wad_multi(&r.blocks, 0, &FFCS_CERT_BLOB).expect("assemble");
     std::fs::write(out, &wad).expect("write");
     println!("  {} blocks -> {} ({} bytes)", r.blocks.len(), out, wad.len());
 
