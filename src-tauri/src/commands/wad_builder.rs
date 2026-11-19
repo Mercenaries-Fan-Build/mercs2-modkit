@@ -334,10 +334,10 @@ pub async fn assemble(options: BuildOptions, qm: Option<&Path>) -> Result<BuildR
     let (out_path, wad_bytes) = if resolved.blocks.is_empty() {
         (PathBuf::new(), Vec::new())
     } else {
-        // csum_value = 0 and an explicit csum_meta = 0: correct for an assets-only patch WAD
-        // that isn't derived from an Xbox source. Passing it explicitly stops an imported block
-        // whose path ends in `\resident_p000_q3.block` from silently choosing it for us.
-        let bytes = build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)?;
+        // csum_value = 0. The writer sets the CSUM meta to the largest block entry count: the
+        // engine sizes its block-install ring from it, and a block with more entries than every
+        // mounted WAD's meta is never installed (a resident block past 7018 stalls the load).
+        let bytes = build_patch_wad_multi(&resolved.blocks, 0, &FFCS_CERT_BLOB)?;
         let path = out_dir.join("vz-patch.wad");
         std::fs::write(&path, &bytes)
             .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
@@ -394,7 +394,7 @@ fn merge_target(groups: &[ClaimGroup], target: &str) -> Result<Option<(Vec<u8>, 
                 .join("\n\n")
         ));
     }
-    let bytes = build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)
+    let bytes = build_patch_wad_multi(&resolved.blocks, 0, &FFCS_CERT_BLOB)
         .map_err(|e| format!("building {target}: {e}"))?;
     let mut shipments: Vec<&str> = Vec::new();
     for group in groups {
@@ -715,6 +715,33 @@ mod tests {
             atomic: true,
             blocks,
         }
+    }
+
+    /// The merged WAD's CSUM meta (header 0x2C) is its largest block entry count. The engine sizes
+    /// its block-install ring from the largest mounted meta, so a meta of 0 left a `VZ\resident`
+    /// block past retail's 7018 entries uninstalled and the load stalled.
+    #[test]
+    fn a_merged_wad_carries_its_largest_block_entry_count_as_csum_meta() {
+        let mut big = 7022u32.to_le_bytes().to_vec();
+        big.extend_from_slice(b"resident entries");
+        let resident = PatchBlock::from_decompressed(
+            &big,
+            r"blocks\VZ\resident_P000_Q3.block".to_string(),
+            vec![AsetEntry::new(0xC1, 0xFFFF_FFFF, 0x0000_FFFF, 19)],
+            None,
+        )
+        .unwrap();
+        let small = PatchBlock::from_decompressed(
+            &3u32.to_le_bytes(),
+            r"blocks\a\m.block".to_string(),
+            vec![AsetEntry::new(0xC2, 0xFFFF_FFFF, 0x0000_FFFF, 19)],
+            None,
+        )
+        .unwrap();
+        let (bytes, _) = merge_target(&[group("shipment:a", "A", vec![small, resident])], "vz-patch.wad")
+            .unwrap()
+            .expect("one group merges");
+        assert_eq!(u32::from_le_bytes(bytes[0x2C..0x30].try_into().unwrap()), 7022);
     }
 
     /// A level's groups become `data/<level>-patch.wad`, an overlay's asset beside link's.
