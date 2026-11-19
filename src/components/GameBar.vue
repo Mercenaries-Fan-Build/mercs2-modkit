@@ -3,14 +3,16 @@ import { onMounted, onBeforeUnmount, ref, computed } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useProjectStore } from "../stores/project";
+import { withLatestLine } from "../statusText";
 import Spinner from "./Spinner.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import type { LaunchPlan } from "../types";
 
 const store = useProjectStore();
 const router = useRouter();
-const { gameInfo, gamePath, busy, gameRunning, applyStatus } = storeToRefs(store);
+const { gameInfo, gamePath, busy, gameRunning, applyStatus, qmLine } = storeToRefs(store);
 
 // Is the game up to date with the load order, and how much is staged? Drives the Play button.
 const pending = computed(() => store.pending);
@@ -28,6 +30,9 @@ const applyStageLabel = computed(() => {
       return "Applying…";
   }
 });
+
+// The stage label with the latest line qm printed while the build runs.
+const applyStageText = computed(() => withLatestLine(applyStageLabel.value, qmLine.value));
 
 // Apply the staged load order (build · validate · deploy), then launch. On failure the detail and
 // the fix live on Build & Deploy — the conflict cards, the validation report, the lost backups, the
@@ -57,12 +62,16 @@ const transitioning = ref(false);
 const verboseLog = ref(false);
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-onMounted(() => {
+let unlistenQm: UnlistenFn | null = null;
+onMounted(async () => {
   store.refreshRunning();
   pollTimer = setInterval(() => store.refreshRunning(), 2500);
+  // qm's output while a build runs, for this bar and Build & Deploy's build status.
+  unlistenQm = await listen<{ line: string }>("qm-output", (e) => store.noteQmLine(e.payload.line));
 });
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer);
+  unlistenQm?.();
 });
 
 // Problems with the launch plan (or an unrecognised exe) are shown before launching;
@@ -278,7 +287,7 @@ function versionTone(v: string): string {
         </button>
         <button
           v-else
-          class="btn-plate"
+          class="btn-plate max-w-md min-w-0"
           :class="
             pending.stale || applyStatus?.active
               ? '!border-amber-500 !bg-amber-600 hover:!bg-amber-500'
@@ -298,15 +307,15 @@ function versionTone(v: string): string {
           @click="pending.stale ? applyAndPlay() : play()"
         >
           <Spinner v-if="applyStatus?.active" :size="14" class="shrink-0" />
-          {{
+          <span class="min-w-0 truncate">{{
             applyStatus?.active
-              ? applyStageLabel
+              ? applyStageText
               : transitioning
                 ? "Launching…"
                 : pending.stale
                   ? "▶ Apply & Play"
                   : "▶ Play"
-          }}
+          }}</span>
         </button>
         <button
           class="shift-ink rounded-md px-2 py-1 text-[11px] tracking-wider uppercase text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
