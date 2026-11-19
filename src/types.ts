@@ -869,6 +869,19 @@ export interface RegistryFeed {
   warning: string | null;
 }
 
+/**
+ * A `mercs2-modkit://` URL as the backend parsed it (`DeepLink` in `shipment.rs`): a Workshop
+ * Shipment to stage, a mercs.ink release to install (`version` null: the latest), or why the
+ * URL is neither.
+ */
+export type DeepLink =
+  | { kind: "ship"; path: string }
+  | { kind: "install"; slug: string; version: string | null }
+  | { kind: "invalid"; url: string; reason: string };
+
+/** The deep links the Mod Market acts on: an install, or a refused URL to report. */
+export type MarketLink = Extract<DeepLink, { kind: "install" | "invalid" }>;
+
 /** The outcome of installing a Shipment from mercs.ink. */
 export interface MercsInkInstall {
   /** The load-order entry, carrying a `registry` origin with the registry's own id. */
