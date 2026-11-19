@@ -179,6 +179,52 @@ describe("Incompatibility check", () => {
   });
 });
 
+describe("qm output during a build", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    invokeMock.mockReset();
+  });
+
+  const result: BuildResult = {
+    path: "",
+    staging_dir: "/build",
+    block_count: 0,
+    byte_size: 0,
+    sha256: "",
+    outcomes: [],
+    stream_copies: [],
+    data_files: [],
+    incompatibilities: null,
+  };
+
+  it("holds the latest non-blank line while the build runs, and nothing before or after", async () => {
+    const store = useProjectStore();
+    store.noteQmLine("qm preflight: before any build");
+    expect(store.qmLine).toBeNull();
+
+    const seen: (string | null)[] = [];
+    invokeMock.mockImplementationOnce(async () => {
+      store.noteQmLine("fetch_package biua_ps3: downloaded 1 of 389 MB");
+      store.noteQmLine("fetch_package biua_ps3: downloaded 120 of 389 MB");
+      store.noteQmLine("   ");
+      seen.push(store.qmLine);
+      return result;
+    });
+    await store.assemble();
+    expect(seen).toEqual(["fetch_package biua_ps3: downloaded 120 of 389 MB"]);
+    expect(store.qmLine).toBeNull();
+
+    invokeMock.mockImplementationOnce(async () => {
+      store.noteQmLine("qm build failed");
+      throw "qm build failed (exit 1)";
+    });
+    await expect(store.assemble()).rejects.toBe("qm build failed (exit 1)");
+    expect(store.qmLine).toBeNull();
+    store.noteQmLine("qm preflight: after the build");
+    expect(store.qmLine).toBeNull();
+  });
+});
+
 describe("Licence check", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
