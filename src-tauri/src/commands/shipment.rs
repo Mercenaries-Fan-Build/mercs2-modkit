@@ -1541,7 +1541,7 @@ mod tests {
         let mut fine = block(&format!(r"blocks\{path}_P001_Q2.block"), hash ^ 1);
         fine.aset_entries.clear();
         fine.source_block_index = Some(1);
-        mercs2_formats::patch_wad::build_patch_wad_multi(&[coarse, fine], 0, Some(0), &mercs2_formats::patch_wad::FFCS_CERT_BLOB).unwrap()
+        mercs2_formats::patch_wad::build_patch_wad_multi(&[coarse, fine], 0, &mercs2_formats::patch_wad::FFCS_CERT_BLOB).unwrap()
     }
 
     /// Without the rebase both WADs say "block 1", and each chain lands on the same block.
@@ -1555,7 +1555,7 @@ mod tests {
             std::fs::write(&path, chained(name, hash)).unwrap();
             blocks.extend(read_overlay(&path, ("id", "n"), "overlay", &mut next).unwrap().2);
         }
-        let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&blocks, 0, Some(0), &mercs2_formats::patch_wad::FFCS_CERT_BLOB).unwrap();
+        let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&blocks, 0, &mercs2_formats::patch_wad::FFCS_CERT_BLOB).unwrap();
         let read = read_patch_wad(&wad).unwrap();
         let rung = |hash: u32| {
             let row = read.blocks.iter().flat_map(|b| &b.aset_entries).find(|e| e.asset_hash == hash).unwrap();
@@ -1635,7 +1635,7 @@ mod tests {
         // Both Shipments' non-script assets survive alongside it.
         assert_eq!(resolved.blocks.len(), 3);
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash");
-        build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB)
+        build_patch_wad_multi(&resolved.blocks, 0, &FFCS_CERT_BLOB)
             .expect("the collapsed WAD assembles");
     }
 
@@ -1735,7 +1735,7 @@ mod tests {
         let resolved = crate::models::claim::resolve(&groups);
         assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
         validate_blocks(&resolved.blocks).expect("one primary ASET row per hash and type");
-        build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
+        build_patch_wad_multi(&resolved.blocks, 0, &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
     }
 
     /// The nine asset hashes the retail effects block's models (ASET type 19) share with textures
@@ -1811,7 +1811,7 @@ mod tests {
         let resolved = crate::models::claim::resolve(&groups);
         assert!(resolved.conflicts.is_empty(), "{:?}", resolved.conflicts);
         assert_eq!(resolved.blocks.len(), 3);
-        build_patch_wad_multi(&resolved.blocks, 0, Some(0), &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
+        build_patch_wad_multi(&resolved.blocks, 0, &FFCS_CERT_BLOB).expect("the collapsed WAD assembles");
     }
 
     /// The shape fx Shipments had as `raw`: the whole effects block in its own
