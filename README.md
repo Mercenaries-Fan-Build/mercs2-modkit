@@ -82,6 +82,10 @@ through Wine or Proton. **Game Info → Runtime** shows what a launch uses.
 Both share one modkit-managed prefix in the app data folder (`wine-prefix` on
 macOS, `proton-prefix` on Linux). Your saves are inside it.
 
+Setup's licence check reads the EA CD-Key and SecuROM activation keys from the
+prefix's `system.reg` and `user.reg` (inside `pfx/` on Linux). If neither is
+found, Setup defaults to the crack path.
+
 ### `runtime.json`
 
 The runtime settings live in `runtime.json` in the app data folder. The UI edits

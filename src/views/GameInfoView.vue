@@ -293,7 +293,7 @@ async function normalizeRegion() {
               }}
             </template>
             <template v-else-if="store.setupPath === 'crack'">
-              Stock SecuROM exe with no activation — crack it below (or in
+              Stock SecuROM exe with no licence confirmed — crack it below (or in
               <RouterLink to="/setup" class="underline">Setup</RouterLink>).
             </template>
           </template>
