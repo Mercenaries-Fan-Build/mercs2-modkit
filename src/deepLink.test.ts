@@ -80,7 +80,7 @@ describe("Deep links", () => {
     store.pendingMarketLink = { kind: "install", slug: "vehicle-pack", version: "1.2.0" };
 
     const install = vi.fn((slug: string, version?: string) => store.installFromRegistry(slug, version));
-    takeMarketLink(store, install);
+    takeMarketLink(store, install, false);
     await install.mock.results[0].value;
 
     expect(install).toHaveBeenCalledWith("vehicle-pack", "1.2.0");
@@ -104,7 +104,7 @@ describe("Deep links", () => {
     store.pendingMarketLink = { kind: "install", slug: "vehicle-pack", version: null };
 
     const install = vi.fn((slug: string, version?: string) => store.installFromRegistry(slug, version));
-    takeMarketLink(store, install);
+    takeMarketLink(store, install, false);
     await install.mock.results[0].value;
 
     expect(install).toHaveBeenCalledWith("vehicle-pack", undefined);
@@ -121,7 +121,7 @@ describe("Deep links", () => {
     store.pendingMarketLink = { kind: "install", slug: "vehicle-pack", version: null };
 
     const install = vi.fn((slug: string, version?: string) => store.installFromRegistry(slug, version));
-    takeMarketLink(store, install);
+    takeMarketLink(store, install, false);
 
     await expect(install.mock.results[0].value).rejects.toBe(
       "Set the game folder before building Shipments.",
@@ -142,7 +142,7 @@ describe("Deep links", () => {
     expect(router.pushed).toEqual([{ name: "catalog" }]);
 
     const install = vi.fn();
-    takeMarketLink(store, install);
+    takeMarketLink(store, install, false);
 
     expect(install).not.toHaveBeenCalled();
     expect(store.pendingMarketLink).toBeNull();
@@ -151,10 +151,51 @@ describe("Deep links", () => {
     );
   });
 
+  it("an install link that arrives during an install is refused, naming the link", () => {
+    const store = useProjectStore();
+    store.pendingMarketLink = { kind: "install", slug: "vehicle-pack", version: "1.2.0" };
+
+    const install = vi.fn();
+    takeMarketLink(store, install, true);
+
+    expect(install).not.toHaveBeenCalled();
+    expect(store.pendingMarketLink).toBeNull();
+    expect(store.error).toBe(
+      "Modkit didn't install vehicle-pack 1.2.0: it is still busy with another install or task. " +
+        "Open the link again when that finishes.",
+    );
+  });
+
+  it("an install link that arrives while the store is busy is refused, naming the link", () => {
+    const store = useProjectStore();
+    store.busy = true;
+    store.pendingMarketLink = { kind: "install", slug: "vehicle-pack", version: null };
+
+    const install = vi.fn();
+    takeMarketLink(store, install, false);
+
+    expect(install).not.toHaveBeenCalled();
+    expect(store.pendingMarketLink).toBeNull();
+    expect(store.error).toBe(
+      "Modkit didn't install vehicle-pack: it is still busy with another install or task. " +
+        "Open the link again when that finishes.",
+    );
+  });
+
+  it("a refused URL is still reported while an install runs", () => {
+    const store = useProjectStore();
+    store.busy = true;
+    store.pendingMarketLink = { kind: "invalid", url: "mercs2-modkit://x", reason: "r" };
+
+    takeMarketLink(store, vi.fn(), true);
+
+    expect(store.error).toBe("Modkit can't open mercs2-modkit://x: r.");
+  });
+
   it("the Mod Market does nothing when no link was handed over", () => {
     const store = useProjectStore();
     const install = vi.fn();
-    takeMarketLink(store, install);
+    takeMarketLink(store, install, false);
     expect(install).not.toHaveBeenCalled();
     expect(store.error).toBeNull();
   });
