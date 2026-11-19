@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "./project";
-import type { BuildResult, IncompatibilityCheck, ShipmentRef, ShipmentRemovalPlan } from "../types";
+import type {
+  BuildResult,
+  IncompatibilityCheck,
+  LicenseStatus,
+  ShipmentRef,
+  ShipmentRemovalPlan,
+} from "../types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -170,5 +176,41 @@ describe("Incompatibility check", () => {
     await expect(store.assemble()).rejects.toBe("mercs.ink lists a confirmed incompatibility");
     expect(store.incompatibilityCheck).toBeNull();
     expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["assemble_patch_wad", "assemble_patch_wad"]);
+  });
+});
+
+describe("Licence check", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    invokeMock.mockReset();
+  });
+
+  const licensed: LicenseStatus = {
+    applicable: true,
+    licensed: true,
+    cdKeyPresent: false,
+    licenseKeyPresent: false,
+    userDataPresent: true,
+    keysFound: ["HKCU\\SOFTWARE\\SecuROM\\UserData"],
+    detail: "SecuROM activation present in the registry of the Wine prefix Modkit launches the game in (/p).",
+  };
+
+  it("a failed check drops the prior result and keeps the reason", async () => {
+    const store = useProjectStore();
+    invokeMock.mockResolvedValueOnce(licensed);
+    await store.checkLicense();
+    expect(store.isLicensed).toBe(true);
+    expect(store.licenseError).toBeNull();
+
+    invokeMock.mockRejectedValueOnce("/p/user.reg is not a Wine registry file Modkit can read: line 7");
+    await store.checkLicense();
+    expect(store.license).toBeNull();
+    expect(store.isLicensed).toBe(false);
+    expect(store.licenseError).toBe("/p/user.reg is not a Wine registry file Modkit can read: line 7");
+
+    invokeMock.mockResolvedValueOnce(licensed);
+    await store.checkLicense();
+    expect(store.licenseError).toBeNull();
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["detect_license", "detect_license", "detect_license"]);
   });
 });
