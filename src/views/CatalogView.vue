@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useProjectStore } from "../stores/project";
-import type { CatalogMod, RegistryMod } from "../types";
+import type { CatalogMod } from "../types";
+import { takeMarketLink } from "../deepLink";
 import ProgressBar from "../components/ProgressBar.vue";
 import ErrorBanner from "../components/ErrorBanner.vue";
 
@@ -68,6 +69,9 @@ async function removeSource(repository: string) {
 onMounted(() => {
   if (store.catalog.length === 0) store.fetchCatalog();
   if (store.registryMods.length === 0) store.fetchRegistry();
+  // One handed over before this view opened. After the fetches, which clear store.error as
+  // they start.
+  takeMarketLink(store, install);
 });
 
 /**
@@ -78,11 +82,11 @@ onMounted(() => {
  * no download → enable → deploy ladder to climb; saying "Download" would promise a lifecycle
  * that does not exist here.
  */
-async function install(item: RegistryMod) {
-  working.value = `mercs.ink#${item.slug}`;
+async function install(slug: string, version?: string) {
+  working.value = `mercs.ink#${slug}`;
   lastAction.value = null;
   try {
-    const res = await store.installFromRegistry(item);
+    const res = await store.installFromRegistry(slug, version);
     const files = `${res.staged_files} file${res.staged_files === 1 ? "" : "s"}`;
     lastAction.value = `Staged ${res.title ?? res.slug} ${res.release_version} (${files}) — it isn’t in your game yet. Press ▶ Apply & Play in the game bar to apply it.`;
   } catch {
@@ -91,6 +95,14 @@ async function install(item: RegistryMod) {
     working.value = null;
   }
 }
+
+// A deep link handed over by the shell: an `install` link (mercs.ink's "Install with Modkit")
+// runs through the same path as the Install button; a refused URL is reported here. This takes a
+// link handed over while the view is open; onMounted takes one handed over before it opened.
+watch(
+  () => store.pendingMarketLink,
+  () => takeMarketLink(store, install),
+);
 
 function keyOf(item: CatalogMod): string {
   return `${item.repository}#${item.slug}`;
@@ -351,7 +363,7 @@ async function update(item: CatalogMod) {
                     ? 'Re-stage this Shipment at the latest release'
                     : 'Stage this Shipment for your next patch WAD build'
                 "
-                @click="install(item)"
+                @click="install(item.slug)"
               >
                 {{ store.registryUpdate(item) ? `Update → v${store.registryUpdate(item)}` : store.registryInstalled(item) ? "Reinstall" : "Install" }}
               </button>
