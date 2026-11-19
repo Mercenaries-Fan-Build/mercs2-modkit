@@ -7,6 +7,7 @@ import { useProjectStore } from "../stores/project";
 import ProgressBar from "../components/ProgressBar.vue";
 import ErrorBanner from "../components/ErrorBanner.vue";
 import LostBackupsBanner from "../components/LostBackupsBanner.vue";
+import { validationLastLine, withLatestLine } from "../statusText";
 import type { ClaimConflict, GroupOutcome, PlacementOutcome } from "../types";
 
 const route = useRoute();
@@ -34,6 +35,7 @@ const {
   busy,
   buildResult,
   validation,
+  qmLine,
   gameInfo,
   wadBackups,
   wardrobe,
@@ -384,7 +386,13 @@ function outcomeText(o: GroupOutcome): string {
         Build &amp; Check
       </button>
 
-      <ProgressBar v-if="busy" indeterminate :label="stage" class="mt-4" />
+      <ProgressBar
+        v-if="busy"
+        indeterminate
+        :label="withLatestLine(stage, qmLine)"
+        :title="qmLine ?? undefined"
+        class="mt-4 [&>p]:truncate"
+      />
 
       <!-- Unresolvable overlap: two mods change an overlapping-but-different set of
            assets. Picking per-asset would produce a mod nobody authored, so we stop. -->
@@ -529,8 +537,9 @@ function outcomeText(o: GroupOutcome): string {
           v-if="validation && !validation.ok"
           class="mt-2 rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300"
         >
-          This patch <strong>failed validation</strong> (exit {{ validation.exit_code ?? "?" }}).
-          Installing it may crash the game or corrupt a save — prefer fixing the load order above.
+          This patch <strong>failed validation</strong> (exit {{ validation.exit_code ?? "?" }}):
+          <span class="mt-1 block font-mono break-words">{{ validationLastLine(validation) }}</span>
+          <span class="mt-1 block">Installing it can crash the game.</span>
         </p>
         <button
           class="btn-plate mt-3 w-full justify-center"
