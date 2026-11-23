@@ -2657,9 +2657,9 @@ dependencies = [
 
 [[package]]
 name = "mercs2_formats"
-version = "7.0.0"
+version = "7.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01410d51ad8fb3e9600f816ff16a95e59e7352d1845808c577bed150c495fdec"
+checksum = "3ff55d5110d30caf38b7ef3b1ce671ef4e06d4821c2962fa4208a787f93773d1"
 dependencies = [
  "aes",
  "cmac",
