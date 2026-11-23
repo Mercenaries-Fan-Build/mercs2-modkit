@@ -66,17 +66,17 @@ toml = "1"
 # row per hash), `sges::compressed_len`, `scripts_block` (Lua editing), `texture::replace_body`,
 # and `load_plan`: the `load-plan.json` types qm writes, so Modkit parses qm's own definition.
 # 6.0.2+: `build_patch_wad_multi` writes the CSUM meta the engine sizes its block-install ring from.
-mercs2_formats = "6.0.3"
-loadprobe = "2.4.1"
+mercs2_formats = "7.0.0"
+loadprobe = "2.4.2"
 
 # Lua 5.1 compiler emitting the game's exact bytecode dialect (float lua_Number, 32-bit
 # size_t). The wardrobe is pure Lua: modkit recompiles `wifpmcinterior` with each mod's
 # outfits appended. Verified byte-for-byte against the reference luac.exe.
-mercs2_luac = "1.3.1"
+mercs2_luac = "1.3.2"
 
 # Model container -> indexed triangle geometry, for the 3D texture viewer. Pure decode: it
 # was carved out of `mercs2_engine` precisely so a GUI can use it without linking wgpu/winit.
-mercs2_mesh = "1.1.1"
+mercs2_mesh = "1.1.2"
 
 # HTTP client for fetching the wad_simulator release binary (rustls to avoid system OpenSSL)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
