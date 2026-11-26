@@ -1,9 +1,8 @@
 //! The PMC wardrobe: let the player wear any humanoid model the game already ships.
 //!
-//! # How the wardrobe actually works
+//! # How the wardrobe works in the game
 //!
-//! It is **pure Lua**. There is no reflection data and no save byte for the costume — the
-//! outfit list is a plain global table in `wifpmcinterior`:
+//! It is **pure Lua**. The outfit list is a plain global table in `wifpmcinterior`:
 //!
 //! ```lua
 //! _tOutfits = {                       -- line 155, a GLOBAL (no `local`)
@@ -15,52 +14,29 @@
 //!
 //! Selecting an entry calls `Player.SetOutfit(guid, sModelName)`, which hashes that
 //! **name string** with `pandemic_hash_m2`, looks it up in the ASET table, and loads the
-//! model. So *any* model in the WAD is wearable as long as we know its name — no new
-//! assets, no injection, no risk. The menu is gated by `GetAvailableCostumes()`, another
-//! global, which we redefine to lift the cap.
+//! model. So any model in the WAD is wearable as long as we know its name.
 //!
-//! # Why this composes across mods
+//! # Every outfit is built by Quartermaster
 //!
-//! Because both are globals, a mod does not need us to rewrite the table — it only needs
-//! us to **append source text** after it:
+//! This module picks and checks outfits; it compiles nothing. The game saves the worn row by
+//! its position and restores it through the player script's own character map, so a row
+//! appended to `_tOutfits` by hand restores as a different model on the next load. `qm link`
+//! generates each hero's list and that map together for the whole load order, so every build
+//! hands the picks to qm as `add_outfit` contributions
+//! ([`super::shipment::synthesize_wardrobe_shipment`]), with or without other Shipments.
 //!
-//! ```lua
-//! table.insert(_tOutfits.mattias, { Name=..., Model=..., PlayerVisibleName=... })
-//! ```
-//!
-//! N mods therefore union by plain concatenation, compiled once. That is the whole reason
-//! `scripts_vz` is owned by modkit rather than shipped pre-built by each mod: two mods that
-//! each shipped their own compiled `scripts_vz` block would silently annihilate each other
-//! (whole-block override, last one wins, no error).
-//!
-//! # What we do NOT do
-//!
-//! We do not recompile the whole game's Lua. Only the scripts a mod actually touches are
-//! rebuilt from a bundled, verified source; every other entry in the block passes through
-//! byte-for-byte from the user's own `vz.wad`. And we refuse outright if the user's
-//! `wifpmcinterior` bytecode isn't the build our bundled source came from — better to
-//! decline than to replace their script with a different game version's.
+//! qm builds an outfit for whatever model name it is given, so [`validate_outfits`] refuses a
+//! name the player's own `vz.wad` does not hold before qm runs.
 
 use std::path::{Path, PathBuf};
 
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;
-use mercs2_formats::patch_wad::{AsetEntry, PatchBlock};
-use mercs2_formats::scripts_block::ScriptsBlock;
-use mercs2_formats::sges::{decompress_block, decompress_sges};
 use mercs2_formats::texture::extract_model;
 use serde::{Deserialize, Serialize};
 
-/// The script that owns the wardrobe menu.
-const INTERIOR_SCRIPT: &str = "wifpmcinterior";
-
-/// Our verified source for that script, compiled into the binary.
-///
-/// This is a **decompilation** of the shipped bytecode, not original source — so it is
-/// trusted exactly as far as it has been tested. It is the one script the community has
-/// round-tripped through the game (the shipped 6-slot wardrobe mod took this path), and it
-/// is the *only* script modkit will rebuild. Everything else in the block passes through
-/// untouched.
+/// The bundled decompilation of `wifpmcinterior`, read for the outfits the base game's
+/// wardrobe already lists ([`base_wardrobe_models`]).
 const INTERIOR_SOURCE: &str = include_str!("../../lua/wifpmcinterior.lua");
 
 /// The three player characters. These are the `_tOutfits` keys — note the table uses
@@ -146,9 +122,9 @@ const CANDIDATES: &[(&str, &str)] = &[
 
 /// Models already present in the base game's wardrobe (`_tOutfits`).
 ///
-/// Parsed once from the bundled `wifpmcinterior` source. Adding one of these does nothing
-/// visible — it's already selectable — so the picker badges them and the generated Lua
-/// dedupes them out. Used to steer the user toward genuinely-new skins.
+/// Parsed once from the bundled `wifpmcinterior` source. The picker badges them, to steer the
+/// user toward genuinely-new skins. qm lists an added outfit as its own row whatever its model,
+/// so adding one of these gives the hero a second row for that model.
 fn base_wardrobe_models() -> std::collections::HashSet<String> {
     INTERIOR_SOURCE
         .lines()
@@ -164,7 +140,7 @@ fn base_wardrobe_models() -> std::collections::HashSet<String> {
 /// A model the player can actually wear — verified present in their `vz.wad`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WardrobeModel {
-    /// The engine name. This exact string goes into `Model = "..."`.
+    /// The engine name. This exact string is the outfit's `Model`.
     pub model: String,
     /// Friendly label for the picker.
     pub label: String,
@@ -178,8 +154,8 @@ pub struct WardrobeModel {
     pub triangles: usize,
     /// One of the three player characters (or one of their unlock tiers).
     pub is_hero: bool,
-    /// Already in the base game's wardrobe. Adding it changes nothing (it's deduped out), so
-    /// the UI badges it "already available" and steers you to genuinely-new skins.
+    /// Already in the base game's wardrobe, so the UI badges it "already available" and steers
+    /// you to genuinely-new skins.
     pub in_base_wardrobe: bool,
 }
 
@@ -278,79 +254,13 @@ fn pretty(model: &str) -> String {
     }
 }
 
-/// The Lua we append after the base script.
+/// Refuse an outfit the game cannot wear, before anything is built.
 ///
-/// Both `_tOutfits` and `GetAvailableCostumes` are globals in `wifpmcinterior`, so appending
-/// text is enough — no AST surgery, and it composes with any other mod that does the same.
-///
-/// The shape follows the community's `WardrobeUnlocker`, which is the recipe proven to work
-/// in-game:
-///
-/// * **Dedupe by model.** A `_deferOutfit` helper skips a model already present in the
-///   hero's list. Without it, picking a base-game tier (`pmc_hum_mattias_v3`, already there
-///   as "MetalHead") appended a duplicate — which is why an earlier build appeared to change
-///   nothing: the outfits were already in the wardrobe. It also means re-running the mod
-///   can't stack duplicates.
-/// * **Override `GetAvailableCostumes`.** The base version caps the visible slot count;
-///   returning the longest list unlocks every entry, base and added alike.
-fn wardrobe_lua(outfits: &[WardrobeOutfit]) -> String {
-    // Escape for a Lua double-quoted string; the roster is fixed but a user label is free text.
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-
-    let mut src = String::from(
-        "\n-- ===== modkit: wardrobe additions =====\n\
-         -- Add an outfit to a hero's list, but only if that model isn't already there\n\
-         -- (so base-game outfits aren't duplicated and a re-run can't stack entries).\n\
-         local function _modkitAddOutfit(sHero, tOutfit)\n  \
-           _tOutfits[sHero] = _tOutfits[sHero] or {}\n  \
-           for _, o in ipairs(_tOutfits[sHero]) do\n    \
-             if o.Model == tOutfit.Model then return end\n  \
-           end\n  \
-           table.insert(_tOutfits[sHero], tOutfit)\n\
-         end\n",
-    );
-
-    for o in outfits {
-        src.push_str(&format!(
-            "_modkitAddOutfit(\"{hero}\", {{ Name = \"{name}\", Model = \"{model}\", PlayerVisibleName = \"{label}\" }})\n",
-            hero = esc(&o.hero),
-            name = esc(&o.label),
-            model = esc(&o.model),
-            label = esc(&o.label),
-        ));
-    }
-
-    src.push_str(
-        "\n-- Unlock every wardrobe slot (the base definition caps the visible count).\n\
-         function GetAvailableCostumes()\n  \
-           local n = 0\n  \
-           for _, list in pairs(_tOutfits) do\n    \
-             if table.getn(list) > n then n = table.getn(list) end\n  \
-           end\n  \
-           return n\n\
-         end\n",
-    );
-
-    src
-}
-
-/// Build the `scripts_vz` block carrying the wardrobe edit.
-///
-/// Returns `Ok(None)` when there is nothing to do (no outfits requested).
-///
-/// The block is taken from the user's own `vz.wad`, so every script we don't touch keeps
-/// its original bytecode byte-for-byte; only `wifpmcinterior` is recompiled.
-pub fn build_wardrobe_block(
-    game_path: &str,
-    outfits: &[WardrobeOutfit],
-    base_source: &str,
-) -> Result<Option<PatchBlock>, String> {
-    if outfits.is_empty() {
-        return Ok(None);
-    }
-
-    // Reject a hero we don't know: `_tOutfits.<hero>` would create a table the menu
-    // never reads, and the outfit would silently not appear.
+/// A hero that is not a `_tOutfits` key is offered to no one. A model is checked with the exact
+/// resolution `Player.SetOutfit` performs at runtime: hash the name and resolve the model by that
+/// hash, following ASET sub-entries, which is what `extract_model` does. Checking the primary ASET
+/// row's type instead rejects `al_hum_boss` (asset type 34), a model `SetOutfit` loads.
+pub fn validate_outfits(game_path: &str, outfits: &[WardrobeOutfit]) -> Result<(), String> {
     for o in outfits {
         if !HEROES.contains(&o.hero.as_str()) {
             return Err(format!(
@@ -367,13 +277,6 @@ pub fn build_wardrobe_block(
     let size = f.metadata().map_err(|e| format!("stat: {e}"))?.len();
     let archive = load_ffcs_archive(&mut f, size).map_err(|e| format!("FFCS: {e}"))?;
 
-    // Validate every model name against the WAD *before* compiling anything, using the exact
-    // resolution `Player.SetOutfit` performs at runtime: hash the name and resolve the model
-    // by that hash, following ASET sub-entries. `extract_model` is that resolution. Checking
-    // anything else (e.g. the primary ASET row's type) is how an earlier build wrongly
-    // rejected `al_hum_boss` as "not a model (asset type 34)" — a model that SetOutfit loads
-    // fine. A typo, by contrast, resolves to nothing and is caught here rather than at the
-    // wardrobe mirror.
     for o in outfits {
         let hash = pandemic_hash_m2(&o.model);
         if extract_model(&mut f, &archive, hash).is_err() {
@@ -384,97 +287,15 @@ pub fn build_wardrobe_block(
             ));
         }
     }
-
-    let (idx, path) = archive
-        .paths
-        .iter()
-        .enumerate()
-        .find(|(_, p)| p.to_lowercase().contains("scripts_vz"))
-        .map(|(i, p)| (i, p.clone()))
-        .ok_or("No scripts_vz block in vz.wad")?;
-
-    let raw = decompress_block(&mut f, &archive.indx, idx as u16)
-        .map_err(|e| format!("decompress scripts_vz: {e}"))?;
-
-    let mut block = ScriptsBlock::parse(&raw).map_err(|e| format!("parse scripts_vz: {e}"))?;
-    let entry = block
-        .find_by_name(INTERIOR_SCRIPT)
-        .ok_or_else(|| format!("{INTERIOR_SCRIPT} not found in scripts_vz"))?;
-
-    // Compile base + appended source in one chunk. `luac` names the chunk "@<path>";
-    // match that so a runtime traceback points at something recognizable.
-    let combined = format!("{base_source}{}", wardrobe_lua(outfits));
-    let luaq = mercs2_luac::compile(&combined, &format!("@{INTERIOR_SCRIPT}.lua"))
-        .map_err(|e| format!("The wardrobe script failed to compile: {e}"))?;
-
-    block
-        .replace_lua(entry, &luaq)
-        .map_err(|e| format!("replace {INTERIOR_SCRIPT}: {e}"))?;
-
-    // Carry the original block's ASET rows forward untouched — the block still contains
-    // exactly the same set of scripts, so it still owns exactly the same asset hashes.
-    // `from_decompressed` recomputes `packed_field` from the new decompressed size, which
-    // matters because the appended Lua grows the block and may cross a 32 KB page.
-    let aset: Vec<AsetEntry> = archive
-        .aset
-        .iter()
-        .filter(|e| e.block_index() as usize == idx)
-        .map(|e| AsetEntry::new(e.asset_hash, e.secondary_ref, e.packed_block_ref, e.type_id))
-        .collect();
-
-    let tier = archive.indx.get(idx).map(|e| e.packed_field);
-    let rebuilt = block.serialize();
-    let patch = PatchBlock::from_decompressed(&rebuilt, path, aset, tier)?;
-
-    Ok(Some(patch))
-}
-
-/// Build the wardrobe's `scripts_vz` block using modkit's bundled base source.
-///
-/// This is what the WAD builder calls. Returns `Ok(None)` if no outfits were requested.
-pub fn wardrobe_block(
-    game_path: &str,
-    outfits: &[WardrobeOutfit],
-) -> Result<Option<PatchBlock>, String> {
-    build_wardrobe_block(game_path, outfits, INTERIOR_SOURCE)
-}
-
-/// Preview the Lua modkit would append — so a user (or a bug report) can see exactly what
-/// is being added to their game.
-#[tauri::command]
-pub fn preview_wardrobe_lua(outfits: Vec<WardrobeOutfit>) -> String {
-    wardrobe_lua(&outfits)
-}
-
-/// Sanity-check that `decompress_sges` is reachable (keeps the import honest in builds
-/// where `decompress_block` is the only path taken).
-#[allow(dead_code)]
-fn _unused(b: &[u8]) -> Result<Vec<u8>, String> {
-    decompress_sges(b)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn generated_lua_adds_deduped_and_lifts_the_gate() {
-        let src = wardrobe_lua(&[WardrobeOutfit {
-            hero: "mattias".into(),
-            model: "pmc_hum_mechanic".into(),
-            label: "Eva".into(),
-        }]);
-        // Uses the dedupe helper, not a bare table.insert (which duplicated base outfits).
-        assert!(src.contains("_modkitAddOutfit(\"mattias\""));
-        assert!(src.contains("local function _modkitAddOutfit"));
-        assert!(src.contains("if o.Model == tOutfit.Model then return end"));
-        assert!(src.contains("Model = \"pmc_hum_mechanic\""));
-        assert!(src.contains("function GetAvailableCostumes()"));
-    }
-
     /// `base_wardrobe_models` must find the outfits the bundled `wifpmcinterior` already
-    /// ships — those are the ones the picker badges and the generated Lua dedupes out. If it
-    /// found none, every base tier would look "new" and get duplicated again.
+    /// ships — those are the ones the picker badges.
     #[test]
     fn base_wardrobe_models_are_recovered() {
         let base = base_wardrobe_models();
@@ -485,39 +306,14 @@ mod tests {
         assert!(!base.contains("pmc_hum_fiona"));
     }
 
-    /// The generated Lua must actually compile — otherwise the whole build dies at the
-    /// last step with a message the user can do nothing about.
+    /// A hero the wardrobe has no list for is refused by name, before the game is read.
     #[test]
-    fn generated_lua_compiles_standalone() {
-        let src = format!(
-            "_tOutfits = {{ mattias = {{}}, chris = {{}}, jennifer = {{}} }}\n{}",
-            wardrobe_lua(&[
-                WardrobeOutfit {
-                    hero: "mattias".into(),
-                    model: "pmc_hum_mechanic".into(),
-                    label: "Eva".into(),
-                },
-                WardrobeOutfit {
-                    hero: "chris".into(),
-                    model: "pmc_hum_obama".into(),
-                    label: "Obama".into(),
-                },
-            ])
-        );
-        let bytes = mercs2_luac::compile(&src, "@test.lua").expect("must compile");
-        assert_eq!(&bytes[..4], b"\x1bLua");
-    }
-
-    /// A label with a quote in it must not break out of the Lua string.
-    #[test]
-    fn labels_are_escaped() {
-        let src = wardrobe_lua(&[WardrobeOutfit {
-            hero: "chris".into(),
-            model: "pmc_hum_chris".into(),
-            label: "He said \"hi\"".into(),
-        }]);
-        assert!(src.contains(r#"\"hi\""#), "quotes escaped: {src}");
-        let full = format!("_tOutfits = {{ chris = {{}} }}\n{src}");
-        mercs2_luac::compile(&full, "@t.lua").expect("escaped label still compiles");
+    fn an_unknown_hero_is_refused() {
+        let err = validate_outfits(
+            "/no/such/game",
+            &[WardrobeOutfit { hero: "eva".into(), model: "pmc_hum_eva".into(), label: "Eva".into() }],
+        )
+        .unwrap_err();
+        assert!(err.contains("Unknown character \"eva\""), "{err}");
     }
 }
