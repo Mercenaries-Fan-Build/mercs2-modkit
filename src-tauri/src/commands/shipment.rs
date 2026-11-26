@@ -84,7 +84,7 @@ use super::incompatibility::{self, IncompatibilityIndex, Notice, VersionBasis};
 use super::load_plan::{assert_same_plan, map_order, read_link_plan, LoadRequest, PlanExt, REQUEST_FILE};
 use super::placement::{self, StagedDataFile, StagedFile, StreamCopy};
 use super::proc::{run_streaming, NoWindow};
-use super::toolchain::{ensure_tool, installed_tool_path};
+use super::toolchain::ensure_tool;
 use crate::models::claim::ClaimGroup;
 use crate::models::origin::{Origin, MODKIT_WARDROBE_ID};
 
@@ -539,17 +539,17 @@ fn run_qm(
 }
 
 /// Write a throwaway qm Shipment expressing the wardrobe as `add_outfit` contributions with no model
-/// file — the "wear an existing in-game model" form. Routing the wardrobe through qm (instead of
-/// modkit's own compiled `scripts_vz` block) is what lets it reconcile with script-touching Shipments
-/// via `qm link` instead of clobbering, or being clobbered by, them.
+/// file — the "wear an existing in-game model" form. Every build's outfits go through qm this way:
+/// `qm link` generates each hero's outfit list and the restore map for the whole set, and reconciles
+/// them with every script-touching Shipment.
 ///
-/// Returns `Ok(None)` when there are no outfits. The dir is a `ShipmentRef` the caller folds into the
-/// set handed to [`shipment_groups`].
+/// `outfits` is not empty: a build with no outfits has no wardrobe Shipment. The dir is a
+/// `ShipmentRef` the caller folds into the set handed to [`shipment_groups`].
 pub fn synthesize_wardrobe_shipment(
     outfits: &[crate::commands::wardrobe::WardrobeOutfit],
-) -> Result<Option<ShipmentRef>, String> {
+) -> Result<ShipmentRef, String> {
     if outfits.is_empty() {
-        return Ok(None);
+        return Err("The wardrobe Shipment needs at least one outfit.".into());
     }
     let dir = work_dir("wardrobe-shipment")?;
 
@@ -581,7 +581,7 @@ pub fn synthesize_wardrobe_shipment(
     std::fs::write(dir.join("manifest.json"), json)
         .map_err(|e| format!("writing the wardrobe manifest: {e}"))?;
 
-    Ok(Some(ShipmentRef {
+    Ok(ShipmentRef {
         id: "shipment:modkit-wardrobe".into(),
         name: "Wardrobe".into(),
         path: dir.to_string_lossy().to_string(),
@@ -594,7 +594,7 @@ pub fn synthesize_wardrobe_shipment(
         origin: Origin::modkit(MODKIT_WARDROBE_ID),
         // Modkit writes it from the player's own wardrobe picks; nothing requires it.
         install_reason: InstallReason::User,
-    }))
+    })
 }
 
 /// Everything a `qm` run over the staged Shipments produced.
@@ -683,13 +683,11 @@ pub(crate) fn game_arg_for(game_path: &str) -> Result<std::ffi::OsString, String
     Ok(vz_wad.as_os_str().to_os_string())
 }
 
-/// The qm binary. Prefer an already-installed qm (this is called on a build, and we don't want to
-/// block a build on a download unless we must); `ensure_tool` otherwise fetches it.
+/// The qm binary, with the reference bundle beside it that [`resolve_corpus_bundle`] hands it. An
+/// installed qm is used as it is (this is called on a build, and a build is not held up by a
+/// download unless it must be); `ensure_tool` fetches a qm or a bundle that is missing.
 pub(crate) async fn qm_tool(window: Window) -> Result<PathBuf, String> {
-    match installed_tool_path("qm") {
-        Some(p) => Ok(p),
-        None => ensure_tool(window, "qm").await,
-    }
+    ensure_tool(window, "qm").await
 }
 
 /// The rows whose folder is not a directory on disk: qm's own test (`find_manifest`), so a row
