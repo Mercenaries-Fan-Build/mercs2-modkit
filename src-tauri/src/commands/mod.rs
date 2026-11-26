@@ -27,7 +27,7 @@
 //! it when editing a signature. (Commands taking `State` need `State<'_, T>` under it.)
 //!
 //! Pure in-memory commands — `build_conflict_graph`, `validate_manifest`,
-//! `preview_wardrobe_lua`, `is_game_running` — are deliberately left blocking: there is
+//! `is_game_running` — are deliberately left blocking: there is
 //! nothing to wait on, and the thread hop would cost more than the work.
 
 pub mod asset_catalog;
