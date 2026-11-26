@@ -2629,7 +2629,6 @@ dependencies = [
  "loadprobe",
  "md-5",
  "mercs2_formats",
- "mercs2_luac",
  "mercs2_mesh",
  "rayon",
  "reqwest 0.12.28",
@@ -2671,15 +2670,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mercs2_luac"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40ed7037824e8c562fb196cfb354d377304541fa9c361d3d6ab12e0aab0fff3e"
-dependencies = [
- "cc",
 ]
 
 [[package]]

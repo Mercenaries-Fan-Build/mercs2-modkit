@@ -1961,7 +1961,9 @@ export const useProjectStore = defineStore("project", {
 
     /**
      * Dry-run the load order: what applies, what gets overridden, what can't be
-     * resolved. Throws the structured conflict list if two mods overlap partially.
+     * resolved. Throws the structured conflict list if two mods overlap partially, and
+     * the message as a string if a mod can't be read. Shipments and wardrobe outfits are
+     * built by qm at assemble, so they are not part of the dry run.
      */
     async previewConflicts(): Promise<BuildResult> {
       return await invoke<BuildResult>("preview_conflicts", {

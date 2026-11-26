@@ -181,7 +181,14 @@ const TOOLS: &[Tool] = &[
         // the game's 32-bit process — so unlike an injected tool it has no reason
         // to match the game's bitness, and there is no i686 asset to install.
         sixty_four_bit_only: true,
-        companion: None,
+        // Linking Lua needs the decompiled corpus, `workshop_data/lua`, which Modkit hands qm
+        // from beside its binary (`shipment::resolve_corpus_bundle`). Without it every build
+        // that links fails, and Modkit links on every Shipment and wardrobe build. The Workshop
+        // names the same bundle, and one unpacked copy serves both.
+        companion: Some(Companion {
+            asset: "mercs2-workshop-data.zip",
+            dir: "workshop_data",
+        }),
         experimental: false,
         // `qm build` needs the game, but `qm lint` deliberately does not — it is
         // manifest text plus the mod folder, no install and no network, which is
@@ -847,9 +854,9 @@ pub async fn install_tools(window: Window, names: Vec<String>) -> Result<Toolset
     Ok(status_from(&root, &new_state, Some((&tag, &assets))))
 }
 
-/// Remove one installed tool, with its companion bundle. The engine-backed apps
-/// are the large ones, so being able to drop them without wiping the whole
-/// toolset matters.
+/// Remove one installed tool, with its companion bundle unless another installed
+/// tool needs the same one. The engine-backed apps are the large ones, so being
+/// able to drop them without wiping the whole toolset matters.
 #[tauri::command(async)]
 pub fn uninstall_tool(name: String) -> Result<ToolsetStatus, String> {
     uninstall_tool_at(&toolset_root()?, &name)
@@ -868,8 +875,15 @@ fn uninstall_tool_at(root: &Path, name: &str) -> Result<ToolsetStatus, String> {
                 format!("Could not remove {name}: {e}. Close it first if it is running.")
             })?;
         }
+        // A bundle goes with the last installed tool that needs it.
         if let Some(c) = tool(name).and_then(|t| t.companion.as_ref()) {
-            clear_dir(&version_dir.join(c.dir))?;
+            let still_needed = TOOLS.iter().any(|t| {
+                state.tools.contains_key(t.name)
+                    && t.companion.as_ref().is_some_and(|other| other.dir == c.dir)
+            });
+            if !still_needed {
+                clear_dir(&version_dir.join(c.dir))?;
+            }
         }
         write_state(root, &state)?;
     }
@@ -1394,15 +1408,26 @@ pub fn installed_tool_path(name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Install a single tool on demand and return its path — the "just make it work"
-/// entry point for modkit features that shell out.
+/// [`installed_tool_path`] for a tool whose companion bundle, when it needs one, is completely
+/// unpacked beside it. A binary without its bundle is a half-finished install, and is `None`.
+fn ready_tool_path(name: &str) -> Option<PathBuf> {
+    let path = installed_tool_path(name)?;
+    match tool(name).and_then(|t| t.companion.as_ref()) {
+        Some(c) if !companion_complete(path.parent()?, c) => None,
+        _ => Some(path),
+    }
+}
+
+/// Install a single tool on demand, with its companion bundle, and return its path — the "just
+/// make it work" entry point for modkit features that shell out. A tool that is installed without
+/// its bundle is installed again, which unpacks the bundle.
 pub async fn ensure_tool(window: Window, name: &str) -> Result<PathBuf, String> {
-    if let Some(p) = installed_tool_path(name) {
+    if let Some(p) = ready_tool_path(name) {
         return Ok(p);
     }
     let label = tool(name).map(|t| t.label).unwrap_or(name);
     install_tools(window, vec![name.to_string()]).await?;
-    installed_tool_path(name).ok_or_else(|| format!("{label} did not install"))
+    ready_tool_path(name).ok_or_else(|| format!("{label} did not install"))
 }
 
 #[cfg(test)]
@@ -1548,7 +1573,7 @@ mod tests {
         assert!(!binary_is_published(&exe, Some(&digest)).unwrap(), "altered");
     }
 
-    /// Removing a tool removes its data bundle with it.
+    /// Removing the only tool that needs a data bundle removes the bundle with it.
     #[test]
     fn removing_the_workshop_removes_its_bundle() {
         let Some(_) = asset_name(tool("mercs2_workshop").unwrap()) else {
@@ -1568,22 +1593,51 @@ mod tests {
         assert!(!version_dir.join("workshop_data").exists());
     }
 
-    /// The engine-backed apps are the ones the release matrix builds 64-bit only.
-    /// The Workshop is the one tool with reference data it must find beside its
-    /// exe; installing the bare binary is a broken install.
+    /// The Workshop reads its reference data from beside its exe, and Modkit hands
+    /// qm the Lua corpus from the same bundle beside qm's; installing either bare
+    /// binary is a broken install. No other tool has a bundle.
     #[test]
-    fn the_workshop_declares_its_data_bundle() {
-        let c = tool("mercs2_workshop")
-            .unwrap()
-            .companion
-            .as_ref()
-            .expect("the Workshop needs workshop_data/ next to its exe");
-        assert_eq!(c.asset, "mercs2-workshop-data.zip");
-        assert_eq!(c.dir, "workshop_data");
+    fn the_workshop_and_qm_declare_the_data_bundle() {
+        for name in ["mercs2_workshop", "qm"] {
+            let c = tool(name)
+                .unwrap()
+                .companion
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} needs workshop_data/ next to its exe"));
+            assert_eq!(c.asset, "mercs2-workshop-data.zip");
+            assert_eq!(c.dir, "workshop_data");
+        }
         assert!(TOOLS
             .iter()
-            .filter(|t| t.name != "mercs2_workshop")
+            .filter(|t| t.name != "mercs2_workshop" && t.name != "qm")
             .all(|t| t.companion.is_none()));
+    }
+
+    /// The Workshop and qm share one unpacked bundle, so removing one of them
+    /// keeps it for the other, and removing the second removes it.
+    #[test]
+    fn a_shared_bundle_stays_until_its_last_tool_is_removed() {
+        let (Some(_), Some(_)) =
+            (asset_name(tool("mercs2_workshop").unwrap()), asset_name(tool("qm").unwrap()))
+        else {
+            return; // 32-bit host: neither is available
+        };
+        let root = tempfile::tempdir().unwrap();
+        let version_dir = root.path().join("v1");
+        std::fs::create_dir_all(version_dir.join("workshop_data")).unwrap();
+        let mut tools = BTreeMap::new();
+        for name in ["mercs2_workshop", "qm"] {
+            let local = local_name(tool(name).unwrap());
+            std::fs::write(version_dir.join(&local), b"exe").unwrap();
+            tools.insert(name.to_string(), local);
+        }
+        write_state(root.path(), &InstalledState { tag: "v1".into(), tools }).unwrap();
+
+        uninstall_tool_at(root.path(), "mercs2_workshop").unwrap();
+        assert!(version_dir.join("workshop_data").exists(), "qm still needs the bundle");
+
+        uninstall_tool_at(root.path(), "qm").unwrap();
+        assert!(!version_dir.join("workshop_data").exists());
     }
 
     /// A Workshop install whose bundle never unpacked must not read as complete —

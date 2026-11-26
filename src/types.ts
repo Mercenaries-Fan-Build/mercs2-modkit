@@ -197,7 +197,7 @@ export interface BuildResult {
   /** sha256 of the bytes written — the only trustworthy way to verify a deploy. */
   sha256: string;
   outcomes: GroupOutcome[];
-  /** Non-fatal advisories from assembly (e.g. a Shipment's scripts override the wardrobe's). */
+  /** Non-fatal advisories from assembly (e.g. two Shipments placing a file at one destination). */
   warnings?: string[];
   /** Files that will be dropped into the game folder on install. An `.asi` is native code. */
   placed_files?: StagedFile[];
@@ -260,7 +260,7 @@ export interface WardrobeModel {
   triangles: number;
   /** One of the three player characters, or one of their unlock tiers. */
   is_hero: boolean;
-  /** Already in the base game's wardrobe — adding it changes nothing (it's deduped out). */
+  /** Already in the base game's wardrobe. Added anyway, it gets a second row of its own. */
   in_base_wardrobe: boolean;
 }
 

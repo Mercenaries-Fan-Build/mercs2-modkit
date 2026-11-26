@@ -64,7 +64,7 @@ use commands::prebuilt::inspect_patch_wad;
 use commands::texture_swap::{
     export_texture, inspect_texture, list_textures, texture_details, texture_previews,
 };
-use commands::wardrobe::{list_wardrobe_models, preview_wardrobe_lua};
+use commands::wardrobe::list_wardrobe_models;
 
 /// Route a `mercs2-modkit://` URL to the frontend — a `ship` or `install` link, or the reason it is
 /// neither: buffer it (for a cold start whose webview isn't listening yet) and emit a live event
@@ -185,7 +185,6 @@ pub fn run() {
             lost_displaced_backups,
             forget_displaced_backups,
             list_wardrobe_models,
-            preview_wardrobe_lua,
             human_skins,
             inspect_patch_wad,
             inspect_texture,
