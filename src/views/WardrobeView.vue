@@ -31,8 +31,8 @@ watch(gameInfo, (g) => {
 /** Show only skins built like the currently-selected hero. */
 const matchHero = ref(false);
 /**
- * Hide skins already in the base wardrobe. On by default: adding one does nothing (it's
- * deduped out), so what you actually want are the skins the game doesn't already give you.
+ * Hide skins already in the base wardrobe. On by default: what you actually want are the
+ * skins the game doesn't already give you.
  */
 const hideExisting = ref(true);
 
@@ -188,7 +188,7 @@ function add(m: WardrobeModel) {
                 <span
                   v-if="m.in_base_wardrobe"
                   class="stamp ml-1 text-zinc-600"
-                  title="Already in your wardrobe — adding it changes nothing."
+                  title="Already in your wardrobe."
                 >
                   already available
                 </span>
