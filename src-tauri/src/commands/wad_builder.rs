@@ -46,12 +46,13 @@ pub struct BuildOptions {
     /// `data/` dir and clobbered the live `vz-patch.wad` with no copy kept.)
     #[serde(default)]
     pub output_dir: Option<String>,
-    /// Game install root — required only when `wardrobe` is non-empty (we read the user's
-    /// own `vz.wad` to source the scripts block and to validate every model name).
+    /// Game install root — required when the build has wardrobe outfits, Shipments or texture
+    /// swaps, each of which reads the user's own `vz.wad`.
     #[serde(default)]
     pub game_path: Option<String>,
-    /// Extra wardrobe outfits to add. modkit owns the `scripts_vz` block and unions every
-    /// mod's Lua into it, so several wardrobe mods compose instead of clobbering.
+    /// Extra wardrobe outfits to add. Every build hands them to `qm` as one synthesized Shipment
+    /// of `add_outfit` contributions, so `qm link` generates the wardrobe for the whole load
+    /// order — see [`crate::commands::wardrobe`].
     #[serde(default)]
     pub wardrobe: Vec<WardrobeOutfit>,
     /// Pre-built community `vz-patch.wad`s, **in load order** (later wins), merged in
@@ -84,8 +85,8 @@ pub struct BuildResult {
     pub sha256: String,
     /// Per-group report: what applied, what was cleanly overridden.
     pub outcomes: Vec<GroupOutcome>,
-    /// Non-fatal advisories surfaced to the user (e.g. a Shipment's scripts and the wardrobe both
-    /// rebuild `scripts_vz`, so only one can win — see the known limitation in `shipment`).
+    /// Non-fatal advisories surfaced to the user (e.g. two Shipments placing a file at the same
+    /// destination, where the later one wins).
     #[serde(default)]
     pub warnings: Vec<String>,
     /// Loose files a Shipment places into the **game folder** — `native_hook` plugins and
@@ -115,6 +116,18 @@ pub struct BuildResult {
 #[derive(Debug, Serialize)]
 pub struct BuildConflicts {
     pub conflicts: Vec<ClaimConflict>,
+}
+
+/// Why [`preview_conflicts`] refused a load order. The frontend receives a plain string for
+/// `Load` and `{ conflicts: [...] }` for `Conflicts`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum PreviewRefusal {
+    /// A mod could not be read: a missing asset file, or no game folder for a texture swap. It
+    /// is not an overlap between two mods, so it is the message alone.
+    Load(String),
+    /// Two mods claim overlapping-but-different sets of assets.
+    Conflicts(BuildConflicts),
 }
 
 /// Map a detected type name to its ASET `type_id` (0 = singleton/unknown).
@@ -186,13 +199,12 @@ fn groups_for(mods: &[LoadedMod]) -> Result<Vec<ClaimGroup>, String> {
 /// Returns `Err` with a human-readable message on an unresolvable load order (a proper
 /// partial overlap between two mods) — the frontend surfaces the structured conflicts via
 /// [`preview_conflicts`].
-/// Every claim group for a build, in load order (later wins).
+/// Every claim group modkit builds in memory, in load order (later wins): imported pre-built
+/// WADs → asset mods → texture swaps.
 ///
-/// Order is: imported pre-built WADs → asset mods → the wardrobe. The wardrobe goes last
-/// deliberately: it rebuilds `scripts_vz` from the user's own `vz.wad`, so if a pre-built
-/// mod also ships that block, modkit's version — which actually contains the user's
-/// outfits — is the one that survives.
-fn all_groups(options: &BuildOptions, include_wardrobe: bool) -> Result<Vec<ClaimGroup>, String> {
+/// Shipments and the wardrobe are not here. Both are built by `qm`, which [`assemble`] runs and
+/// whose groups it appends after these.
+fn in_memory_groups(options: &BuildOptions) -> Result<Vec<ClaimGroup>, String> {
     let mut groups = Vec::new();
 
     for w in &options.prebuilt {
@@ -218,23 +230,12 @@ fn all_groups(options: &BuildOptions, include_wardrobe: bool) -> Result<Vec<Clai
         }
     }
 
-    if include_wardrobe && !options.wardrobe.is_empty() {
-        let game_path = options
-            .game_path
-            .as_deref()
-            .ok_or("Set the game folder before building wardrobe outfits.")?;
-        if let Some(block) = wardrobe::wardrobe_block(game_path, &options.wardrobe)? {
-            groups.push(ClaimGroup {
-                mod_id: "modkit-wardrobe".into(),
-                mod_name: "Wardrobe".into(),
-                label: format!("Wardrobe ({} outfit(s))", options.wardrobe.len()),
-                atomic: true,
-                blocks: vec![block],
-            });
-        }
-    }
-
     Ok(groups)
+}
+
+/// Whether a build runs `qm`: it has Shipments, or wardrobe outfits, which are built as one.
+fn needs_qm(options: &BuildOptions) -> bool {
+    !options.shipments.is_empty() || !options.wardrobe.is_empty()
 }
 
 #[tauri::command]
@@ -242,16 +243,17 @@ pub async fn assemble_patch_wad(
     window: Window,
     options: BuildOptions,
 ) -> Result<BuildResult, String> {
-    let qm = if options.shipments.is_empty() {
-        None
-    } else {
+    let qm = if needs_qm(&options) {
         Some(shipment::qm_tool(window.clone()).await?)
+    } else {
+        None
     };
     assemble(options, qm.as_deref(), &|line| shipment::emit_qm_line(&window, line)).await
 }
 
 /// [`assemble_patch_wad`] with the qm binary already resolved. `qm` is required exactly when the
-/// build has Shipments; every line it prints is handed to `on_qm_line` while it runs.
+/// build has Shipments or wardrobe outfits ([`needs_qm`]); every line it prints is handed to
+/// `on_qm_line` while it runs.
 pub async fn assemble(
     options: BuildOptions,
     qm: Option<&Path>,
@@ -259,39 +261,39 @@ pub async fn assemble(
 ) -> Result<BuildResult, String> {
     let mut warnings: Vec<String> = Vec::new();
 
-    // When any Shipment is staged, qm runs — so route the WARDROBE through qm too (as add_outfit
-    // contributions with no model file), and drop modkit's own compiled scripts_vz block. That way
-    // `qm link` reconciles wardrobe outfits AND every Shipment's Lua into ONE scripts_vz, instead of
-    // one clobbering the other. With no Shipments, qm never runs and the wardrobe keeps its proven
-    // standalone Rust path.
-    let route_wardrobe_through_qm = !options.shipments.is_empty() && !options.wardrobe.is_empty();
-
-    let mut groups = all_groups(&options, !route_wardrobe_through_qm)?;
+    let mut groups = in_memory_groups(&options)?;
     let mut placed_files: Vec<StagedFile> = Vec::new();
     let mut merged: Vec<MergedWad> = Vec::new();
     let mut stream_copies: Vec<StreamCopy> = Vec::new();
     let mut data_files: Vec<StagedDataFile> = Vec::new();
     let mut incompatibilities: Option<IncompatibilityCheck> = None;
 
-    if !options.shipments.is_empty() {
+    if needs_qm(&options) {
+        let qm = qm.ok_or("This build has Shipments or wardrobe outfits and no qm binary was given.")?;
         let game_path = options
             .game_path
             .as_deref()
-            .ok_or("Set the game folder before building Shipments.")?;
+            .ok_or("Set the game folder before building Shipments or wardrobe outfits.")?;
+        // The wardrobe is a Shipment like any other, last in the set: `qm link` generates each
+        // hero's outfit list and the restore map from every Shipment's outfits together.
         let mut ship_refs = options.shipments.clone();
-        if route_wardrobe_through_qm {
-            if let Some(wr) = shipment::synthesize_wardrobe_shipment(&options.wardrobe)? {
-                ship_refs.push(wr);
-            }
+        if !options.wardrobe.is_empty() {
+            wardrobe::validate_outfits(game_path, &options.wardrobe)?;
+            ship_refs.push(shipment::synthesize_wardrobe_shipment(&options.wardrobe)?);
         }
-        let list = mercsink::load_incompatibility_list().await?;
-        let qm = qm.ok_or("This build has Shipments and no qm binary was given.")?;
+        // mercs.ink's list is about the Shipments the user staged. The wardrobe's Shipment is
+        // written here and is on no list, so a build of outfits alone does not consult it.
+        let list = if options.shipments.is_empty() {
+            None
+        } else {
+            Some(mercsink::load_incompatibility_list().await?)
+        };
         let built = shipment::shipment_groups(
             qm,
             &ship_refs,
             game_path,
             None,
-            list.index.as_ref(),
+            list.as_ref().and_then(|l| l.index.as_ref()),
             on_qm_line,
         )
         .await?;
@@ -301,7 +303,8 @@ pub async fn assemble(
         merged = merge_patches(&built.language_patches, &built.shell_patch, &built.level_patches)?;
         stream_copies = built.stream_copies;
         data_files = built.data_files;
-        incompatibilities = Some(IncompatibilityCheck { list: list.state, notices: built.notices });
+        incompatibilities =
+            list.map(|list| IncompatibilityCheck { list: list.state, notices: built.notices });
     }
 
     let resolved = claim::resolve(&groups);
@@ -582,33 +585,16 @@ fn stage_placements(
 /// Dry-run the load order: report what would apply, what would be overridden, and any
 /// unresolvable overlap — without writing anything.
 #[tauri::command(async)]
-pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConflicts> {
-    // Preview covers the in-memory kinds (including the wardrobe on its Rust path); Shipment groups
-    // and any qm-routed wardrobe need qm and are resolved at assemble.
-    let groups = match all_groups(&options, true) {
-        Ok(g) => g,
-        // A missing asset file or an invalid outfit isn't a claim conflict; report it as
-        // one entry so the UI shows the message rather than failing silently.
-        Err(e) => {
-            return Err(BuildConflicts {
-                conflicts: vec![ClaimConflict {
-                    mod_id: String::new(),
-                    label: "load error".into(),
-                    other_mod_id: String::new(),
-                    other_label: String::new(),
-                    shared: vec![],
-                    only_mine: vec![],
-                    message: e,
-                }],
-            })
-        }
-    };
+pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, PreviewRefusal> {
+    // Preview covers the kinds modkit builds in memory. Shipments and the wardrobe are built by
+    // qm, which preview does not run, so their groups are resolved at assemble.
+    let groups = in_memory_groups(&options).map_err(PreviewRefusal::Load)?;
 
     let resolved = claim::resolve(&groups);
     if !resolved.conflicts.is_empty() {
-        return Err(BuildConflicts {
+        return Err(PreviewRefusal::Conflicts(BuildConflicts {
             conflicts: resolved.conflicts,
-        });
+        }));
     }
 
     Ok(BuildResult {
@@ -632,6 +618,72 @@ pub fn preview_conflicts(options: BuildOptions) -> Result<BuildResult, BuildConf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The options the frontend sends, with everything empty except `set`'s keys.
+    fn options(set: serde_json::Value) -> BuildOptions {
+        let mut all = serde_json::json!({
+            "mods": [],
+            "output_dir": null,
+            "game_path": null,
+            "wardrobe": [],
+            "prebuilt": [],
+            "textures": [],
+            "shipments": [],
+        });
+        for (key, value) in set.as_object().unwrap() {
+            all[key] = value.clone();
+        }
+        serde_json::from_value(all).unwrap()
+    }
+
+    fn one_outfit() -> serde_json::Value {
+        serde_json::json!({
+            "wardrobe": [{ "hero": "mattias", "model": "pmc_hum_mechanic", "label": "Mechanic" }],
+        })
+    }
+
+    /// Preview builds nothing for the wardrobe: outfits are qm's to build, at assemble. So outfits
+    /// with no game folder set, which no outfit can be built from, give preview nothing to refuse.
+    #[test]
+    fn preview_leaves_the_wardrobe_to_qm() {
+        let result = preview_conflicts(options(one_outfit())).expect("nothing in memory to refuse");
+        assert_eq!(result.block_count, 0);
+        assert!(result.outcomes.is_empty());
+    }
+
+    /// A build with outfits and no Shipments still needs qm, and is refused without one: there is
+    /// no other way to build an outfit.
+    #[test]
+    fn outfits_alone_need_qm() {
+        assert!(needs_qm(&options(one_outfit())));
+        assert!(!needs_qm(&options(serde_json::json!({}))));
+
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let err = rt
+            .block_on(assemble(options(one_outfit()), None, &|_| {}))
+            .expect_err("no qm was given");
+        assert!(err.contains("no qm binary was given"), "{err}");
+    }
+
+    /// A mod that cannot be read is not an overlap between two mods: preview refuses with the
+    /// message alone, which reaches the frontend as a string and not as a conflict list.
+    #[test]
+    fn a_load_error_is_not_reported_as_a_conflict() {
+        let refusal = preview_conflicts(options(serde_json::json!({
+            "textures": [{ "name": "al_hum_boss_ub", "image_path": "/no/such.png" }],
+        })))
+        .expect_err("a texture swap needs the game folder");
+        assert_eq!(
+            serde_json::to_value(&refusal).unwrap(),
+            serde_json::json!("Set the game folder before swapping textures."),
+        );
+
+        let conflicts = PreviewRefusal::Conflicts(BuildConflicts { conflicts: Vec::new() });
+        assert_eq!(
+            serde_json::to_value(&conflicts).unwrap(),
+            serde_json::json!({ "conflicts": [] }),
+        );
+    }
 
     /// Write the output directory a `qm build` of a `native_hook` Shipment leaves behind: the
     /// plugin under the tree it will be copied into, and the record describing it.
